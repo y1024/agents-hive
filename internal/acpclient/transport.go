@@ -1,9 +1,15 @@
 package acpclient
 
 import (
+	"bufio"
+	"bytes"
+	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"os/exec"
+	"strings"
+	"sync"
 
 	"github.com/chef-guo/agents-hive/internal/errs"
 )
@@ -56,25 +62,116 @@ func newStdioTransport(command string, args []string) (*Transport, error) {
 	}, nil
 }
 
-// newHTTPTransport 建立 HTTP 长连接传输（使用 io.Pipe 模拟双向通道）
-// HTTP 模式通过 HTTP POST 发送 JSON-RPC 请求，通过 SSE 接收响应。
-// 当前实现使用 io.Pipe 包装，将 HTTP 请求/响应映射为 reader/writer。
+type httpACPWriter struct {
+	ctx     context.Context
+	client  *http.Client
+	url     string
+	headers map[string]string
+	out     *io.PipeWriter
+	wg      *sync.WaitGroup
+}
+
+func (w *httpACPWriter) Write(p []byte) (int, error) {
+	payload := append([]byte(nil), p...)
+	w.wg.Add(1)
+	go func() {
+		defer w.wg.Done()
+		if err := w.post(payload); err != nil {
+			_ = w.out.CloseWithError(err)
+		}
+	}()
+	return len(p), nil
+}
+
+func (w *httpACPWriter) post(payload []byte) error {
+	req, err := http.NewRequestWithContext(w.ctx, http.MethodPost, w.url, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, application/x-ndjson, text/event-stream")
+	for key, value := range w.headers {
+		if strings.TrimSpace(key) != "" {
+			req.Header.Set(key, value)
+		}
+	}
+
+	resp, err := w.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("http acp transport status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return copyHTTPACPResponse(w.out, resp)
+}
+
+func copyHTTPACPResponse(out io.Writer, resp *http.Response) error {
+	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+	if strings.Contains(contentType, "text/event-stream") {
+		return copySSEResponse(out, resp.Body)
+	}
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		if _, err := out.Write(append(append([]byte(nil), line...), '\n')); err != nil {
+			return err
+		}
+	}
+	return scanner.Err()
+}
+
+func copySSEResponse(out io.Writer, body io.Reader) error {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "" || data == "[DONE]" {
+			continue
+		}
+		if _, err := io.WriteString(out, data+"\n"); err != nil {
+			return err
+		}
+	}
+	return scanner.Err()
+}
+
+// newHTTPTransport 通过 HTTP POST 发送 line-delimited JSON-RPC，并把 JSON/SSE 响应桥回 SDK reader。
 func newHTTPTransport(url string, headers map[string]string) (*Transport, error) {
 	if url == "" {
 		return nil, errs.New(errs.CodeACPClientConnFailed, "http 模式需要指定 url")
 	}
 
-	// HTTP 传输使用 io.Pipe 将 ACP JSON-RPC 消息桥接到 HTTP POST
-	// 写端：将 JSON-RPC 消息通过 HTTP POST 发送到远程 Agent
-	// 读端：从远程 Agent 的 HTTP 响应中读取 JSON-RPC 消息
+	ctx, cancel := context.WithCancel(context.Background())
 	pr, pw := io.Pipe()
+	var wg sync.WaitGroup
+	writer := &httpACPWriter{
+		ctx:     ctx,
+		client:  http.DefaultClient,
+		url:     url,
+		headers: headers,
+		out:     pw,
+		wg:      &wg,
+	}
 
 	return &Transport{
 		Reader: pr,
-		Writer: pw,
+		Writer: writer,
 		closer: func() error {
-			pw.Close()
-			pr.Close()
+			cancel()
+			wg.Wait()
+			_ = pw.Close()
+			_ = pr.Close()
 			return nil
 		},
 	}, nil

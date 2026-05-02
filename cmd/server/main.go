@@ -133,6 +133,12 @@ func main() {
 	if sc.QualityCandidateStore != nil {
 		server.SetQualityCandidateStore(sc.QualityCandidateStore)
 	}
+	if sc.OptimizationStore != nil {
+		server.SetOptimizationSuggestionStore(sc.OptimizationStore)
+	}
+	if sc.MemStore != nil {
+		server.SetMemoryStore(sc.MemStore)
+	}
 
 	// 注册微信协议热重载回调
 	if sc.ChannelRouter != nil {

@@ -16,11 +16,12 @@ const defaultDelegationTimeout = 30 * time.Minute
 
 // spawnAgentInput 是 spawn_agent 工具的输入参数
 type spawnAgentInput struct {
-	Name         string   `json:"name"`            // Agent 名称
-	Description  string   `json:"description"`     // 能力描述
-	SystemPrompt string   `json:"system_prompt"`   // 系统提示词
-	Tools        []string `json:"tools,omitempty"` // 工具白名单
-	Instruction  string   `json:"instruction"`     // 创建后立即执行的任务指令
+	Name         string   `json:"name"`                // Agent 名称
+	Description  string   `json:"description"`         // 能力描述
+	SystemPrompt string   `json:"system_prompt"`       // 系统提示词
+	Tools        []string `json:"tools,omitempty"`     // 工具白名单
+	Instruction  string   `json:"instruction"`         // 创建后立即执行的任务指令
+	MaxTurns     int      `json:"max_turns,omitempty"` // 最大迭代轮次
 }
 
 // AgentSpawner 接口定义创建和销毁动态 Agent 的能力
@@ -58,6 +59,10 @@ func registerSpawnAgent(host *mcphost.Host, executor TaskExecutor, spawner Agent
 			"instruction": map[string]any{
 				"type":        "string",
 				"description": "创建 Agent 后立即执行的任务指令",
+			},
+			"max_turns": map[string]any{
+				"type":        "integer",
+				"description": "子 Agent 最大迭代轮次，空或 <=0 使用系统默认值",
 			},
 		},
 		"required": []string{"name", "system_prompt", "instruction"},
@@ -109,6 +114,8 @@ func registerSpawnAgent(host *mcphost.Host, executor TaskExecutor, spawner Agent
 				Description:  params.Description,
 				SystemPrompt: params.SystemPrompt,
 				Tools:        params.Tools,
+				MaxTurns:     params.MaxTurns,
+				SpawnDepth:   toolCtx.Depth + 1,
 			}
 
 			agent, err := spawner.CreateAgent(ctx, spec)
@@ -123,6 +130,7 @@ func registerSpawnAgent(host *mcphost.Host, executor TaskExecutor, spawner Agent
 						AgentType:     "subagent",
 						ToolWhitelist: append([]string(nil), params.Tools...),
 						SpawnDepth:    toolCtx.Depth + 1,
+						MaxTurns:      params.MaxTurns,
 						Status:        "failed",
 						FailureType:   "runtime",
 						Error:         err.Error(),
@@ -160,6 +168,7 @@ func registerSpawnAgent(host *mcphost.Host, executor TaskExecutor, spawner Agent
 						AgentType:     "subagent",
 						ToolWhitelist: append([]string(nil), params.Tools...),
 						SpawnDepth:    toolCtx.Depth + 1,
+						MaxTurns:      params.MaxTurns,
 						Status:        "failed",
 						FailureType:   "runtime",
 						Error:         err.Error(),
@@ -181,6 +190,7 @@ func registerSpawnAgent(host *mcphost.Host, executor TaskExecutor, spawner Agent
 					AgentType:     "subagent",
 					ToolWhitelist: append([]string(nil), params.Tools...),
 					SpawnDepth:    toolCtx.Depth + 1,
+					MaxTurns:      params.MaxTurns,
 					Status:        "completed",
 				})
 			}

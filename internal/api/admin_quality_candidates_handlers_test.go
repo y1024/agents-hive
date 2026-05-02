@@ -385,6 +385,49 @@ func TestAdminQualityCandidates_ExportPromotedCase(t *testing.T) {
 	require.True(t, got.Required)
 }
 
+func TestAdminQualityWorkbenchClusters_GroupsCandidates(t *testing.T) {
+	store := newFakeQualityCandidateStore()
+	rec1 := agentquality.CandidateFromFailure("session-1", "定位权限", "session-1:step-1", agentquality.Event{
+		Route:        "web",
+		FailureType:  agentquality.FailureTool,
+		FinalStatus:  agentquality.StatusFail,
+		Prompt:       agentquality.PromptRef{Key: "system/base"},
+		ToolDecision: agentquality.ToolDecision{Actual: "grep"},
+		Attributes:   map[string]any{"error": "failed on /tmp/a/session-123"},
+	})
+	rec2 := agentquality.CandidateFromFailure("session-2", "定位权限", "session-2:step-1", agentquality.Event{
+		Route:        "web",
+		FailureType:  agentquality.FailureTool,
+		FinalStatus:  agentquality.StatusFail,
+		Prompt:       agentquality.PromptRef{Key: "system/base"},
+		ToolDecision: agentquality.ToolDecision{Actual: "grep"},
+		Attributes:   map[string]any{"error": "failed on /tmp/b/session-456"},
+	})
+	store.records[rec1.ID+"-1"] = rec1
+	rec2.ID = rec1.ID + "-2"
+	store.records[rec2.ID] = rec2
+	srv := newQualityCandidateTestServer(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/quality-workbench/clusters", nil)
+	rec := httptest.NewRecorder()
+	srv.handleAdminQualityWorkbenchClusters(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var got struct {
+		Clusters []struct {
+			Size         int      `json:"size"`
+			OpenCount    int      `json:"open_count"`
+			CandidateIDs []string `json:"candidate_ids"`
+		} `json:"clusters"`
+		Total int `json:"total"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
+	require.Equal(t, 1, got.Total)
+	require.Len(t, got.Clusters, 1)
+	require.Equal(t, 2, got.Clusters[0].Size)
+	require.Equal(t, 2, got.Clusters[0].OpenCount)
+}
+
 func newQualityCandidateTestServer(store qualityCandidateStore) *Server {
 	return &Server{
 		logger:                zap.NewNop(),

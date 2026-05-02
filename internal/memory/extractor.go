@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -28,9 +29,13 @@ func NewExtractor(store MemoryStore, logger *zap.Logger) *Extractor {
 // summaryText 是 compaction 生成的 LLM 摘要
 // sessionID 是来源会话
 // userID 是记忆归属用户
-func (e *Extractor) ExtractFromSummary(ctx context.Context, summaryText string, sessionID string, userID string) error {
+func (e *Extractor) ExtractFromSummary(ctx context.Context, summaryText string, sessionID string, userID string, opts ...ExtractorOption) error {
 	if summaryText == "" {
 		return nil
+	}
+	cfg := defaultExtractorConfig()
+	for _, opt := range opts {
+		opt(&cfg)
 	}
 
 	facts := e.parseFacts(summaryText)
@@ -55,6 +60,16 @@ func (e *Extractor) ExtractFromSummary(ctx context.Context, summaryText string, 
 			Tags:      autoTags,
 			SessionID: sessionID,
 			UserID:    userID,
+			Metadata: EncodeGovernance(nil, Governance{
+				Source:         "compaction_summary",
+				Confidence:     cfg.confidence,
+				ExpiresAt:      cfg.expiresAt(),
+				ExtractedBy:    cfg.extractorVersion,
+				SourceMessage:  cfg.sourceMessage,
+				SourceUserID:   userID,
+				SourceTenantID: cfg.sourceTenantID,
+				RunID:          cfg.runID,
+			}),
 		}
 
 		if _, err := e.store.Save(ctx, record); err != nil {
@@ -73,6 +88,82 @@ func (e *Extractor) ExtractFromSummary(ctx context.Context, summaryText string, 
 		zap.String("session_id", sessionID),
 	)
 	return nil
+}
+
+type extractorConfig struct {
+	extractorVersion string
+	sourceMessage    string
+	sourceTenantID   string
+	runID            string
+	retentionDays    int
+	confidence       float64
+	now              func() time.Time
+}
+
+type ExtractorOption func(*extractorConfig)
+
+func defaultExtractorConfig() extractorConfig {
+	return extractorConfig{
+		extractorVersion: "v1",
+		retentionDays:    90,
+		confidence:       0.8,
+		now:              time.Now,
+	}
+}
+
+func (c extractorConfig) expiresAt() time.Time {
+	if c.retentionDays <= 0 {
+		return time.Time{}
+	}
+	return c.now().Add(time.Duration(c.retentionDays) * 24 * time.Hour)
+}
+
+func WithExtractorVersion(v string) ExtractorOption {
+	return func(cfg *extractorConfig) {
+		if strings.TrimSpace(v) != "" {
+			cfg.extractorVersion = strings.TrimSpace(v)
+		}
+	}
+}
+
+func WithSourceMessage(id string) ExtractorOption {
+	return func(cfg *extractorConfig) {
+		cfg.sourceMessage = strings.TrimSpace(id)
+	}
+}
+
+func WithSourceTenantID(id string) ExtractorOption {
+	return func(cfg *extractorConfig) {
+		cfg.sourceTenantID = strings.TrimSpace(id)
+	}
+}
+
+func WithRunID(id string) ExtractorOption {
+	return func(cfg *extractorConfig) {
+		cfg.runID = strings.TrimSpace(id)
+	}
+}
+
+func WithRetentionDays(days int) ExtractorOption {
+	return func(cfg *extractorConfig) {
+		cfg.retentionDays = days
+	}
+}
+
+func WithConfidence(confidence float64) ExtractorOption {
+	return func(cfg *extractorConfig) {
+		if confidence > 0 && confidence <= 1 {
+			cfg.confidence = confidence
+		}
+	}
+}
+
+func WithNow(now func() time.Time) ExtractorOption {
+	return func(cfg *extractorConfig) {
+		if now != nil {
+			cfg.now = now
+		}
+	}
 }
 
 // extractedFact 提取出的事实

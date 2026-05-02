@@ -125,6 +125,7 @@ export interface AgentInfo {
   name: string;
   description: string;
   skills?: string[];
+  dynamic?: boolean;
 }
 
 export interface SkillMetadata {
@@ -149,7 +150,14 @@ export interface AdminSkillDetail extends AdminSkillItem {
   content: string;
 }
 
-export type QualityCandidateStatus = 'new' | 'reviewing' | 'approved' | 'rejected' | 'promoted';
+export type QualityCandidateStatus =
+  | 'new'
+  | 'reviewing'
+  | 'approved'
+  | 'rejected'
+  | 'promoted'
+  | 'promoted_verified'
+  | 'promoted_regressed';
 
 export interface QualityCandidateCase {
   id: string;
@@ -195,11 +203,14 @@ export interface QualityCandidateRecord {
   created_by?: string;
   reviewed_by?: string;
   promoted_case_id?: string;
+  cluster_id?: string;
+  verify_result?: string;
   optimization_suggestions?: QualityOptimizationSuggestion[];
   golden_case?: QualityCandidateCase;
   created_at: string;
   updated_at: string;
   reviewed_at?: string;
+  last_verified_at?: string;
 }
 
 export interface QualityCandidateUpdateRequest {
@@ -221,6 +232,486 @@ export interface QualityCandidatesResponse {
   total: number;
   page: number;
   size: number;
+}
+
+export interface QualityWorkbenchCluster {
+  id: string;
+  key: string;
+  rule_id: string;
+  failure_type: string;
+  tool?: string;
+  skill?: string;
+  prompt_key?: string;
+  error_digest: string;
+  sample_message: string;
+  first_seen: string;
+  last_seen: string;
+  size: number;
+  open_count: number;
+  candidate_ids: string[];
+}
+
+export interface QualityWorkbenchClustersResponse {
+  clusters?: QualityWorkbenchCluster[];
+  items?: QualityWorkbenchCluster[];
+  total: number;
+  page?: number;
+  size?: number;
+}
+
+export interface GroupingMatch {
+  failure_type?: string;
+  tool?: string;
+  skill?: string;
+  prompt_key?: string;
+  error_substring?: string;
+}
+
+export interface GroupingRule {
+  id: string;
+  name: string;
+  priority: number;
+  enabled: boolean;
+  match: GroupingMatch;
+  key_fields: string[];
+  digest_normalize: string[];
+  notes?: string;
+  created_by?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface GroupingRulePreview {
+  clusters: QualityWorkbenchCluster[];
+  rule_hits: Record<string, number>;
+}
+
+export interface GroupingRulesResponse {
+  items: GroupingRule[];
+  total: number;
+}
+
+export interface ReplayFanoutPlan {
+  total: number;
+  limit: number;
+  selected_ids: string[];
+  truncated: boolean;
+  remaining: number;
+  remaining_batches: string[][];
+}
+
+export interface CaseRunResult {
+  case_id: string;
+  passed: boolean;
+  reason?: string;
+}
+
+export interface VersionMatrixInput {
+  baseline_run_id?: string;
+  treatment_run_id?: string;
+  baseline: CaseRunResult[];
+  treatment: CaseRunResult[];
+}
+
+export interface CaseVersionDiff {
+  case_id: string;
+  baseline_present: boolean;
+  treatment_present: boolean;
+  baseline_passed: boolean;
+  treatment_passed: boolean;
+  baseline_reason?: string;
+  treatment_reason?: string;
+  regressed: boolean;
+  recovered: boolean;
+  new_failure: boolean;
+}
+
+export interface VersionDiff {
+  baseline_run_id?: string;
+  treatment_run_id?: string;
+  cases: Record<string, CaseVersionDiff>;
+  regressed_case_ids: string[];
+  recovered_case_ids: string[];
+  new_failure_case_ids: string[];
+}
+
+export type ReplayJobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+
+export interface ReplayJob {
+  id: string;
+  batch_id: string;
+  kind: string;
+  target_ids: string[];
+  status: ReplayJobStatus;
+  max_attempt: number;
+  attempt: number;
+  error?: string;
+  result?: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ReplayJobsResponse {
+  items: ReplayJob[];
+  total: number;
+  page?: number;
+  size?: number;
+}
+
+export type OptimizationRolloutStatus = 'applied' | 'rolled_back';
+
+export interface OptimizationRollout {
+  id: string;
+  suggestion_id: string;
+  target: OptimizationSuggestionTarget;
+  target_key: string;
+  previous_value: string;
+  previous_exists: boolean;
+  applied_value: string;
+  status: OptimizationRolloutStatus;
+  applied_by: string;
+  rolled_back_by?: string;
+  created_at: string;
+  updated_at: string;
+  rolled_back_at?: string;
+}
+
+export interface BatchEvalRun {
+  id: string;
+  batch_id: string;
+  kind: string;
+  status: string;
+  summary?: {
+    total: number;
+    passed: number;
+    failed: number;
+    unknown: number;
+    reasons?: string[];
+  };
+  diff?: Record<string, unknown>;
+  case_results?: CaseRunResult[];
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface BatchEvalRunsResponse {
+  items: BatchEvalRun[];
+  total: number;
+}
+
+export type QualityFailureType =
+  | 'none'
+  | 'prompt'
+  | 'tool'
+  | 'skill'
+  | 'context'
+  | 'model'
+  | 'permission'
+  | 'runtime'
+  | 'user_input';
+
+export interface PromptRef {
+  key?: string;
+  version?: string;
+  source?: string;
+  language?: string;
+}
+
+export type EvalDiffStatus = 'pending' | 'eval_diff_running' | 'eval_diff_done' | 'approved' | 'rejected';
+
+export interface EvalResult {
+  case_id: string;
+  passed: boolean;
+  cost_usd: number;
+  latency_ms: number;
+  failure_type?: QualityFailureType;
+  prompt?: PromptRef;
+  expected_tools?: string[];
+  actual_tool?: string;
+  expected_skills?: string[];
+  reason?: string;
+}
+
+export interface EvalRun {
+  id: string;
+  results: EvalResult[];
+  created_at?: string;
+}
+
+export interface EvalRunSummary {
+  case_count: number;
+  success_count: number;
+  success_rate: number;
+  average_cost_usd: number;
+  average_latency_ms: number;
+}
+
+export interface EvalCaseDiff {
+  case_id: string;
+  baseline_passed: boolean;
+  treatment_passed: boolean;
+  cost_delta_usd: number;
+  latency_delta_ms: number;
+  failure_type?: QualityFailureType;
+  prompt?: PromptRef;
+  expected_tools?: string[];
+  actual_tool?: string;
+  expected_skills?: string[];
+  reason?: string;
+}
+
+export interface EvalDiff {
+  id: string;
+  status: EvalDiffStatus;
+  baseline_run_id: string;
+  treatment_run_id: string;
+  baseline: EvalRunSummary;
+  treatment: EvalRunSummary;
+  success_rate_delta: number;
+  average_cost_delta_usd: number;
+  average_latency_delta_ms: number;
+  success_p_value: number;
+  case_diffs: EvalCaseDiff[];
+  created_at?: string;
+  updated_at?: string;
+  approved_by?: string;
+  rejected_by?: string;
+}
+
+export interface EvalDiffsResponse {
+  items: EvalDiff[];
+  total: number;
+  page?: number;
+  size?: number;
+}
+
+export interface ABReportResponse {
+  eval_diff_id: string;
+  markdown: string;
+}
+
+export interface QualityReport {
+  id: string;
+  week_start: string;
+  title: string;
+  summary?: Record<string, unknown>;
+  markdown: string;
+  created_at: string;
+}
+
+export interface QualityReportsResponse {
+  items: QualityReport[];
+  total: number;
+}
+
+export interface QualityDashboardSnapshot {
+  since?: string;
+  until?: string;
+  open_clusters: number;
+  open_candidates?: number;
+  candidate_status_counts?: Record<string, number>;
+  failure_type_counts?: Record<string, number>;
+  verify_result_counts?: Record<string, number>;
+  by_status?: Record<string, number>;
+  by_failure_type?: Record<string, number>;
+  by_verify_result?: Record<string, number>;
+}
+
+export interface QualityDashboardSeriesPoint {
+  date: string;
+  open_clusters: number;
+  open_candidates: number;
+  failures: number;
+}
+
+export interface MemoryGovernanceStats {
+  total: number;
+  missing_governance: number;
+  expired: number;
+  low_confidence: number;
+  cross_user_risk: number;
+  policy?: MemoryGovernancePolicy;
+  min_confidence?: number;
+  max_memories?: number;
+}
+
+export interface MemoryGovernancePolicy {
+  min_confidence?: number;
+  max_memories?: number;
+}
+
+export interface MemoryPruneResponse {
+  dry_run: boolean;
+  matched?: number;
+  deleted?: number;
+  delete_ids: number[];
+  reasons: Record<string, string>;
+}
+
+export type MemoryType = 'user' | 'project' | 'feedback' | 'reference';
+
+export interface MemoryRecord {
+  id: number;
+  user_id?: string;
+  type: MemoryType;
+  content: string;
+  tags?: string[];
+  session_id?: string;
+  metadata?: Record<string, unknown>;
+  score?: number;
+  created_at: string;
+  updated_at: string;
+  accessed_at: string;
+  access_count: number;
+}
+
+export interface MemoryExportDocument {
+  version: number;
+  user_id?: string;
+  exported_at?: string;
+  memories: MemoryRecord[];
+}
+
+export interface MemoryImportResponse {
+  imported: number;
+  ids: number[];
+}
+
+export type EmbeddingState = 'pending' | 'ready' | 'failed';
+
+export interface VectorSpaceMetadata {
+  name?: string;
+  embedding_state?: EmbeddingState;
+  migrated_at?: string;
+}
+
+export interface VectorSpaceMigrationUpdate {
+  memory_id: number;
+  record: MemoryRecord;
+}
+
+export interface VectorSpaceMigrationPlan {
+  dry_run: boolean;
+  scanned: number;
+  updates: VectorSpaceMigrationUpdate[];
+  resume_token?: string;
+  next_offset?: number;
+}
+
+export interface VectorSpaceMigrationResponse {
+  plan: VectorSpaceMigrationPlan;
+  applied: boolean;
+  updated: number;
+}
+
+export type EmbeddingBacklogStatus = 'pending' | 'claimed' | 'done' | 'failed';
+
+export interface EmbeddingBacklogStats {
+  total: number;
+  by_state: Record<EmbeddingBacklogStatus | string, number>;
+}
+
+export type OptimizationSuggestionStatus = 'pending' | 'approved' | 'rejected' | 'expired';
+export type OptimizationSuggestionTarget = 'prompt' | 'tool_description' | 'skill_content' | 'memory_governance';
+export type OptimizationSuggestionApplyStatus = 'unapplied' | 'applied' | 'apply_error' | 'not_applicable';
+
+export interface OptimizationReviewSuggestion {
+  id: string;
+  status: OptimizationSuggestionStatus;
+  target: OptimizationSuggestionTarget;
+  kind: QualityOptimizationSuggestionKind | string;
+  title: string;
+  rationale: string;
+  current_value?: string;
+  proposed_value: string;
+  diff_format: string;
+  source_candidate_id: string;
+  source_event?: Record<string, unknown>;
+  review_required: boolean;
+  created_by: string;
+  approved_by?: string;
+  approval_note?: string;
+  apply_status: OptimizationSuggestionApplyStatus;
+  applied_by?: string;
+  apply_error?: string;
+  created_at: string;
+  updated_at: string;
+  approved_at?: string;
+  applied_at?: string;
+  expires_at: string;
+}
+
+export interface OptimizationSuggestionsResponse {
+  suggestions?: OptimizationReviewSuggestion[];
+  items?: OptimizationReviewSuggestion[];
+  total: number;
+  page?: number;
+  size?: number;
+}
+
+export type OptimizationApprovalRole = 'admin' | 'engineer' | 'lead';
+export type OptimizationApprovalAction = 'approve' | 'reject';
+export type OptimizationApprovalSubjectType = 'eval_diff' | 'suggestion';
+
+export interface OptimizationApprovalRecord {
+  id: string;
+  subject_id: string;
+  subject_type: OptimizationApprovalSubjectType;
+  action: OptimizationApprovalAction;
+  reviewer: string;
+  reviewer_role: OptimizationApprovalRole;
+  note?: string;
+  created_at: string;
+}
+
+export interface OptimizationApprovalsResponse {
+  items: OptimizationApprovalRecord[];
+  total: number;
+}
+
+export type RollbackAlertStatus = 'open' | 'acknowledged';
+
+export interface RollbackAlert {
+  id: string;
+  status: RollbackAlertStatus;
+  eval_diff_id: string;
+  treatment_run_id: string;
+  reasons: string[];
+  success_rate_delta: number;
+  average_latency_delta_ms: number;
+  created_at: string;
+}
+
+export interface RollbackAlertThresholds {
+  min_success_rate_delta: number;
+  max_latency_delta_ms: number;
+}
+
+export interface RollbackAlertResponse {
+  alert: RollbackAlert;
+  triggered: boolean;
+}
+
+export interface RollbackAlertsResponse {
+  items: RollbackAlert[];
+  total: number;
+}
+
+export type RollbackTrigger = 'manual' | 'alert_ack';
+
+export interface RollbackRecord {
+  id: string;
+  suggestion_id: string;
+  alert_id?: string;
+  trigger: RollbackTrigger;
+  triggered_by: string;
+  created_at: string;
+  rollout: OptimizationRollout;
+}
+
+export interface RollbacksResponse {
+  items: RollbackRecord[];
+  total: number;
 }
 
 // 健康检查

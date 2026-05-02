@@ -1,15 +1,24 @@
 import {
-  type BundledLanguage,
-  type BundledTheme,
-  type HighlighterGeneric,
   type ThemedToken,
-  createHighlighter,
-} from 'shiki';
+  type HighlighterGeneric,
+  createBundledHighlighter,
+} from 'shiki/core';
 import { createJavaScriptRegexEngine } from 'shiki/engine/javascript';
+import { SHIKI_LANGUAGE_LOADERS, type LoadableShikiLanguage, type SupportedShikiLanguage } from './shikiLanguages';
 
 // 使用 JS regex engine 而非 WebAssembly oniguruma，避免依赖 CSP 的 'wasm-unsafe-eval' 指令。
 // 对高亮质量无影响；在大部分 TextMate 语法下完全兼容，且移除了整个 WASM 启动路径。
-const JS_ENGINE = createJavaScriptRegexEngine();
+const createHighlighter = createBundledHighlighter({
+  langs: SHIKI_LANGUAGE_LOADERS,
+  themes: {
+    'github-light': () => import('shiki/themes/github-light.mjs'),
+    'github-dark': () => import('shiki/themes/github-dark.mjs'),
+  },
+  engine: () => createJavaScriptRegexEngine(),
+});
+
+type ShikiTheme = 'github-light' | 'github-dark';
+type HighlightLanguage = LoadableShikiLanguage;
 
 export interface TokenizedCode {
   tokens: ThemedToken[][];
@@ -19,27 +28,26 @@ export interface TokenizedCode {
 
 const highlighterCache = new Map<
   string,
-  Promise<HighlighterGeneric<BundledLanguage, BundledTheme>>
+  Promise<HighlighterGeneric<LoadableShikiLanguage, ShikiTheme>>
 >();
 
 const tokensCache = new Map<string, TokenizedCode>();
 const subscribers = new Map<string, Set<(result: TokenizedCode) => void>>();
 
-const getTokensCacheKey = (code: string, language: BundledLanguage) => {
+const getTokensCacheKey = (code: string, language: SupportedShikiLanguage) => {
   const start = code.slice(0, 100);
   const end = code.length > 100 ? code.slice(-100) : '';
   return `${language}:${code.length}:${start}:${end}`;
 };
 
 const getHighlighter = (
-  language: BundledLanguage,
-): Promise<HighlighterGeneric<BundledLanguage, BundledTheme>> => {
+  language: HighlightLanguage,
+): Promise<HighlighterGeneric<LoadableShikiLanguage, ShikiTheme>> => {
   const cached = highlighterCache.get(language);
   if (cached) return cached;
   const p = createHighlighter({
     langs: [language],
     themes: ['github-light', 'github-dark'],
-    engine: JS_ENGINE,
   });
   highlighterCache.set(language, p);
   return p;
@@ -62,9 +70,13 @@ export const createRawTokens = (code: string): TokenizedCode => ({
 
 export const highlightCode = (
   code: string,
-  language: BundledLanguage,
+  language: SupportedShikiLanguage,
   callback?: (result: TokenizedCode) => void,
 ): TokenizedCode | null => {
+  if (language === 'text') {
+    return createRawTokens(code);
+  }
+
   const key = getTokensCacheKey(code, language);
   const cached = tokensCache.get(key);
   if (cached) return cached;

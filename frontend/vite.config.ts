@@ -57,10 +57,8 @@ export default defineConfig({
             if (id.includes('react') || id.includes('react-dom') || id.includes('react-router')) {
               return 'vendor-react'
             }
-            if (id.includes('katex')) {
-              return 'vendor-katex'
-            }
             if (
+              id.includes('rehype-katex') ||
               id.includes('rehype') ||
               id.includes('remark') ||
               id.includes('unified') ||
@@ -70,6 +68,9 @@ export default defineConfig({
               id.includes('vfile')
             ) {
               return 'vendor-markdown'
+            }
+            if (id.includes('/node_modules/katex/')) {
+              return 'vendor-katex'
             }
             if (id.includes('i18next')) {
               return 'vendor-i18n'

@@ -17,11 +17,15 @@ import (
 )
 
 type fakePromptClient struct {
-	resp acp.PromptResponse
-	err  error
+	resp     acp.PromptResponse
+	err      error
+	onPrompt func(context.Context, acp.PromptRequest)
 }
 
-func (f fakePromptClient) Prompt(context.Context, acp.PromptRequest) (acp.PromptResponse, error) {
+func (f fakePromptClient) Prompt(ctx context.Context, req acp.PromptRequest) (acp.PromptResponse, error) {
+	if f.onPrompt != nil {
+		f.onPrompt(ctx, req)
+	}
 	return f.resp, f.err
 }
 
@@ -111,4 +115,68 @@ func TestRemoteACPAgentRecordsPromptStopReason(t *testing.T) {
 			assert.Equal(t, tt.wantStopReason, events[0].StopReason)
 		})
 	}
+}
+
+func TestRemoteACPAgentAggregatesAssistantOutputFromSessionUpdates(t *testing.T) {
+	agent := NewRemoteACPAgentWithPromptClient(
+		RemoteAgentConfig{Name: "remote-1"},
+		fakePromptClient{},
+		"acp-remote",
+		zap.NewNop(),
+		nil,
+	)
+	agent.conn = fakePromptClient{
+		resp: acp.PromptResponse{StopReason: acp.StopReasonEndTurn},
+		onPrompt: func(_ context.Context, _ acp.PromptRequest) {
+			agent.handleSessionUpdate(acp.SessionNotification{
+				SessionId: "acp-remote",
+				Update: acp.SessionUpdate{AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{
+					Content: acp.TextBlock("hello "),
+				}},
+			})
+			agent.handleSessionUpdate(acp.SessionNotification{
+				SessionId: "acp-remote",
+				Update: acp.SessionUpdate{AgentMessageChunk: &acp.SessionUpdateAgentMessageChunk{
+					Content: acp.TextBlock("world"),
+				}},
+			})
+		},
+	}
+
+	resp := agent.handleTask(context.Background(), subagent.TaskRequest{
+		ID:      "task-1",
+		Payload: json.RawMessage(`{"instruction":"say hello"}`),
+	})
+
+	require.Equal(t, "completed", resp.Status)
+	var result map[string]string
+	require.NoError(t, json.Unmarshal(resp.Result, &result))
+	assert.Equal(t, "hello world", result["content"])
+	assert.Equal(t, "end_turn", result["stop_reason"])
+}
+
+func TestRemoteACPAgentAggregatesAssistantOutputFromPromptMeta(t *testing.T) {
+	agent := NewRemoteACPAgentWithPromptClient(
+		RemoteAgentConfig{Name: "remote-1"},
+		fakePromptClient{resp: acp.PromptResponse{
+			StopReason: acp.StopReasonEndTurn,
+			Meta: map[string]any{
+				"result": map[string]any{"content": "meta result"},
+			},
+		}},
+		"acp-remote",
+		zap.NewNop(),
+		nil,
+	)
+
+	resp := agent.handleTask(context.Background(), subagent.TaskRequest{
+		ID:      "task-1",
+		Payload: json.RawMessage(`{"instruction":"return meta"}`),
+	})
+
+	require.Equal(t, "completed", resp.Status)
+	var result map[string]string
+	require.NoError(t, json.Unmarshal(resp.Result, &result))
+	assert.Equal(t, "meta result", result["content"])
+	assert.Equal(t, "end_turn", result["stop_reason"])
 }

@@ -34,6 +34,44 @@ import type {
   QualityCandidateUpdateRequest,
   QualityCandidatesResponse,
   QualityCandidateRecord,
+  QualityWorkbenchClustersResponse,
+  GroupingRule,
+  GroupingRulePreview,
+  GroupingRulesResponse,
+  ReplayFanoutPlan,
+  VersionMatrixInput,
+  VersionDiff,
+  ReplayJobsResponse,
+  ReplayJob,
+  BatchEvalRun,
+  BatchEvalRunsResponse,
+  EvalRun,
+  EvalDiff,
+  EvalDiffsResponse,
+  ABReportResponse,
+  QualityReport,
+  QualityReportsResponse,
+  QualityDashboardSnapshot,
+  QualityDashboardSeriesPoint,
+  MemoryGovernanceStats,
+  MemoryPruneResponse,
+  MemoryExportDocument,
+  MemoryImportResponse,
+  VectorSpaceMigrationResponse,
+  EmbeddingBacklogStats,
+  OptimizationReviewSuggestion,
+  OptimizationSuggestionsResponse,
+  OptimizationSuggestionStatus,
+  OptimizationRollout,
+  OptimizationApprovalAction,
+  OptimizationApprovalRecord,
+  OptimizationApprovalRole,
+  OptimizationApprovalsResponse,
+  OptimizationApprovalSubjectType,
+  RollbackAlertResponse,
+  RollbackAlertThresholds,
+  RollbackAlertsResponse,
+  RollbacksResponse,
   PromptSmokeEvalRequest,
   PromptSmokeEvalResponse,
   UsageQualityCost,
@@ -133,6 +171,45 @@ export interface NodeClient {
   adminCreateQualityCandidate(body: QualityCandidateCreateRequest): Promise<QualityCandidateRecord>;
   adminUpdateQualityCandidate(id: string, body: QualityCandidateUpdateRequest): Promise<QualityCandidateRecord>;
   adminExportQualityCandidate(id: string): Promise<QualityCandidateRecord['golden_case']>;
+  adminListQualityWorkbenchClusters(filter?: { status?: QualityCandidateStatus | ''; route?: string; page?: number; size?: number }): Promise<QualityWorkbenchClustersResponse>;
+  adminPreviewGroupingRules(): Promise<GroupingRulePreview>;
+  adminListGroupingRules(): Promise<GroupingRulesResponse>;
+  adminUpsertGroupingRule(id: string, rule: GroupingRule): Promise<GroupingRule>;
+  adminDeleteGroupingRule(id: string): Promise<void>;
+  adminPlanReplayFanout(body: { target_ids: string[]; limit?: number }): Promise<ReplayFanoutPlan>;
+  adminCompareVersionMatrix(body: VersionMatrixInput): Promise<VersionDiff>;
+  adminCreateReplayJobs(body: { kind: string; target_ids: string[]; max_attempt?: number }): Promise<{ batch_id: string; jobs: ReplayJob[] }>;
+  adminListReplayJobs(filter?: { batch_id?: string; status?: string; page?: number; size?: number }): Promise<ReplayJobsResponse>;
+  adminCancelReplayJob(id: string): Promise<ReplayJob>;
+  adminRunReplayJob(id: string): Promise<ReplayJob>;
+  adminCreateBatchEval(body: { mode: string; since?: string; baseline_run_id?: string; cases_dir?: string }): Promise<BatchEvalRun>;
+  adminListBatchEvals(): Promise<BatchEvalRunsResponse>;
+  adminListQualityReports(): Promise<QualityReportsResponse>;
+  adminGenerateQualityReport(weekStart: string): Promise<QualityReport>;
+  adminGetQualityDashboardSnapshot(filter?: { since?: string; until?: string }): Promise<QualityDashboardSnapshot>;
+  adminGetQualityDashboardSeries(filter?: { since?: string; until?: string }): Promise<{ items: QualityDashboardSeriesPoint[] }>;
+  adminGetMemoryGovernance(limit?: number): Promise<MemoryGovernanceStats>;
+  adminPruneMemoryGovernance(options?: { dryRun?: boolean; minConfidence?: number; maxMemories?: number; limit?: number }): Promise<MemoryPruneResponse>;
+  adminExportMemory(options?: { userId?: string; user_id?: string; limit?: number }): Promise<MemoryExportDocument>;
+  adminImportMemory(body: { user_id?: string; reset_ids?: boolean; document: MemoryExportDocument | unknown }): Promise<MemoryImportResponse>;
+  adminPlanVectorSpaceMigration(body: { target_space?: string; batch_size?: number; resume_token?: string; offset?: number; dry_run?: boolean; apply?: boolean; limit?: number; user_id?: string }): Promise<VectorSpaceMigrationResponse>;
+  adminGetEmbeddingBacklogStats(): Promise<EmbeddingBacklogStats>;
+  adminGenerateOptimizationSuggestions(candidateId: string): Promise<{ suggestions: OptimizationReviewSuggestion[] }>;
+  adminListOptimizationSuggestions(filter?: { status?: OptimizationSuggestionStatus | ''; target?: string; sourceCandidateId?: string; page?: number; size?: number }): Promise<OptimizationSuggestionsResponse>;
+  adminApproveOptimizationSuggestion(id: string, note?: string): Promise<OptimizationReviewSuggestion>;
+  adminRejectOptimizationSuggestion(id: string, note?: string): Promise<OptimizationReviewSuggestion>;
+  adminApplyOptimizationSuggestion(id: string): Promise<OptimizationReviewSuggestion>;
+  adminRollbackOptimizationSuggestion(id: string): Promise<OptimizationRollout>;
+  adminComputeEvalDiff(body: { baseline: EvalRun; treatment: EvalRun }): Promise<EvalDiff>;
+  adminListEvalDiffs(): Promise<EvalDiffsResponse>;
+  adminGetEvalDiff(id: string): Promise<EvalDiff>;
+  adminGenerateEvalDiffSuggestions(evalDiff: EvalDiff): Promise<{ suggestions: OptimizationReviewSuggestion[] }>;
+  adminGetABReport(evalDiffId: string): Promise<ABReportResponse>;
+  adminListOptimizationApprovals(filter?: { subjectId?: string; subject_id?: string }): Promise<OptimizationApprovalsResponse>;
+  adminCreateOptimizationApproval(body: { subject_id: string; subject_type: OptimizationApprovalSubjectType; action: OptimizationApprovalAction; reviewer_role: OptimizationApprovalRole; note?: string }): Promise<OptimizationApprovalRecord>;
+  adminEvaluateRollbackAlert(body: { eval_diff: EvalDiff; thresholds: RollbackAlertThresholds }): Promise<RollbackAlertResponse>;
+  adminListRollbackAlerts(): Promise<RollbackAlertsResponse>;
+  adminListRollbacks(): Promise<RollbacksResponse>;
 }
 
 // 本地节点客户端 - 直接调用 /api/v1/*
@@ -475,5 +552,201 @@ export class LocalNodeClient implements NodeClient {
 
   adminExportQualityCandidate(id: string): Promise<QualityCandidateRecord['golden_case']> {
     return this.client.get(`/api/v1/admin/quality/candidates/${encodeURIComponent(id)}/golden-case`);
+  }
+
+  adminListQualityWorkbenchClusters(filter: { status?: QualityCandidateStatus | ''; route?: string; page?: number; size?: number } = {}): Promise<QualityWorkbenchClustersResponse> {
+    const params = new URLSearchParams({
+      page: String(filter.page ?? 1),
+      size: String(filter.size ?? 50),
+    });
+    if (filter.status) params.set('status', filter.status);
+    if (filter.route) params.set('route', filter.route);
+    return this.client.get(`/api/v1/admin/quality-workbench/clusters?${params}`);
+  }
+
+  adminPreviewGroupingRules(): Promise<GroupingRulePreview> {
+    return this.client.post('/api/v1/admin/quality-workbench/grouping-rules/preview');
+  }
+
+  adminListGroupingRules(): Promise<GroupingRulesResponse> {
+    return this.client.get('/api/v1/admin/quality-workbench/grouping-rules');
+  }
+
+  adminUpsertGroupingRule(id: string, rule: GroupingRule): Promise<GroupingRule> {
+    return this.client.put(`/api/v1/admin/quality-workbench/grouping-rules/${encodeURIComponent(id)}`, rule);
+  }
+
+  adminDeleteGroupingRule(id: string): Promise<void> {
+    return this.client.delete(`/api/v1/admin/quality-workbench/grouping-rules/${encodeURIComponent(id)}`);
+  }
+
+  adminPlanReplayFanout(body: { target_ids: string[]; limit?: number }): Promise<ReplayFanoutPlan> {
+    return this.client.post('/api/v1/admin/quality-workbench/replays/fanout', body);
+  }
+
+  adminCompareVersionMatrix(body: VersionMatrixInput): Promise<VersionDiff> {
+    return this.client.post('/api/v1/admin/quality-workbench/version-diff', body);
+  }
+
+  adminCreateReplayJobs(body: { kind: string; target_ids: string[]; max_attempt?: number }): Promise<{ batch_id: string; jobs: ReplayJob[] }> {
+    return this.client.post('/api/v1/admin/quality-workbench/replays', body);
+  }
+
+  adminListReplayJobs(filter: { batch_id?: string; status?: string; page?: number; size?: number } = {}): Promise<ReplayJobsResponse> {
+    const params = new URLSearchParams({
+      page: String(filter.page ?? 1),
+      size: String(filter.size ?? 50),
+    });
+    if (filter.batch_id) params.set('batch_id', filter.batch_id);
+    if (filter.status) params.set('status', filter.status);
+    return this.client.get(`/api/v1/admin/quality-workbench/replays?${params}`);
+  }
+
+  adminCancelReplayJob(id: string): Promise<ReplayJob> {
+    return this.client.post(`/api/v1/admin/quality-workbench/replays/${encodeURIComponent(id)}/cancel`);
+  }
+
+  adminRunReplayJob(id: string): Promise<ReplayJob> {
+    return this.client.post(`/api/v1/admin/quality-workbench/replays/${encodeURIComponent(id)}/run`);
+  }
+
+  adminCreateBatchEval(body: { mode: string; since?: string; baseline_run_id?: string; cases_dir?: string }): Promise<BatchEvalRun> {
+    return this.client.post('/api/v1/admin/quality-workbench/batch-evals', body);
+  }
+
+  adminListBatchEvals(): Promise<BatchEvalRunsResponse> {
+    return this.client.get('/api/v1/admin/quality-workbench/batch-evals');
+  }
+
+  adminListQualityReports(): Promise<QualityReportsResponse> {
+    return this.client.get('/api/v1/admin/quality-workbench/reports');
+  }
+
+  adminGenerateQualityReport(weekStart: string): Promise<QualityReport> {
+    return this.client.post('/api/v1/admin/quality-workbench/reports/generate', { week_start: weekStart });
+  }
+
+  adminGetQualityDashboardSnapshot(filter: { since?: string; until?: string } = {}): Promise<QualityDashboardSnapshot> {
+    const params = new URLSearchParams();
+    if (filter.since) params.set('since', filter.since);
+    if (filter.until) params.set('until', filter.until);
+    return this.client.get(`/api/v1/admin/quality-workbench/dashboard/snapshot?${params}`);
+  }
+
+  adminGetQualityDashboardSeries(filter: { since?: string; until?: string } = {}): Promise<{ items: QualityDashboardSeriesPoint[] }> {
+    const params = new URLSearchParams();
+    if (filter.since) params.set('since', filter.since);
+    if (filter.until) params.set('until', filter.until);
+    return this.client.get(`/api/v1/admin/quality-workbench/dashboard/series?${params}`);
+  }
+
+  adminGetMemoryGovernance(limit = 1000): Promise<MemoryGovernanceStats> {
+    return this.client.get(`/api/v1/admin/memory/governance?limit=${limit}`);
+  }
+
+  adminPruneMemoryGovernance(options: { dryRun?: boolean; minConfidence?: number; maxMemories?: number; limit?: number } = {}): Promise<MemoryPruneResponse> {
+    const params = new URLSearchParams({
+      dry_run: String(options.dryRun !== false),
+      limit: String(options.limit ?? 1000),
+    });
+    if (options.minConfidence != null) params.set('min_confidence', String(options.minConfidence));
+    if (options.maxMemories != null) params.set('max_memories', String(options.maxMemories));
+    return this.client.post(`/api/v1/admin/memory/prune?${params}`);
+  }
+
+  adminExportMemory(options: { userId?: string; user_id?: string; limit?: number } = {}): Promise<MemoryExportDocument> {
+    const params = new URLSearchParams();
+    const userID = options.user_id ?? options.userId;
+    if (userID) params.set('user_id', userID);
+    if (options.limit != null) params.set('limit', String(options.limit));
+    const query = params.toString();
+    return this.client.get(`/api/v1/admin/memory/export${query ? `?${query}` : ''}`);
+  }
+
+  adminImportMemory(body: { user_id?: string; reset_ids?: boolean; document: MemoryExportDocument | unknown }): Promise<MemoryImportResponse> {
+    return this.client.post('/api/v1/admin/memory/import', body);
+  }
+
+  adminPlanVectorSpaceMigration(body: { target_space?: string; batch_size?: number; resume_token?: string; offset?: number; dry_run?: boolean; apply?: boolean; limit?: number; user_id?: string }): Promise<VectorSpaceMigrationResponse> {
+    return this.client.post('/api/v1/admin/memory/vector-space/plan', body);
+  }
+
+  adminGetEmbeddingBacklogStats(): Promise<EmbeddingBacklogStats> {
+    return this.client.get('/api/v1/admin/memory/backlog/stats');
+  }
+
+  adminGenerateOptimizationSuggestions(candidateId: string): Promise<{ suggestions: OptimizationReviewSuggestion[] }> {
+    return this.client.post('/api/v1/admin/optimization/suggestions', { candidate_id: candidateId });
+  }
+
+  adminListOptimizationSuggestions(filter: { status?: OptimizationSuggestionStatus | ''; target?: string; sourceCandidateId?: string; page?: number; size?: number } = {}): Promise<OptimizationSuggestionsResponse> {
+    const params = new URLSearchParams({
+      page: String(filter.page ?? 1),
+      size: String(filter.size ?? 50),
+    });
+    if (filter.status) params.set('status', filter.status);
+    if (filter.target) params.set('target', filter.target);
+    if (filter.sourceCandidateId) params.set('source_candidate_id', filter.sourceCandidateId);
+    return this.client.get(`/api/v1/admin/optimization/suggestions?${params}`);
+  }
+
+  adminApproveOptimizationSuggestion(id: string, note = ''): Promise<OptimizationReviewSuggestion> {
+    return this.client.post(`/api/v1/admin/optimization/suggestions/${encodeURIComponent(id)}/approve`, { note });
+  }
+
+  adminRejectOptimizationSuggestion(id: string, note = ''): Promise<OptimizationReviewSuggestion> {
+    return this.client.post(`/api/v1/admin/optimization/suggestions/${encodeURIComponent(id)}/reject`, { note });
+  }
+
+  adminApplyOptimizationSuggestion(id: string): Promise<OptimizationReviewSuggestion> {
+    return this.client.post(`/api/v1/admin/optimization/suggestions/${encodeURIComponent(id)}/apply`);
+  }
+
+  adminRollbackOptimizationSuggestion(id: string): Promise<OptimizationRollout> {
+    return this.client.post(`/api/v1/admin/optimization/suggestions/${encodeURIComponent(id)}/rollback`);
+  }
+
+  adminComputeEvalDiff(body: { baseline: EvalRun; treatment: EvalRun }): Promise<EvalDiff> {
+    return this.client.post('/api/v1/admin/optimization/eval-diffs', body);
+  }
+
+  adminListEvalDiffs(): Promise<EvalDiffsResponse> {
+    return this.client.get('/api/v1/admin/optimization/eval-diffs');
+  }
+
+  adminGetEvalDiff(id: string): Promise<EvalDiff> {
+    return this.client.get(`/api/v1/admin/optimization/eval-diffs/${encodeURIComponent(id)}`);
+  }
+
+  adminGenerateEvalDiffSuggestions(evalDiff: EvalDiff): Promise<{ suggestions: OptimizationReviewSuggestion[] }> {
+    return this.client.post('/api/v1/admin/optimization/eval-diffs/suggestions', { eval_diff: evalDiff });
+  }
+
+  adminGetABReport(evalDiffId: string): Promise<ABReportResponse> {
+    return this.client.post(`/api/v1/admin/optimization/eval-diffs/${encodeURIComponent(evalDiffId)}/report`);
+  }
+
+  adminListOptimizationApprovals(filter: { subjectId?: string; subject_id?: string } = {}): Promise<OptimizationApprovalsResponse> {
+    const params = new URLSearchParams();
+    const subjectID = filter.subject_id ?? filter.subjectId;
+    if (subjectID) params.set('subject_id', subjectID);
+    const query = params.toString();
+    return this.client.get(`/api/v1/admin/optimization/approvals${query ? `?${query}` : ''}`);
+  }
+
+  adminCreateOptimizationApproval(body: { subject_id: string; subject_type: OptimizationApprovalSubjectType; action: OptimizationApprovalAction; reviewer_role: OptimizationApprovalRole; note?: string }): Promise<OptimizationApprovalRecord> {
+    return this.client.post('/api/v1/admin/optimization/approvals', body);
+  }
+
+  adminEvaluateRollbackAlert(body: { eval_diff: EvalDiff; thresholds: RollbackAlertThresholds }): Promise<RollbackAlertResponse> {
+    return this.client.post('/api/v1/admin/optimization/rollback-alerts/evaluate', body);
+  }
+
+  adminListRollbackAlerts(): Promise<RollbackAlertsResponse> {
+    return this.client.get('/api/v1/admin/optimization/rollback-alerts');
+  }
+
+  adminListRollbacks(): Promise<RollbacksResponse> {
+    return this.client.get('/api/v1/admin/optimization/rollbacks');
   }
 }

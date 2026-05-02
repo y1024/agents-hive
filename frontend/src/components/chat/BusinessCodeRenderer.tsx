@@ -2,7 +2,6 @@ import { useState, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import type { CustomRendererProps } from 'streamdown';
-import type { BundledLanguage } from 'shiki';
 import { CodeBlock } from '@/components/ai-elements/code-block';
 import {
   ChevronRight, ChevronDown,
@@ -178,9 +177,8 @@ export function BusinessCodeRenderer({ code, language }: CustomRendererProps) {
     );
   }
 
-  const safeLang = (lang || 'text') as BundledLanguage;
   const body = (
-    <CodeBlock code={code} language={safeLang} className={wrapClass}>
+    <CodeBlock code={code} language={lang || 'text'} className={wrapClass}>
       {actionBar}
     </CodeBlock>
   );

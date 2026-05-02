@@ -133,15 +133,15 @@ func (s *PGCandidateStore) insertCandidate(ctx context.Context, rec CandidateRec
 		var out CandidateRecord
 		row := s.pool.QueryRow(ctx, `
 INSERT INTO agentquality_candidates
-	(id, status, route, session_id, replay_ref, input, case_json, failure_type, risk, fingerprint, source_event, suggestions_json, created_by, created_at, updated_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+	(id, status, route, session_id, replay_ref, input, case_json, failure_type, risk, fingerprint, source_event, suggestions_json, created_by, cluster_id, verify_result, created_at, updated_at, last_verified_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 ON CONFLICT (fingerprint) WHERE status IN ('new', 'reviewing', 'approved')
 DO UPDATE SET updated_at = agentquality_candidates.updated_at
 RETURNING id, status, route, session_id, replay_ref, input, case_json, failure_type, risk, fingerprint, source_event,
-	suggestions_json, review_note, created_by, reviewed_by, promoted_case_id, created_at, updated_at, reviewed_at`,
+	suggestions_json, review_note, created_by, reviewed_by, promoted_case_id, cluster_id, verify_result, created_at, updated_at, reviewed_at, last_verified_at`,
 			current.ID, current.Status, current.Route, current.SessionID, current.ReplayRef, current.Input,
 			mustJSON(current.Case), current.FailureType, current.Risk, current.Fingerprint, mustJSON(current.SourceEvent),
-			mustJSON(current.Suggestions), current.CreatedBy, current.CreatedAt, current.UpdatedAt,
+			mustJSON(current.Suggestions), current.CreatedBy, current.ClusterID, mustJSONRaw(current.VerifyResult), current.CreatedAt, current.UpdatedAt, current.LastVerifiedAt,
 		)
 		err := scanCandidate(row, &out)
 		if err == nil {
@@ -217,7 +217,7 @@ func candidateWhere(filter CandidateFilter) (string, []any) {
 }
 
 const candidateSelectSQL = `SELECT id, status, route, session_id, replay_ref, input, case_json, failure_type, risk, fingerprint, source_event,
-	suggestions_json, review_note, created_by, reviewed_by, promoted_case_id, created_at, updated_at, reviewed_at
+	suggestions_json, review_note, created_by, reviewed_by, promoted_case_id, cluster_id, verify_result, created_at, updated_at, reviewed_at, last_verified_at
 FROM agentquality_candidates`
 
 type candidateScanner interface {
@@ -243,9 +243,12 @@ func scanCandidate(row candidateScanner, rec *CandidateRecord) error {
 		&rec.CreatedBy,
 		&rec.ReviewedBy,
 		&rec.PromotedCaseID,
+		&rec.ClusterID,
+		&rec.VerifyResult,
 		&rec.CreatedAt,
 		&rec.UpdatedAt,
 		&rec.ReviewedAt,
+		&rec.LastVerifiedAt,
 	); err != nil {
 		return err
 	}
@@ -288,6 +291,13 @@ func scanCandidateRows(rows pgx.Rows) ([]CandidateRecord, error) {
 func mustJSON(v any) []byte {
 	b, _ := json.Marshal(v)
 	return b
+}
+
+func mustJSONRaw(v string) []byte {
+	if strings.TrimSpace(v) == "" {
+		return []byte("{}")
+	}
+	return []byte(v)
 }
 
 func isDuplicatePrimaryKey(err error) bool {

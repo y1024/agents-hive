@@ -30,7 +30,7 @@ func SetupEmbedding(
 	vecLoader func(ctx context.Context, vecIdx *VecIndex) (int, error),
 	cfg EmbeddingSetupConfig,
 	logger *zap.Logger,
-) (*HybridSearcher, error) {
+) (*HybridSearcher, EmbeddingProvider, VectorStore, error) {
 	embedder := NewOpenAIEmbedder(cfg.BaseURL, cfg.APIKey, cfg.EmbeddingModel, cfg.Provider, logger)
 
 	// 如果未提供外部 VectorStore，创建内存实现并加载历史数据
@@ -59,5 +59,5 @@ func SetupEmbedding(
 		zap.Int("index_size", indexSize),
 	)
 
-	return hybrid, nil
+	return hybrid, embedder, vecStore, nil
 }

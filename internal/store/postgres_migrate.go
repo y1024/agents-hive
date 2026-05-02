@@ -340,9 +340,12 @@ CREATE TABLE IF NOT EXISTS agentquality_candidates (
 	created_by       TEXT NOT NULL DEFAULT '',
 	reviewed_by      TEXT NOT NULL DEFAULT '',
 	promoted_case_id TEXT NOT NULL DEFAULT '',
+	cluster_id       TEXT NOT NULL DEFAULT '',
+	verify_result    JSONB NOT NULL DEFAULT '{}',
 	created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 	updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-	reviewed_at      TIMESTAMPTZ
+	reviewed_at      TIMESTAMPTZ,
+	last_verified_at TIMESTAMPTZ
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agentquality_candidates_fingerprint
@@ -353,6 +356,220 @@ CREATE INDEX IF NOT EXISTS idx_agentquality_candidates_status_created
 CREATE INDEX IF NOT EXISTS idx_agentquality_candidates_session
 	ON agentquality_candidates(session_id, created_at DESC)
 	WHERE session_id != '';
+CREATE INDEX IF NOT EXISTS idx_agentquality_candidates_cluster
+	ON agentquality_candidates(cluster_id, created_at DESC)
+	WHERE cluster_id != '';
+
+-- Agent Quality 自动优化建议表。建议只做人工审批记录，不自动改生产 prompt/tool/skill。
+CREATE TABLE IF NOT EXISTS agentquality_optimization_suggestions (
+	id                  TEXT PRIMARY KEY,
+	status              TEXT NOT NULL DEFAULT 'pending',
+	target              TEXT NOT NULL DEFAULT '',
+	kind                TEXT NOT NULL DEFAULT '',
+	title               TEXT NOT NULL DEFAULT '',
+	rationale           TEXT NOT NULL DEFAULT '',
+	current_value       TEXT NOT NULL DEFAULT '',
+	proposed_value      TEXT NOT NULL DEFAULT '',
+	diff_format         TEXT NOT NULL DEFAULT 'text',
+	source_candidate_id TEXT NOT NULL DEFAULT '',
+	source_eval_diff_id TEXT NOT NULL DEFAULT '',
+	source_event        JSONB NOT NULL DEFAULT '{}',
+	review_required     BOOLEAN NOT NULL DEFAULT TRUE,
+	created_by          TEXT NOT NULL DEFAULT '',
+	approved_by         TEXT NOT NULL DEFAULT '',
+	approval_note       TEXT NOT NULL DEFAULT '',
+	apply_status        TEXT NOT NULL DEFAULT 'unapplied',
+	applied_by          TEXT NOT NULL DEFAULT '',
+	apply_error         TEXT NOT NULL DEFAULT '',
+	created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	approved_at         TIMESTAMPTZ,
+	applied_at          TIMESTAMPTZ,
+	expires_at          TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_agentquality_opt_suggestions_status_created
+	ON agentquality_optimization_suggestions(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agentquality_opt_suggestions_source_candidate
+	ON agentquality_optimization_suggestions(source_candidate_id, created_at DESC)
+	WHERE source_candidate_id != '';
+CREATE INDEX IF NOT EXISTS idx_agentquality_opt_suggestions_source_eval_diff
+	ON agentquality_optimization_suggestions(source_eval_diff_id, created_at DESC)
+	WHERE source_eval_diff_id != '';
+CREATE INDEX IF NOT EXISTS idx_agentquality_opt_suggestions_target
+	ON agentquality_optimization_suggestions(target, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS optimization_eval_diffs (
+	id                       TEXT PRIMARY KEY,
+	status                   TEXT NOT NULL DEFAULT '',
+	baseline_run_id          TEXT NOT NULL DEFAULT '',
+	treatment_run_id         TEXT NOT NULL DEFAULT '',
+	success_rate_delta       DOUBLE PRECISION NOT NULL DEFAULT 0,
+	average_cost_delta_usd   DOUBLE PRECISION NOT NULL DEFAULT 0,
+	average_latency_delta_ms DOUBLE PRECISION NOT NULL DEFAULT 0,
+	success_p_value          DOUBLE PRECISION NOT NULL DEFAULT 1,
+	payload                  JSONB NOT NULL DEFAULT '{}',
+	created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_optimization_eval_diffs_treatment
+	ON optimization_eval_diffs(treatment_run_id, updated_at DESC)
+	WHERE treatment_run_id != '';
+CREATE INDEX IF NOT EXISTS idx_optimization_eval_diffs_status
+	ON optimization_eval_diffs(status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS optimization_approvals (
+	id            TEXT PRIMARY KEY,
+	subject_id    TEXT NOT NULL,
+	subject_type  TEXT NOT NULL,
+	action        TEXT NOT NULL,
+	reviewer      TEXT NOT NULL DEFAULT '',
+	reviewer_role TEXT NOT NULL DEFAULT '',
+	note          TEXT NOT NULL DEFAULT '',
+	created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_optimization_approvals_subject
+	ON optimization_approvals(subject_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS optimization_rollback_alerts (
+	id                       TEXT PRIMARY KEY,
+	status                   TEXT NOT NULL DEFAULT 'open',
+	eval_diff_id             TEXT NOT NULL DEFAULT '',
+	treatment_run_id         TEXT NOT NULL DEFAULT '',
+	reasons                  JSONB NOT NULL DEFAULT '[]',
+	success_rate_delta       DOUBLE PRECISION NOT NULL DEFAULT 0,
+	average_latency_delta_ms DOUBLE PRECISION NOT NULL DEFAULT 0,
+	created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_optimization_rollback_alerts_status
+	ON optimization_rollback_alerts(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_optimization_rollback_alerts_eval_diff
+	ON optimization_rollback_alerts(eval_diff_id, created_at DESC)
+	WHERE eval_diff_id != '';
+
+CREATE TABLE IF NOT EXISTS optimization_rollbacks (
+	id            TEXT PRIMARY KEY,
+	suggestion_id TEXT NOT NULL,
+	alert_id      TEXT NOT NULL DEFAULT '',
+	trigger       TEXT NOT NULL DEFAULT '',
+	triggered_by  TEXT NOT NULL DEFAULT '',
+	rollout       JSONB NOT NULL DEFAULT '{}',
+	created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_optimization_rollbacks_suggestion
+	ON optimization_rollbacks(suggestion_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS embedding_backlog (
+	id          BIGSERIAL PRIMARY KEY,
+	memory_id   BIGINT NOT NULL,
+	user_id     TEXT NOT NULL DEFAULT '',
+	content     TEXT NOT NULL DEFAULT '',
+	vector_space TEXT NOT NULL DEFAULT 'memory:default',
+	status      TEXT NOT NULL DEFAULT 'pending',
+	attempts    INTEGER NOT NULL DEFAULT 0,
+	claimed_by TEXT NOT NULL DEFAULT '',
+	claimed_at TIMESTAMPTZ,
+	next_run_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	last_error  TEXT NOT NULL DEFAULT '',
+	created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_embedding_backlog_status_next
+	ON embedding_backlog(status, next_run_at ASC, id ASC);
+CREATE INDEX IF NOT EXISTS idx_embedding_backlog_memory
+	ON embedding_backlog(memory_id);
+
+-- 自动优化实际应用结果表：工具描述覆盖与 memory governance 策略。
+CREATE TABLE IF NOT EXISTS optimization_tool_descriptions (
+	tool_name   TEXT PRIMARY KEY,
+	description TEXT NOT NULL DEFAULT '',
+	updated_by  TEXT NOT NULL DEFAULT '',
+	updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS memory_governance_policies (
+	name        TEXT PRIMARY KEY,
+	policy_json JSONB NOT NULL DEFAULT '{}',
+	updated_by  TEXT NOT NULL DEFAULT '',
+	updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS optimization_rollouts (
+	id              TEXT PRIMARY KEY,
+	suggestion_id   TEXT NOT NULL UNIQUE,
+	target          TEXT NOT NULL DEFAULT '',
+	target_key      TEXT NOT NULL DEFAULT '',
+	previous_value  TEXT NOT NULL DEFAULT '',
+	previous_exists BOOLEAN NOT NULL DEFAULT FALSE,
+	applied_value   TEXT NOT NULL DEFAULT '',
+	status          TEXT NOT NULL DEFAULT 'applied',
+	applied_by      TEXT NOT NULL DEFAULT '',
+	rolled_back_by  TEXT NOT NULL DEFAULT '',
+	created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	rolled_back_at  TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_optimization_rollouts_status
+	ON optimization_rollouts(status, updated_at DESC);
+
+-- Quality Workbench 持久化表
+CREATE TABLE IF NOT EXISTS agentquality_grouping_rules (
+	id         TEXT PRIMARY KEY,
+	name       TEXT NOT NULL DEFAULT '',
+	priority   INTEGER NOT NULL DEFAULT 0,
+	enabled    BOOLEAN NOT NULL DEFAULT TRUE,
+	rule_json  JSONB NOT NULL DEFAULT '{}',
+	created_by TEXT NOT NULL DEFAULT '',
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_agentquality_grouping_rules_priority
+	ON agentquality_grouping_rules(enabled, priority ASC, id ASC);
+
+CREATE TABLE IF NOT EXISTS qualityworkbench_replay_jobs (
+	id          TEXT PRIMARY KEY DEFAULT ('replay_' || md5(random()::text || clock_timestamp()::text)),
+	batch_id    TEXT NOT NULL,
+	kind        TEXT NOT NULL,
+	target_ids  JSONB NOT NULL DEFAULT '[]',
+	status      TEXT NOT NULL DEFAULT 'queued',
+	max_attempt INTEGER NOT NULL DEFAULT 1,
+	attempt     INTEGER NOT NULL DEFAULT 0,
+	result      JSONB NOT NULL DEFAULT '{}',
+	error       TEXT NOT NULL DEFAULT '',
+	created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_qualityworkbench_replay_jobs_batch
+	ON qualityworkbench_replay_jobs(batch_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_qualityworkbench_replay_jobs_status
+	ON qualityworkbench_replay_jobs(status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS qualityworkbench_batch_eval_runs (
+	id         TEXT PRIMARY KEY DEFAULT ('eval_' || md5(random()::text || clock_timestamp()::text)),
+	batch_id   TEXT NOT NULL,
+	kind       TEXT NOT NULL,
+	status     TEXT NOT NULL,
+	summary    JSONB NOT NULL DEFAULT '{}',
+	diff       JSONB NOT NULL DEFAULT '{}',
+	case_results JSONB NOT NULL DEFAULT '[]',
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_qualityworkbench_batch_eval_runs_batch
+	ON qualityworkbench_batch_eval_runs(batch_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_qualityworkbench_batch_eval_runs_status
+	ON qualityworkbench_batch_eval_runs(status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS qualityworkbench_weekly_reports (
+	id         TEXT PRIMARY KEY,
+	week_start DATE NOT NULL,
+	title      TEXT NOT NULL DEFAULT 'Quality Workbench Weekly Report',
+	summary    JSONB NOT NULL DEFAULT '{}',
+	markdown   TEXT NOT NULL DEFAULT '',
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_qualityworkbench_weekly_reports_week_start
+	ON qualityworkbench_weekly_reports(week_start DESC);
 -- 认证 Provider 配置表
 CREATE TABLE IF NOT EXISTS auth_providers (
     name          TEXT PRIMARY KEY,
@@ -760,6 +977,26 @@ ALTER TABLE memories ADD COLUMN IF NOT EXISTS user_id TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id) WHERE user_id != '';
 
 ALTER TABLE agentquality_candidates ADD COLUMN IF NOT EXISTS suggestions_json JSONB NOT NULL DEFAULT '[]';
+ALTER TABLE agentquality_candidates ADD COLUMN IF NOT EXISTS cluster_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE agentquality_candidates ADD COLUMN IF NOT EXISTS verify_result JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE agentquality_candidates ADD COLUMN IF NOT EXISTS last_verified_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_agentquality_candidates_cluster
+	ON agentquality_candidates(cluster_id, created_at DESC)
+	WHERE cluster_id != '';
+
+ALTER TABLE agentquality_optimization_suggestions ADD COLUMN IF NOT EXISTS apply_status TEXT NOT NULL DEFAULT 'unapplied';
+ALTER TABLE agentquality_optimization_suggestions ADD COLUMN IF NOT EXISTS applied_by TEXT NOT NULL DEFAULT '';
+ALTER TABLE agentquality_optimization_suggestions ADD COLUMN IF NOT EXISTS apply_error TEXT NOT NULL DEFAULT '';
+ALTER TABLE agentquality_optimization_suggestions ADD COLUMN IF NOT EXISTS applied_at TIMESTAMPTZ;
+ALTER TABLE agentquality_optimization_suggestions ADD COLUMN IF NOT EXISTS source_eval_diff_id TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_agentquality_opt_suggestions_source_eval_diff
+	ON agentquality_optimization_suggestions(source_eval_diff_id, created_at DESC)
+	WHERE source_eval_diff_id != '';
+
+ALTER TABLE embedding_backlog ADD COLUMN IF NOT EXISTS vector_space TEXT NOT NULL DEFAULT 'memory:default';
+
+ALTER TABLE qualityworkbench_replay_jobs ADD COLUMN IF NOT EXISTS result JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE qualityworkbench_replay_jobs ADD COLUMN IF NOT EXISTS error TEXT NOT NULL DEFAULT '';
 `
 
 // pgMigrate 初始化 PostgreSQL 数据库表结构

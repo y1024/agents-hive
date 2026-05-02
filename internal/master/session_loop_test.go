@@ -9,11 +9,13 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zaptest"
 
 	"github.com/chef-guo/agents-hive/internal/errs"
 	"github.com/chef-guo/agents-hive/internal/journal"
 	"github.com/chef-guo/agents-hive/internal/llm"
 	"github.com/chef-guo/agents-hive/internal/master/assistantcap"
+	"github.com/chef-guo/agents-hive/internal/observability"
 	"github.com/chef-guo/agents-hive/internal/store"
 )
 
@@ -567,4 +569,52 @@ func TestExecuteSessionTask_SkipsWriteBackAfterTermination(t *testing.T) {
 	}
 
 	assert.Zero(t, st.saveCalls.Load(), "terminated session 不应执行会话保存")
+}
+
+func TestExecuteSessionTask_EnqueuesTaskStartedAndFinishedMetrics(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+	m := &Master{
+		config:     Config{},
+		logger:     logger,
+		obsCh:      make(chan observabilityEntry, 8),
+		sessionMgr: NewSessionManager(make(chan struct{}), logger),
+		eventBus:   NewEventBus(logger),
+	}
+	session := &SessionState{
+		ID:       "s-task-metrics",
+		Name:     "main",
+		Messages: []llm.MessageWithTools{},
+		Metadata: map[string]any{},
+		Created:  time.Now(),
+	}
+	sem := make(chan struct{}, 1)
+	sem <- struct{}{}
+
+	m.executeSessionTask(context.Background(), sessionTask{
+		req:        SessionRequest{Input: "hello"},
+		session:    session,
+		responseID: 1,
+		semToken:   sem,
+	})
+
+	var started, finished *observability.Metric
+	for len(m.obsCh) > 0 {
+		entry := <-m.obsCh
+		if entry.metric == nil {
+			continue
+		}
+		switch entry.metric.Name {
+		case "hive.task.started":
+			started = entry.metric
+		case "hive.task.finished":
+			finished = entry.metric
+		}
+	}
+	require.NotNil(t, started)
+	require.NotNil(t, finished)
+	assert.Equal(t, "web", started.Labels["route"])
+	assert.NotContains(t, started.Labels, "session_id")
+	assert.Equal(t, "web", finished.Labels["route"])
+	assert.Equal(t, "error", finished.Labels["status"])
+	assert.NotContains(t, finished.Labels, "session_id")
 }

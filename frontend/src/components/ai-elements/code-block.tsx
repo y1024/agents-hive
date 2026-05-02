@@ -21,12 +21,13 @@ import {
   useRef,
   useState,
 } from "react";
-import type { BundledLanguage, ThemedToken } from "shiki";
+import type { ThemedToken } from "shiki/core";
 import {
   highlightCode,
   createRawTokens,
   type TokenizedCode,
 } from "@/utils/shikiHighlight";
+import { normalizeShikiLanguage, type SupportedShikiLanguage } from "@/utils/shikiLanguages";
 
 // Shiki uses bitflags for font styles: 1=italic, 2=bold, 4=underline
 // oxlint-disable-next-line eslint(no-bitwise)
@@ -109,7 +110,7 @@ const LineSpan = ({
 // Types
 type CodeBlockProps = HTMLAttributes<HTMLDivElement> & {
   code: string;
-  language: BundledLanguage;
+  language: string;
   showLineNumbers?: boolean;
 };
 
@@ -253,41 +254,42 @@ export const CodeBlockContent = ({
   showLineNumbers = false,
 }: {
   code: string;
-  language: BundledLanguage;
+  language: string;
   showLineNumbers?: boolean;
 }) => {
+  const normalizedLanguage = normalizeShikiLanguage(language);
   // Memoized raw tokens for immediate display
   const rawTokens = useMemo(() => createRawTokens(code), [code]);
 
   // Synchronous cache lookup — avoids setState in effect for cached results
   const syncTokens = useMemo(
-    () => highlightCode(code, language) ?? rawTokens,
-    [code, language, rawTokens]
+    () => highlightCode(code, normalizedLanguage) ?? rawTokens,
+    [code, normalizedLanguage, rawTokens]
   );
 
   // Async highlighting result (populated after shiki loads)
   const [asyncResult, setAsyncResult] = useState<{
     code: string;
-    language: BundledLanguage;
+    language: SupportedShikiLanguage;
     tokens: TokenizedCode;
   } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
 
-    highlightCode(code, language, (result) => {
+    highlightCode(code, normalizedLanguage, (result) => {
       if (!cancelled) {
-        setAsyncResult({ code, language, tokens: result });
+        setAsyncResult({ code, language: normalizedLanguage, tokens: result });
       }
     });
 
     return () => {
       cancelled = true;
     };
-  }, [code, language]);
+  }, [code, normalizedLanguage]);
 
   const tokenized =
-    asyncResult?.code === code && asyncResult.language === language
+    asyncResult?.code === code && asyncResult.language === normalizedLanguage
       ? asyncResult.tokens
       : syncTokens;
 

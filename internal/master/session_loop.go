@@ -309,6 +309,12 @@ func (m *Master) executeSessionTask(ctx context.Context, task sessionTask) {
 	taskStart := time.Now()
 	sessionTraceID := observability.NewTraceID()
 	sessionSpanID := observability.NewSpanID()
+	taskRoute := routeFromSession(session)
+	m.enqueueMetric(observability.Metric{
+		Name:   "hive.task.started",
+		Value:  1,
+		Labels: map[string]any{"route": taskRoute},
+	})
 	m.enqueueMetric(observability.Metric{
 		Name:   "hive.sessions.active",
 		Value:  1,
@@ -329,6 +335,11 @@ func (m *Master) executeSessionTask(ctx context.Context, task sessionTask) {
 	if taskErr != nil {
 		spanStatus = "error"
 	}
+	m.enqueueMetric(observability.Metric{
+		Name:   "hive.task.finished",
+		Value:  1,
+		Labels: map[string]any{"route": taskRoute, "status": spanStatus},
+	})
 	m.enqueueSpan(observability.Span{
 		TraceID:    sessionTraceID,
 		SpanID:     sessionSpanID,

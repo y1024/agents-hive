@@ -18,6 +18,26 @@ type adminQualityPromptSmokeRequest struct {
 	Content  string `json:"content"`
 }
 
+const promptSmokeMaxContentRunes = 20000
+
+var promptSmokeKnownKeys = map[string]struct{}{
+	"system/main":          {},
+	"system/base":          {},
+	"system/execution":     {},
+	"system/business":      {},
+	"system/code_editing":  {},
+	"system/safety":        {},
+	"system/reply":         {},
+	"tools/wenyan":         {},
+	"tools/spawn_agent":    {},
+	"tools/dynamic_tools":  {},
+	"subagents/title":      {},
+	"subagents/summary":    {},
+	"subagents/compaction": {},
+	"subagents/explore":    {},
+	"subagents/codereview": {},
+}
+
 func (s *Server) handleAdminQualityListCases(w http.ResponseWriter, r *http.Request) {
 	cases, required, err := loadValidatedQualityCases()
 	if err != nil {
@@ -51,9 +71,10 @@ func (s *Server) handleAdminQualityPromptSmoke(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	warnings := promptSmokeWarnings(req.Key, content)
+	blockingWarnings := promptSmokeBlockingWarnings(req.Key, content)
+	warnings := append(blockingWarnings, promptSmokeWarnings(req.Key, content)...)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":            true,
+		"ok":            len(blockingWarnings) == 0,
 		"checked_cases": required,
 		"warnings":      warnings,
 	})
@@ -96,6 +117,21 @@ func promptSmokeWarnings(key, content string) []string {
 	}
 	if key == "system/safety" && !strings.Contains(content, "安全") && !strings.Contains(lowerContent, "permission") {
 		warnings = append(warnings, "system/safety prompt should mention 安全 or permission")
+	}
+	return warnings
+}
+
+func promptSmokeBlockingWarnings(key, content string) []string {
+	key = strings.TrimSpace(key)
+	warnings := []string{}
+
+	if key == "" {
+		warnings = append(warnings, "prompt key 不能为空")
+	} else if _, ok := promptSmokeKnownKeys[key]; !ok {
+		warnings = append(warnings, "未知 prompt key，禁止保存")
+	}
+	if len([]rune(content)) > promptSmokeMaxContentRunes {
+		warnings = append(warnings, "prompt content 超过 20000 字符，禁止保存")
 	}
 	return warnings
 }

@@ -19,6 +19,8 @@ import (
 
 // 编译期接口合规检查
 var _ MemoryStore = (*PostgresMemoryStore)(nil)
+var _ GovernanceStore = (*PostgresMemoryStore)(nil)
+var _ MemoryEmbeddingSyncer = (*PostgresMemoryStore)(nil)
 
 // PostgresMemoryStore PostgreSQL 记忆存储实现
 // 使用 tsvector + GIN 索引实现全文搜索，共享主 PostgresStore 的连接池
@@ -141,9 +143,9 @@ func (s *PostgresMemoryStore) Update(ctx context.Context, record *MemoryRecord) 
 		tagsJSON = []byte("[]")
 	}
 
-	metadataJSON := record.Metadata
-	if metadataJSON == nil {
-		metadataJSON = json.RawMessage("{}")
+	metadataJSON, err := s.metadataForUpdate(ctx, record)
+	if err != nil {
+		return err
 	}
 
 	var ct pgconn.CommandTag
@@ -188,6 +190,28 @@ func (s *PostgresMemoryStore) Update(ctx context.Context, record *MemoryRecord) 
 	}
 
 	return nil
+}
+
+func (s *PostgresMemoryStore) metadataForUpdate(ctx context.Context, record *MemoryRecord) (json.RawMessage, error) {
+	var existing string
+	var err error
+	if record.UserID != "" {
+		err = s.pool.QueryRow(ctx, `SELECT metadata FROM memories WHERE id = $1 AND user_id = $2`, record.ID, record.UserID).Scan(&existing)
+	} else {
+		err = s.pool.QueryRow(ctx, `SELECT metadata FROM memories WHERE id = $1`, record.ID).Scan(&existing)
+	}
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, errs.New(errs.CodeMemoryNotFound, fmt.Sprintf("记忆 %d 未找到", record.ID))
+		}
+		return nil, errs.Wrap(errs.CodeMemoryReadFailed, "读取记忆元数据失败", err)
+	}
+
+	metadataJSON := PreserveGovernanceOnUpdate(json.RawMessage(existing), record.Metadata)
+	if metadataJSON == nil {
+		metadataJSON = json.RawMessage("{}")
+	}
+	return metadataJSON, nil
 }
 
 // Delete 删除记忆
@@ -249,6 +273,46 @@ func (s *PostgresMemoryStore) generateEmbedding(ctx context.Context, id int64, c
 		s.logger.Debug("写入向量索引失败", zap.Int64("id", id), zap.Error(err))
 	}
 	s.logger.Debug("embedding 已生成并保存", zap.Int64("id", id), zap.Int("dim", len(vec)))
+}
+
+func (s *PostgresMemoryStore) SyncMemoryEmbedding(ctx context.Context, memoryID int64, vector []float32, status MemoryEmbeddingStatus) error {
+	if memoryID == 0 {
+		return errs.New(errs.CodeInvalidInput, "记忆 ID 不能为空")
+	}
+	if len(vector) == 0 {
+		return errs.New(errs.CodeInvalidInput, "embedding vector 不能为空")
+	}
+	if status.VectorSpace == "" {
+		status.VectorSpace = DefaultVectorSpaceName
+	}
+	if status.EmbeddingState == "" {
+		status.EmbeddingState = EmbeddingStateReady
+	}
+	if status.UpdatedAt.IsZero() {
+		status.UpdatedAt = time.Now()
+	}
+	blob := encodeFloat32s(vector)
+	var existing string
+	if err := s.pool.QueryRow(ctx, `SELECT metadata FROM memories WHERE id=$1`, memoryID).Scan(&existing); err != nil {
+		if err == pgx.ErrNoRows {
+			return errs.New(errs.CodeMemoryNotFound, fmt.Sprintf("记忆 %d 未找到", memoryID))
+		}
+		return errs.Wrap(errs.CodeMemoryReadFailed, "读取记忆元数据失败", err)
+	}
+	meta := EncodeVectorSpace(json.RawMessage(existing), VectorSpaceMetadata{
+		Name:           status.VectorSpace,
+		EmbeddingState: status.EmbeddingState,
+		MigratedAt:     status.UpdatedAt,
+	})
+	if _, err := s.pool.Exec(ctx, `UPDATE memories SET embedding=$1, metadata=$2, updated_at=NOW() WHERE id=$3`, blob, string(meta), memoryID); err != nil {
+		return errs.Wrap(errs.CodeMemoryWriteFailed, "同步 embedding 失败", err)
+	}
+	if s.vecStore != nil {
+		if err := s.vecStore.Add(ctx, memoryID, vector); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Search 全文搜索记忆（tsvector + ts_rank 排序，中文回退 ILIKE）
@@ -504,6 +568,33 @@ func (s *PostgresMemoryStore) Stats(ctx context.Context) (*MemoryStats, error) {
 	}
 
 	return stats, nil
+}
+
+func (s *PostgresMemoryStore) GovernanceStats(ctx context.Context, opts GovernanceQueryOptions) (GovernanceStats, error) {
+	search := opts.Search
+	if search.Limit <= 0 {
+		search.Limit = 1000
+	}
+	result, err := s.List(ctx, search)
+	if err != nil {
+		return GovernanceStats{}, err
+	}
+	return AnalyzeGovernance(result.Memories, opts.Now, opts.MinConfidence), nil
+}
+
+func (s *PostgresMemoryStore) PruneGovernance(ctx context.Context, plan GovernancePrunePlan) (GovernancePruneResult, error) {
+	result := GovernancePruneResult{
+		Matched:   len(plan.DeleteIDs),
+		DeleteIDs: append([]int64(nil), plan.DeleteIDs...),
+		Reasons:   plan.Reasons,
+	}
+	for _, id := range plan.DeleteIDs {
+		if err := s.Delete(ctx, id); err != nil {
+			return result, err
+		}
+		result.Deleted++
+	}
+	return result, nil
 }
 
 // Close 释放存储资源（不关闭共享连接池）

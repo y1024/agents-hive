@@ -340,7 +340,7 @@ func NewApp(cfg *config.Config, logger *zap.Logger) *App {
 				}
 			}
 
-			hybrid, err := memory.SetupEmbedding(context.Background(), memStore, vecStore, vecLoader,
+			hybrid, _, _, err := memory.SetupEmbedding(context.Background(), memStore, vecStore, vecLoader,
 				memory.EmbeddingSetupConfig{
 					BaseURL:        cfg.LLM.BaseURL,
 					APIKey:         cfg.LLM.APIKey,

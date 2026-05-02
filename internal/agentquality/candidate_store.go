@@ -21,7 +21,7 @@ type CandidateStore interface {
 
 func ValidateCandidateStatus(status CandidateStatus) error {
 	switch status {
-	case CandidateNew, CandidateReviewing, CandidateApproved, CandidateRejected, CandidatePromoted:
+	case CandidateNew, CandidateReviewing, CandidateApproved, CandidateRejected, CandidatePromoted, CandidatePromotedVerified, CandidatePromotedRegressed:
 		return nil
 	default:
 		return fmt.Errorf("invalid candidate status %q", status)
@@ -61,6 +61,12 @@ func ValidateCandidateTransition(from, to CandidateStatus) error {
 	case CandidateRejected:
 		return fmt.Errorf("candidate transition %s -> %s is not allowed", from, to)
 	case CandidatePromoted:
+		switch to {
+		case CandidatePromotedVerified, CandidatePromotedRegressed:
+			return nil
+		}
+		return fmt.Errorf("candidate transition %s -> %s is not allowed", from, to)
+	case CandidatePromotedVerified, CandidatePromotedRegressed:
 		return fmt.Errorf("candidate transition %s -> %s is not allowed", from, to)
 	}
 	return fmt.Errorf("candidate transition %s -> %s is not allowed", from, to)

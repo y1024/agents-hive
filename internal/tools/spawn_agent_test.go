@@ -275,3 +275,56 @@ func TestSpawnAgent_WithToolWhitelist(t *testing.T) {
 		t.Errorf("期望 2 个工具白名单，实际 %d", len(spawner.created[0].Tools))
 	}
 }
+
+func TestSpawnAgent_PropagatesDepthAndMaxTurns(t *testing.T) {
+	logger := zap.NewNop()
+	host := mcphost.NewHost(logger)
+	observer := &recordingDelegationObserver{}
+	spawner := &mockAgentSpawner{}
+	executor := &mockTaskExecutor{
+		executeFn: func(ctx context.Context, agentID string, instruction string, taskContext map[string]interface{}) (string, error) {
+			return "ok", nil
+		},
+	}
+	registerSpawnAgent(host, executor, spawner, logger, observer, 0)
+
+	ctx := WithToolContext(context.Background(), &ToolContext{
+		CallerType: CallerMaster,
+		CallerName: "master",
+		Depth:      2,
+	})
+	input, _ := json.Marshal(spawnAgentInput{
+		Name:         "researcher",
+		SystemPrompt: "test",
+		Instruction:  "test",
+		MaxTurns:     7,
+	})
+
+	result, err := host.ExecuteTool(ctx, "spawn_agent", input)
+
+	if err != nil {
+		t.Fatalf("调用工具失败: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("工具返回错误: %s", string(result.Content))
+	}
+	if len(spawner.created) != 1 {
+		t.Fatalf("created specs = %d, want 1", len(spawner.created))
+	}
+	if spawner.created[0].SpawnDepth != 3 {
+		t.Fatalf("SpawnDepth = %d, want 3", spawner.created[0].SpawnDepth)
+	}
+	if spawner.created[0].MaxTurns != 7 {
+		t.Fatalf("MaxTurns = %d, want 7", spawner.created[0].MaxTurns)
+	}
+	events := observer.snapshot()
+	if len(events) != 1 {
+		t.Fatalf("delegation events = %d, want 1", len(events))
+	}
+	if events[0].SpawnDepth != 3 {
+		t.Fatalf("event SpawnDepth = %d, want 3", events[0].SpawnDepth)
+	}
+	if events[0].MaxTurns != 7 {
+		t.Fatalf("event MaxTurns = %d, want 7", events[0].MaxTurns)
+	}
+}

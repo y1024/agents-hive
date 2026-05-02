@@ -77,6 +77,7 @@ type ServerComponents struct {
 	SkillSvc              *skills.SkillService    // Skill 热重载服务（可选）
 	SkillFinder           *skills.Finder
 	QualityCandidateStore *agentquality.PGCandidateStore
+	OptimizationStore     agentquality.OptimizationSuggestionStore
 	// hive-skill-on-demand 新增（task 11.3-11.6）——按需解析 + 权限 + spec 路由聚合
 	SkillDiscovery      *skills.Discovery        // marketplace 远程解析器（按需拉取）；OnDemandEnabled=false 时仍构造，用于未来路径
 	AdminChecker        skills.AdminChecker      // public scope 安装权限判定（auth 启用时真实，否则 DenyAll）
@@ -115,10 +116,11 @@ type ServerComponents struct {
 	} // *store.PromptStore（可选，DB 不可用时为 nil）
 	FeishuIngressBridge *feishuIngressModeBridge
 
-	refreshCancel context.CancelFunc
-	cleanupCancel context.CancelFunc // usage_records 清理定时任务
-	notifyCtx     context.Context    // PG NOTIFY LISTEN goroutine 生命周期
-	notifyCancel  context.CancelFunc // shutdown 时取消 LISTEN
+	refreshCancel          context.CancelFunc
+	cleanupCancel          context.CancelFunc // usage_records 清理定时任务
+	notifyCtx              context.Context    // PG NOTIFY LISTEN goroutine 生命周期
+	notifyCancel           context.CancelFunc // shutdown 时取消 LISTEN
+	embeddingBacklogCancel context.CancelFunc // memory embedding backlog worker 生命周期
 }
 
 type feishuIngressModeBridge struct {
@@ -308,6 +310,7 @@ func InitServer(cfg *config.Config, configPath string, logger *zap.Logger) *Serv
 		sc.SkillStore = store.NewSkillStore(pgPool, logger)
 		sc.SkillSvc = skills.NewSkillService(sc.SkillStore, sc.SkillReg, logger)
 		sc.QualityCandidateStore = agentquality.NewPGCandidateStore(pgPool, logger)
+		sc.OptimizationStore = agentquality.NewPGOptimizationSuggestionStore(pgPool, logger)
 		if err := sc.SkillSvc.LoadAll(sc.notifyCtx); err != nil {
 			logger.Warn("Skill DB 全量加载失败（忽略，继续启动）", zap.Error(err))
 		}
@@ -540,6 +543,9 @@ func (sc *ServerComponents) Shutdown() {
 	sc.CancelRefresh()
 	if sc.cleanupCancel != nil {
 		sc.cleanupCancel()
+	}
+	if sc.embeddingBacklogCancel != nil {
+		sc.embeddingBacklogCancel()
 	}
 	if sc.ChannelRouter != nil {
 		sc.ChannelRouter.Stop()
@@ -943,17 +949,19 @@ func initMemory(sc *ServerComponents, cfg *config.Config, logger *zap.Logger) {
 			}
 		}
 
-		hybrid, err := memory.SetupEmbedding(context.Background(), memStore, vecStore, vecLoader,
-			memory.EmbeddingSetupConfig{
-				BaseURL:        cfg.LLM.BaseURL,
-				APIKey:         cfg.LLM.APIKey,
-				EmbeddingModel: cfg.Memory.EmbeddingModel,
-				Provider:       cfg.LLM.Provider,
-			}, logger)
+		embeddingCfg := memory.EmbeddingSetupConfig{
+			BaseURL:        cfg.LLM.BaseURL,
+			APIKey:         cfg.LLM.APIKey,
+			EmbeddingModel: cfg.Memory.EmbeddingModel,
+			Provider:       cfg.LLM.Provider,
+		}
+		hybrid, embedder, activeVecStore, err := memory.SetupEmbedding(context.Background(), memStore, vecStore, vecLoader,
+			embeddingCfg, logger)
 		if err != nil {
 			logger.Warn("向量搜索初始化失败", zap.Error(err))
 		} else {
 			injector.SetHybridSearcher(hybrid)
+			startEmbeddingBacklogWorker(sc, memStore, pgStore.Pool(), embedder, activeVecStore, logger)
 		}
 	}
 
@@ -973,6 +981,76 @@ func initMemory(sc *ServerComponents, cfg *config.Config, logger *zap.Logger) {
 		zap.Bool("auto_extract", cfg.Memory.AutoExtract),
 		zap.Bool("embedding_enabled", cfg.Memory.EmbeddingEnabled),
 	)
+}
+
+type embeddingBacklogProcessor interface {
+	ProcessOne(ctx context.Context) (bool, error)
+}
+
+func startEmbeddingBacklogWorker(
+	sc *ServerComponents,
+	memStore *memory.PostgresMemoryStore,
+	pool *pgxpool.Pool,
+	embedder memory.EmbeddingProvider,
+	vecStore memory.VectorStore,
+	logger *zap.Logger,
+) {
+	if sc == nil || memStore == nil || pool == nil || embedder == nil {
+		return
+	}
+	if vecStore != nil {
+		memStore.SetEmbedding(embedder, vecStore)
+	}
+	backlog := memory.NewPGEmbeddingBacklog(pool)
+	worker := memory.NewEmbeddingBacklogWorker(backlog, embedder, memStore, memory.EmbeddingBacklogWorkerOptions{
+		WorkerID: "server-memory-embedding",
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	sc.embeddingBacklogCancel = cancel
+	go runEmbeddingBacklogWorker(ctx, worker, logger, 5*time.Second)
+	logger.Info("memory embedding backlog worker 已启动")
+}
+
+func runEmbeddingBacklogWorker(ctx context.Context, worker embeddingBacklogProcessor, logger *zap.Logger, idleDelay time.Duration) {
+	if worker == nil {
+		return
+	}
+	if idleDelay <= 0 {
+		idleDelay = 5 * time.Second
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		drainEmbeddingBacklogWorker(ctx, worker, logger)
+		timer := time.NewTimer(idleDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+}
+
+func drainEmbeddingBacklogWorker(ctx context.Context, worker embeddingBacklogProcessor, logger *zap.Logger) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		processed, err := worker.ProcessOne(ctx)
+		if err != nil && logger != nil {
+			logger.Warn("memory embedding backlog job 处理失败", zap.Error(err))
+		}
+		if !processed {
+			return
+		}
+	}
 }
 
 func initJournal(sc *ServerComponents, cfg *config.Config, logger *zap.Logger) {

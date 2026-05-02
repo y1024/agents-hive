@@ -19,6 +19,8 @@ import (
 	"github.com/chef-guo/agents-hive/internal/config"
 	"github.com/chef-guo/agents-hive/internal/gateway"
 	"github.com/chef-guo/agents-hive/internal/master"
+	"github.com/chef-guo/agents-hive/internal/memory"
+	"github.com/chef-guo/agents-hive/internal/qualityworkbench"
 	"github.com/chef-guo/agents-hive/internal/skills"
 	"github.com/chef-guo/agents-hive/internal/store"
 	"github.com/chef-guo/agents-hive/internal/streaming"
@@ -45,37 +47,63 @@ type qualityCandidateStore interface {
 	UpdateCandidateStatus(ctx context.Context, id string, status agentquality.CandidateStatus, reviewer, note, promotedCaseID string) error
 }
 
+type toolDescriptionStore interface {
+	UpsertToolDescription(ctx context.Context, toolName, description, updatedBy string) error
+	GetToolDescription(ctx context.Context, toolName string) (string, bool, error)
+	DeleteToolDescription(ctx context.Context, toolName string) error
+}
+
+type memoryGovernancePolicyStore interface {
+	UpsertMemoryGovernancePolicy(ctx context.Context, policyName, policyJSON, updatedBy string) error
+	GetMemoryGovernancePolicy(ctx context.Context, policyName string) (string, bool, error)
+	DeleteMemoryGovernancePolicy(ctx context.Context, policyName string) error
+}
+
 // Server 是 HTTP API 服务器
 type Server struct {
-	httpServer            *http.Server
-	master                *master.Master
-	skillRegistry         *skills.OverlayRegistry
-	streamHandler         *streaming.StreamHandler
-	wsHandler             *streaming.WSHandler
-	hitlConfig            config.HITLConfig
-	corsOrigins           []string
-	serverPort            string
-	logger                *zap.Logger
-	mux                   *http.ServeMux              // 存储 mux 引用，支持动态追加路由
-	webuiEnabled          bool                        // 是否启用前端控制台
-	config                *config.Config              // 完整配置（用于配置管理 API）
-	configMu              sync.RWMutex                // 保护 config 并发读写
-	feishuIngressMode     config.FeishuIngressMode    // 飞书已提交运行时入口模式
-	feishuWebhookGate     config.FeishuIngressMode    // 飞书 webhook gate 当前放行模式
-	configPath            string                      // 配置文件路径（用于保存配置）
-	channelRouter         *channel.Router             // Channel 路由器（用于查询插件状态）
-	store                 store.Store                 // 统一存储（PG），用于模型/配置管理
-	reloadProtocolFunc    func(protocol string) error // 协议热加载回调
-	authEngine            *auth.Engine
-	costTracker           accounting.CostTracker
-	promptStore           promptStoreInterface  // Prompt CRUD 存储（可选）
-	promptLoader          promptLoaderInterface // PromptLoader 缓存失效（可选）
-	aiRouter              *airouter.Router      // AI 路由器（可选，LLM CRUD 后触发热重载）
-	skillStore            skillStoreInterface   // Skill CRUD 存储（可选）
-	qualityCandidateStore qualityCandidateStore
-	feishuHealthClient    *feishu.Client
-	pushService           *push.Service
-	feishuAuditSink       feishu.AuditSink
+	httpServer                  *http.Server
+	master                      *master.Master
+	skillRegistry               *skills.OverlayRegistry
+	streamHandler               *streaming.StreamHandler
+	wsHandler                   *streaming.WSHandler
+	hitlConfig                  config.HITLConfig
+	corsOrigins                 []string
+	serverPort                  string
+	logger                      *zap.Logger
+	mux                         *http.ServeMux              // 存储 mux 引用，支持动态追加路由
+	webuiEnabled                bool                        // 是否启用前端控制台
+	config                      *config.Config              // 完整配置（用于配置管理 API）
+	configMu                    sync.RWMutex                // 保护 config 并发读写
+	feishuIngressMode           config.FeishuIngressMode    // 飞书已提交运行时入口模式
+	feishuWebhookGate           config.FeishuIngressMode    // 飞书 webhook gate 当前放行模式
+	configPath                  string                      // 配置文件路径（用于保存配置）
+	channelRouter               *channel.Router             // Channel 路由器（用于查询插件状态）
+	store                       store.Store                 // 统一存储（PG），用于模型/配置管理
+	reloadProtocolFunc          func(protocol string) error // 协议热加载回调
+	authEngine                  *auth.Engine
+	costTracker                 accounting.CostTracker
+	promptStore                 promptStoreInterface  // Prompt CRUD 存储（可选）
+	promptLoader                promptLoaderInterface // PromptLoader 缓存失效（可选）
+	aiRouter                    *airouter.Router      // AI 路由器（可选，LLM CRUD 后触发热重载）
+	skillStore                  skillStoreInterface   // Skill CRUD 存储（可选）
+	qualityCandidateStore       qualityCandidateStore
+	qualityEvalRunner           agentquality.EvalRunner
+	memoryStore                 memory.MemoryStore
+	memoryEmbeddingBacklog      memory.EmbeddingBacklog
+	optimizationStore           agentquality.OptimizationSuggestionStore
+	optimizationRolloutStore    agentquality.OptimizationRolloutStore
+	optimizationApprovalStore   agentquality.ApprovalStore
+	optimizationRollbackStore   agentquality.RollbackAlertStore
+	optimizationEvalDiffStore   agentquality.EvalDiffStore
+	toolDescriptionStore        toolDescriptionStore
+	memoryGovernancePolicyStore memoryGovernancePolicyStore
+	workbenchGroupingRuleStore  qualityworkbench.GroupingRuleStore
+	workbenchReplayStore        qualityworkbench.ReplayJobStore
+	workbenchBatchEvalStore     qualityworkbench.BatchEvalRunStore
+	workbenchReportStore        qualityworkbench.WeeklyReportStore
+	feishuHealthClient          *feishu.Client
+	pushService                 *push.Service
+	feishuAuditSink             feishu.AuditSink
 }
 
 type pushScheduleStore interface {
@@ -133,6 +161,34 @@ func NewServer(
 		channelRouter: channelRouter,
 		store:         db,
 		authEngine:    authEngine,
+	}
+	s.optimizationStore = agentquality.NewInMemoryOptimizationSuggestionStore()
+	s.optimizationRolloutStore = agentquality.NewInMemoryOptimizationRolloutStore()
+	s.optimizationApprovalStore = agentquality.NewInMemoryApprovalStore()
+	s.optimizationRollbackStore = agentquality.NewInMemoryRollbackStore()
+	s.optimizationEvalDiffStore = newInMemoryEvalDiffStore()
+	s.memoryEmbeddingBacklog = memory.NewInMemoryEmbeddingBacklog()
+	writableStore := agentquality.NewInMemoryOptimizationWritableStore()
+	s.toolDescriptionStore = writableStore
+	s.memoryGovernancePolicyStore = writableStore
+	s.workbenchGroupingRuleStore = qualityworkbench.NewMemoryGroupingRuleStore(time.Now)
+	s.workbenchReplayStore = qualityworkbench.NewMemoryReplayJobStore(time.Now)
+	s.workbenchBatchEvalStore = qualityworkbench.NewMemoryBatchEvalRunStore(time.Now)
+	s.workbenchReportStore = qualityworkbench.NewMemoryWeeklyReportStore(time.Now)
+	if pgStore, ok := db.(*store.PostgresStore); ok && pgStore.Pool() != nil {
+		s.workbenchReplayStore = qualityworkbench.NewPGReplayJobStore(pgStore.Pool())
+		s.workbenchGroupingRuleStore = qualityworkbench.NewPGGroupingRuleStore(pgStore.Pool())
+		s.workbenchBatchEvalStore = qualityworkbench.NewPGBatchEvalRunStore(pgStore.Pool())
+		s.workbenchReportStore = qualityworkbench.NewPGWeeklyReportStore(pgStore.Pool())
+		s.memoryEmbeddingBacklog = memory.NewPGEmbeddingBacklog(pgStore.Pool())
+		pgWritableStore := agentquality.NewPGOptimizationWritableStore(pgStore.Pool())
+		s.toolDescriptionStore = pgWritableStore
+		s.memoryGovernancePolicyStore = pgWritableStore
+		s.optimizationStore = agentquality.NewPGOptimizationSuggestionStore(pgStore.Pool(), logger)
+		s.optimizationRolloutStore = agentquality.NewPGOptimizationRolloutStore(pgStore.Pool())
+		s.optimizationApprovalStore = agentquality.NewPGApprovalStore(pgStore.Pool())
+		s.optimizationRollbackStore = agentquality.NewPGRollbackStore(pgStore.Pool())
+		s.optimizationEvalDiffStore = agentquality.NewPGEvalDiffStore(pgStore.Pool())
 	}
 	if fullCfg != nil && fullCfg.Channel.Feishu.Push.Enabled {
 		s.pushService = push.NewService(channelRouter, push.Config{
@@ -267,6 +323,47 @@ func (s *Server) SetSkillStore(ss skillStoreInterface) {
 
 func (s *Server) SetQualityCandidateStore(store qualityCandidateStore) {
 	s.qualityCandidateStore = store
+}
+
+func (s *Server) SetQualityEvalRunner(runner agentquality.EvalRunner) {
+	s.qualityEvalRunner = runner
+}
+
+func (s *Server) SetOptimizationSuggestionStore(store agentquality.OptimizationSuggestionStore) {
+	if store != nil {
+		s.optimizationStore = store
+	}
+}
+
+func (s *Server) SetQualityWorkbenchStores(replay qualityworkbench.ReplayJobStore, batchEval qualityworkbench.BatchEvalRunStore, reports qualityworkbench.WeeklyReportStore) {
+	if replay != nil {
+		s.workbenchReplayStore = replay
+	}
+	if batchEval != nil {
+		s.workbenchBatchEvalStore = batchEval
+	}
+	if reports != nil {
+		s.workbenchReportStore = reports
+	}
+}
+
+func (s *Server) SetQualityWorkbenchGroupingRuleStore(store qualityworkbench.GroupingRuleStore) {
+	if store != nil {
+		s.workbenchGroupingRuleStore = store
+	}
+}
+
+func (s *Server) SetOptimizationWritableStores(toolStore toolDescriptionStore, memoryPolicyStore memoryGovernancePolicyStore) {
+	if toolStore != nil {
+		s.toolDescriptionStore = toolStore
+	}
+	if memoryPolicyStore != nil {
+		s.memoryGovernancePolicyStore = memoryPolicyStore
+	}
+}
+
+func (s *Server) SetMemoryStore(store memory.MemoryStore) {
+	s.memoryStore = store
 }
 
 func (s *Server) SetFeishuHealthClient(client *feishu.Client) {

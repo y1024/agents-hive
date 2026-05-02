@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,6 +33,7 @@ type RemoteACPAgent struct {
 	observer  tools.DelegationObserver
 	status    subagent.AgentStatus
 	startTime time.Time
+	outputs   map[acp.SessionId][]string
 	mu        sync.RWMutex
 }
 
@@ -57,6 +59,7 @@ func NewRemoteACPAgent(
 		mailbox:   subagent.NewMailbox(16),
 		logger:    logger.With(zap.String("remote_agent", cfg.Name)),
 		status:    subagent.StatusStopped,
+		outputs:   make(map[acp.SessionId][]string),
 	}
 }
 
@@ -155,6 +158,8 @@ func (a *RemoteACPAgent) Run(ctx context.Context) {
 
 // handleTask 将 TaskRequest 转为 ACP Prompt 调用
 func (a *RemoteACPAgent) handleTask(ctx context.Context, req subagent.TaskRequest) subagent.TaskResponse {
+	a.resetSessionOutput(a.sessionID)
+
 	// 提取 payload 中的指令
 	payload, _ := subagent.ExtractPayload(req)
 
@@ -188,10 +193,19 @@ func (a *RemoteACPAgent) handleTask(ctx context.Context, req subagent.TaskReques
 		}
 	}
 
+	content := a.sessionOutput(a.sessionID)
+	if content == "" {
+		content = promptResponseContent(promptResp)
+	}
+
 	// 将 PromptResponse 转为 TaskResponse
-	resultJSON, _ := json.Marshal(map[string]interface{}{
+	result := map[string]interface{}{
 		"stop_reason": string(promptResp.StopReason),
-	})
+	}
+	if content != "" {
+		result["content"] = content
+	}
+	resultJSON, _ := json.Marshal(result)
 
 	status := "completed"
 	if promptResp.StopReason == acp.StopReasonCancelled || promptResp.StopReason == acp.StopReasonRefusal {
@@ -207,6 +221,58 @@ func (a *RemoteACPAgent) handleTask(ctx context.Context, req subagent.TaskReques
 		Status: status,
 		Result: resultJSON,
 	}
+}
+
+func (a *RemoteACPAgent) handleSessionUpdate(notification acp.SessionNotification) {
+	if notification.SessionId != a.sessionID {
+		return
+	}
+	text := sessionUpdateText(notification.Update)
+	if text == "" {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.outputs[notification.SessionId] = append(a.outputs[notification.SessionId], text)
+}
+
+func (a *RemoteACPAgent) resetSessionOutput(sessionID acp.SessionId) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.outputs, sessionID)
+}
+
+func (a *RemoteACPAgent) sessionOutput(sessionID acp.SessionId) string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return strings.Join(a.outputs[sessionID], "")
+}
+
+func sessionUpdateText(update acp.SessionUpdate) string {
+	if update.AgentMessageChunk == nil || update.AgentMessageChunk.Content.Text == nil {
+		return ""
+	}
+	return update.AgentMessageChunk.Content.Text.Text
+}
+
+func promptResponseContent(resp acp.PromptResponse) string {
+	meta, ok := resp.Meta.(map[string]any)
+	if !ok {
+		return ""
+	}
+	for _, key := range []string{"content", "text", "assistant", "assistant_result"} {
+		if value, ok := meta[key].(string); ok && value != "" {
+			return value
+		}
+	}
+	if result, ok := meta["result"].(map[string]any); ok {
+		for _, key := range []string{"content", "text", "assistant", "assistant_result"} {
+			if value, ok := result[key].(string); ok && value != "" {
+				return value
+			}
+		}
+	}
+	return ""
 }
 
 func (a *RemoteACPAgent) recordDelegation(ctx context.Context, req subagent.TaskRequest, status string, failureType string, stopReason string, errText string) {
@@ -303,7 +369,8 @@ func ConnectAndInit(ctx context.Context, cfg RemoteAgentConfig, logger *zap.Logg
 	defer initCancel()
 
 	_, err = conn.Initialize(initCtx, acp.InitializeRequest{
-		ProtocolVersion: acp.ProtocolVersion(acp.ProtocolVersionNumber),
+		ProtocolVersion:    acp.ProtocolVersion(acp.ProtocolVersionNumber),
+		ClientCapabilities: hiveACPClientCapabilities(),
 		ClientInfo: &acp.Implementation{
 			Name:    "agents-hive",
 			Version: "1.0.0",
@@ -327,10 +394,23 @@ func ConnectAndInit(ctx context.Context, cfg RemoteAgentConfig, logger *zap.Logg
 			fmt.Sprintf("创建远程 ACP Agent %q 会话失败", cfg.Name), err)
 	}
 
+	agent := NewRemoteACPAgent(cfg, conn, transport, sessionResp.SessionId, logger)
+	clientImpl.onUpdate = agent.handleSessionUpdate
+
 	logger.Info("远程 ACP Agent 连接成功",
 		zap.String("name", cfg.Name),
 		zap.String("transport", cfg.Transport),
 		zap.String("session_id", string(sessionResp.SessionId)))
 
-	return NewRemoteACPAgent(cfg, conn, transport, sessionResp.SessionId, logger), nil
+	return agent, nil
+}
+
+func hiveACPClientCapabilities() acp.ClientCapabilities {
+	return acp.ClientCapabilities{
+		Fs: acp.FileSystemCapability{
+			ReadTextFile:  true,
+			WriteTextFile: true,
+		},
+		Terminal: true,
+	}
 }

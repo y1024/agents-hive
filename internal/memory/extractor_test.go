@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -307,5 +308,48 @@ func TestExtractor_isDuplicate(t *testing.T) {
 				t.Errorf("isDuplicate(%q) = %v, want %v", tt.content, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestExtractor_ExtractFromSummaryWritesGovernanceDefaults(t *testing.T) {
+	store := &mockMemoryStore{searchResult: &SearchResult{}}
+	ext := NewExtractor(store, zap.NewNop())
+	now := time.Now()
+
+	err := ext.ExtractFromSummary(context.Background(), "- 用户偏好使用 Go 语言", "session-1", "user-1",
+		WithExtractorVersion("extractor-v2"),
+		WithSourceMessage("msg-7"),
+		WithRunID("run-9"),
+		WithRetentionDays(30),
+		WithNow(func() time.Time { return now }),
+	)
+
+	if err != nil {
+		t.Fatalf("ExtractFromSummary: %v", err)
+	}
+	if len(store.savedRecords) != 1 {
+		t.Fatalf("saved records = %d, want 1", len(store.savedRecords))
+	}
+	g := DecodeGovernance(store.savedRecords[0].Metadata)
+	if g.Source != "compaction_summary" {
+		t.Fatalf("governance source = %q, want compaction_summary", g.Source)
+	}
+	if g.ExtractedBy != "extractor-v2" {
+		t.Fatalf("extracted_by = %q, want extractor-v2", g.ExtractedBy)
+	}
+	if g.SourceMessage != "msg-7" {
+		t.Fatalf("source_message = %q, want msg-7", g.SourceMessage)
+	}
+	if g.SourceUserID != "user-1" {
+		t.Fatalf("source_user_id = %q, want user-1", g.SourceUserID)
+	}
+	if g.RunID != "run-9" {
+		t.Fatalf("run_id = %q, want run-9", g.RunID)
+	}
+	if g.Confidence != 0.8 {
+		t.Fatalf("confidence = %v, want 0.8", g.Confidence)
+	}
+	if !g.ExpiresAt.Equal(now.Add(30 * 24 * time.Hour)) {
+		t.Fatalf("expires_at = %s, want %s", g.ExpiresAt, now.Add(30*24*time.Hour))
 	}
 }

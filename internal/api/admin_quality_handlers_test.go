@@ -96,6 +96,50 @@ func TestAdminQualityPromptSmoke_WarningReturns200(t *testing.T) {
 	require.NotEmpty(t, got.Warnings)
 }
 
+func TestAdminQualityPromptSmoke_UnknownKeyBlocksSave(t *testing.T) {
+	srv := newQualityAdminTestServer()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/quality/prompt-smoke", strings.NewReader(`{
+		"key": "unknown/prompt",
+		"language": "zh",
+		"content": "你可以使用工具完成任务。"
+	}`))
+	rec := httptest.NewRecorder()
+
+	srv.handleAdminQualityPromptSmoke(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var got struct {
+		OK       bool     `json:"ok"`
+		Warnings []string `json:"warnings"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
+	require.False(t, got.OK)
+	require.NotEmpty(t, got.Warnings)
+}
+
+func TestAdminQualityPromptSmoke_OverlongContentBlocksSave(t *testing.T) {
+	srv := newQualityAdminTestServer()
+	body, err := json.Marshal(map[string]string{
+		"key":      "system/base",
+		"language": "zh",
+		"content":  strings.Repeat("工具", 10001),
+	})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/quality/prompt-smoke", strings.NewReader(string(body)))
+	rec := httptest.NewRecorder()
+
+	srv.handleAdminQualityPromptSmoke(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var got struct {
+		OK       bool     `json:"ok"`
+		Warnings []string `json:"warnings"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
+	require.False(t, got.OK)
+	require.NotEmpty(t, got.Warnings)
+}
+
 func newQualityAdminTestServer() *Server {
 	return &Server{
 		logger: zap.NewNop(),

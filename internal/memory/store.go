@@ -45,5 +45,5 @@ type SearchEngine interface {
 // 避免 subagent/compaction 包直接依赖 memory 包
 type MemoryExtractor interface {
 	// ExtractFromSummary 从压缩摘要中提取并保存记忆
-	ExtractFromSummary(ctx context.Context, summaryText string, sessionID string, userID string) error
+	ExtractFromSummary(ctx context.Context, summaryText string, sessionID string, userID string, opts ...ExtractorOption) error
 }

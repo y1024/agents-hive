@@ -140,9 +140,12 @@ CREATE TABLE IF NOT EXISTS agentquality_candidates (
 	created_by TEXT NOT NULL DEFAULT '',
 	reviewed_by TEXT NOT NULL DEFAULT '',
 	promoted_case_id TEXT NOT NULL DEFAULT '',
+	cluster_id TEXT NOT NULL DEFAULT '',
+	verify_result JSONB NOT NULL DEFAULT '{}',
 	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-	reviewed_at TIMESTAMPTZ
+	reviewed_at TIMESTAMPTZ,
+	last_verified_at TIMESTAMPTZ
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agentquality_candidates_fingerprint
 	ON agentquality_candidates(fingerprint)

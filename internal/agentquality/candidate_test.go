@@ -51,3 +51,12 @@ func TestValidateCandidateTransition_BlocksDirectPromotion(t *testing.T) {
 	assert.NoError(t, ValidateCandidateTransition(CandidateApproved, CandidatePromoted))
 	assert.Error(t, ValidateCandidateTransition(CandidateNew, CandidatePromoted))
 }
+
+func TestValidateCandidateTransition_AllowsPromotedVerificationResults(t *testing.T) {
+	assert.NoError(t, ValidateCandidateStatus(CandidatePromotedVerified))
+	assert.NoError(t, ValidateCandidateStatus(CandidatePromotedRegressed))
+	assert.NoError(t, ValidateCandidateTransition(CandidatePromoted, CandidatePromotedVerified))
+	assert.NoError(t, ValidateCandidateTransition(CandidatePromoted, CandidatePromotedRegressed))
+	assert.Error(t, ValidateCandidateTransition(CandidatePromotedVerified, CandidatePromoted))
+	assert.Error(t, ValidateCandidateTransition(CandidatePromotedRegressed, CandidatePromoted))
+}

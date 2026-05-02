@@ -11,11 +11,13 @@ import (
 type CandidateStatus string
 
 const (
-	CandidateNew       CandidateStatus = "new"
-	CandidateReviewing CandidateStatus = "reviewing"
-	CandidateApproved  CandidateStatus = "approved"
-	CandidateRejected  CandidateStatus = "rejected"
-	CandidatePromoted  CandidateStatus = "promoted"
+	CandidateNew               CandidateStatus = "new"
+	CandidateReviewing         CandidateStatus = "reviewing"
+	CandidateApproved          CandidateStatus = "approved"
+	CandidateRejected          CandidateStatus = "rejected"
+	CandidatePromoted          CandidateStatus = "promoted"
+	CandidatePromotedVerified  CandidateStatus = "promoted_verified"
+	CandidatePromotedRegressed CandidateStatus = "promoted_regressed"
 )
 
 type Candidate struct {
@@ -51,11 +53,14 @@ type CandidateRecord struct {
 	CreatedBy      string                   `json:"created_by,omitempty"`
 	ReviewedBy     string                   `json:"reviewed_by,omitempty"`
 	PromotedCaseID string                   `json:"promoted_case_id,omitempty"`
+	ClusterID      string                   `json:"cluster_id,omitempty"`
+	VerifyResult   string                   `json:"verify_result,omitempty"`
 	Suggestions    []OptimizationSuggestion `json:"optimization_suggestions,omitempty"`
 	GoldenCase     *Case                    `json:"golden_case,omitempty"`
 	CreatedAt      time.Time                `json:"created_at"`
 	UpdatedAt      time.Time                `json:"updated_at"`
 	ReviewedAt     *time.Time               `json:"reviewed_at,omitempty"`
+	LastVerifiedAt *time.Time               `json:"last_verified_at,omitempty"`
 }
 
 func CandidateFromFailure(sessionID, input, replayRef string, ev Event) CandidateRecord {

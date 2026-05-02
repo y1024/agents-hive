@@ -1,4 +1,3 @@
-import type { BundledLanguage } from 'shiki';
 import { CodeBlock } from '@/components/ai-elements/code-block';
 
 interface Props {
@@ -16,7 +15,7 @@ export function CodeRenderer({ content, language }: Props) {
     <div className="h-full overflow-auto">
       <CodeBlock
         code={content}
-        language={safeLang as BundledLanguage}
+        language={safeLang}
         showLineNumbers
       />
     </div>

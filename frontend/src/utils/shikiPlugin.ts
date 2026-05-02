@@ -1,15 +1,12 @@
-import type { CodeHighlighterPlugin, ThemeInput } from 'streamdown';
-import { bundledLanguagesInfo, type BundledLanguage } from 'shiki';
+import type { BundledLanguage, CodeHighlighterPlugin, ThemeInput } from 'streamdown';
 import { highlightCode } from './shikiHighlight';
+import { isSupportedShikiLanguage, normalizeShikiLanguage, SUPPORTED_SHIKI_LANGUAGES } from './shikiLanguages';
 
 type HighlightResult = Parameters<
   Parameters<CodeHighlighterPlugin['highlight']>[1] & ((r: never) => void)
 >[0];
 
-const SUPPORTED_LANGS: BundledLanguage[] = bundledLanguagesInfo.map(
-  (info) => info.id as BundledLanguage,
-);
-const SUPPORTED_SET = new Set<string>(SUPPORTED_LANGS);
+const SUPPORTED_LANGS = SUPPORTED_SHIKI_LANGUAGES as unknown as BundledLanguage[];
 const THEMES: [ThemeInput, ThemeInput] = ['github-light', 'github-dark'];
 
 export const SHIKI_PLUGIN: CodeHighlighterPlugin = {
@@ -17,7 +14,7 @@ export const SHIKI_PLUGIN: CodeHighlighterPlugin = {
   type: 'code-highlighter',
   getThemes: () => THEMES,
   getSupportedLanguages: () => SUPPORTED_LANGS,
-  supportsLanguage: (language) => SUPPORTED_SET.has(language),
+  supportsLanguage: (language) => isSupportedShikiLanguage(language),
   highlight: (options, callback) => {
     const wrapped = callback
       ? (t: { tokens: unknown[][]; bg: string; fg: string }) =>
@@ -27,9 +24,10 @@ export const SHIKI_PLUGIN: CodeHighlighterPlugin = {
             fg: t.fg,
           })
       : undefined;
+    const language = normalizeShikiLanguage(options.language);
     const sync = highlightCode(
       options.code,
-      options.language as BundledLanguage,
+      language,
       wrapped,
     );
     if (!sync) return null;

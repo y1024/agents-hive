@@ -551,3 +551,46 @@ func TestParallelDispatch_SystemAgentDenyList(t *testing.T) {
 		t.Fatal("系统 Agent 不应触发 ExecuteTask")
 	}
 }
+
+func TestParallelDispatch_NestedToolGateRejectsFixedAgentBeforeDispatch(t *testing.T) {
+	logger := zap.NewNop()
+	host := mcphost.NewHost(logger)
+
+	called := false
+	executor := &mockTaskExecutor{
+		executeFn: func(ctx context.Context, agentID string, instruction string, taskContext map[string]interface{}) (string, error) {
+			called = true
+			return "不应该执行", nil
+		},
+	}
+	gate := &testNestedToolGate{denyTool: "parallel_dispatch"}
+	registerParallelDispatch(host, executor, nil, logger, nil, gate)
+
+	ctx := WithToolContext(context.Background(), &ToolContext{
+		CallerType: CallerFixedAgent,
+		CallerName: "fixed-general",
+		Depth:      0,
+	})
+	input, _ := json.Marshal(parallelDispatchInput{
+		Tasks: []parallelTaskItem{
+			{AgentID: "explore", Instruction: "测试 plan mode gate"},
+		},
+	})
+
+	result, err := host.ExecuteTool(ctx, "parallel_dispatch", input)
+
+	if err != nil {
+		t.Fatalf("调用工具失败: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("期望 plan mode gate 拒绝 parallel_dispatch，实际成功: %s", string(result.Content))
+	}
+	if called {
+		t.Fatal("plan mode gate 拒绝后不应执行任何并行任务")
+	}
+	var errMsg string
+	_ = json.Unmarshal(result.Content, &errMsg)
+	if !contains(errMsg, "plan mode gate denied") {
+		t.Fatalf("错误消息 %q 不包含 plan mode gate denied", errMsg)
+	}
+}

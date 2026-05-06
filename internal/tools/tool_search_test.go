@@ -97,3 +97,169 @@ func TestToolSearchFindsRegisteredToolsWithoutMutatingRegistry(t *testing.T) {
 		t.Fatalf("expected positive score, got %f", got.Score)
 	}
 }
+
+func TestToolSearchFindsToolsBySchemaEnumValues(t *testing.T) {
+	logger := zap.NewNop()
+	host := mcphost.NewHost(logger)
+	host.RegisterTool(mcphost.ToolDefinition{
+		Name:        "schema_only_send",
+		Description: "internal router",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"platform": {
+					"type": "string",
+					"enum": ["feishu", "dingtalk"]
+				},
+				"chat_id": {
+					"type": "string"
+				},
+				"content": {
+					"type": "string"
+				}
+			},
+			"required": ["platform", "chat_id", "content"]
+		}`),
+	}, func(ctx context.Context, input json.RawMessage) (*mcphost.ToolResult, error) {
+		t.Fatal("tool_search must not execute matched tools")
+		return nil, nil
+	})
+	registerToolSearch(host, logger)
+
+	input, _ := json.Marshal(map[string]any{
+		"query": "feishu",
+	})
+	result, err := host.ExecuteTool(context.Background(), "tool_search", input)
+	if err != nil {
+		t.Fatalf("ExecuteTool(tool_search): %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool_search error: %s", result.DecodeContent())
+	}
+
+	var out struct {
+		Count   int `json:"count"`
+		Results []struct {
+			Name string `json:"name"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(result.DecodeContent()), &out); err != nil {
+		t.Fatalf("decode tool_search output: %v; content=%s", err, result.DecodeContent())
+	}
+	if out.Count == 0 || len(out.Results) == 0 {
+		t.Fatalf("expected schema enum hit, got count=%d content=%s", out.Count, result.DecodeContent())
+	}
+	if out.Results[0].Name != "schema_only_send" {
+		t.Fatalf("expected schema_only_send as top hit, got %q content=%s", out.Results[0].Name, result.DecodeContent())
+	}
+}
+
+func TestToolSearchFindsToolsBySchemaFieldName(t *testing.T) {
+	logger := zap.NewNop()
+	host := mcphost.NewHost(logger)
+	host.RegisterTool(mcphost.ToolDefinition{
+		Name:        "schema_only_notify",
+		Description: "internal router",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"chat_id": {
+					"type": "string",
+					"description": "目标聊天 ID"
+				},
+				"content": {
+					"type": "string",
+					"description": "消息内容"
+				}
+			},
+			"required": ["chat_id", "content"]
+		}`),
+	}, func(ctx context.Context, input json.RawMessage) (*mcphost.ToolResult, error) {
+		t.Fatal("tool_search must not execute matched tools")
+		return nil, nil
+	})
+	registerToolSearch(host, logger)
+
+	input, _ := json.Marshal(map[string]any{
+		"query": "chat id",
+	})
+	result, err := host.ExecuteTool(context.Background(), "tool_search", input)
+	if err != nil {
+		t.Fatalf("ExecuteTool(tool_search): %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool_search error: %s", result.DecodeContent())
+	}
+
+	var out struct {
+		Count   int `json:"count"`
+		Results []struct {
+			Name string `json:"name"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(result.DecodeContent()), &out); err != nil {
+		t.Fatalf("decode tool_search output: %v; content=%s", err, result.DecodeContent())
+	}
+	if out.Count == 0 || len(out.Results) == 0 {
+		t.Fatalf("expected schema field hit, got count=%d content=%s", out.Count, result.DecodeContent())
+	}
+	if out.Results[0].Name != "schema_only_notify" {
+		t.Fatalf("expected schema_only_notify as top hit, got %q content=%s", out.Results[0].Name, result.DecodeContent())
+	}
+}
+
+func TestToolSearchFindsToolsByNaturalLanguageQueryAndSchemaTerms(t *testing.T) {
+	logger := zap.NewNop()
+	host := mcphost.NewHost(logger)
+	host.RegisterTool(mcphost.ToolDefinition{
+		Name:        "schema_only_send",
+		Description: "internal router",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"platform": {
+					"type": "string",
+					"enum": ["feishu", "dingtalk"]
+				},
+				"chat_id": {
+					"type": "string"
+				},
+				"content": {
+					"type": "string"
+				}
+			},
+			"required": ["platform", "chat_id", "content"]
+		}`),
+	}, func(ctx context.Context, input json.RawMessage) (*mcphost.ToolResult, error) {
+		t.Fatal("tool_search must not execute matched tools")
+		return nil, nil
+	})
+	registerToolSearch(host, logger)
+
+	input, _ := json.Marshal(map[string]any{
+		"query": "发送给飞书用户:郭松",
+	})
+	result, err := host.ExecuteTool(context.Background(), "tool_search", input)
+	if err != nil {
+		t.Fatalf("ExecuteTool(tool_search): %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool_search error: %s", result.DecodeContent())
+	}
+
+	var out struct {
+		Count   int `json:"count"`
+		Results []struct {
+			Name string `json:"name"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(result.DecodeContent()), &out); err != nil {
+		t.Fatalf("decode tool_search output: %v; content=%s", err, result.DecodeContent())
+	}
+	if out.Count == 0 || len(out.Results) == 0 {
+		t.Fatalf("expected natural-language schema hit, got count=%d content=%s", out.Count, result.DecodeContent())
+	}
+	if out.Results[0].Name != "schema_only_send" {
+		t.Fatalf("expected schema_only_send as top hit, got %q content=%s", out.Results[0].Name, result.DecodeContent())
+	}
+}

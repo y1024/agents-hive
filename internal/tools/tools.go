@@ -280,7 +280,7 @@ func RegisterBuiltinTools(host *mcphost.Host, logger *zap.Logger, cfg *config.Co
 		if b, ok := taskExecutor.(ParallelDispatchBroadcaster); ok {
 			broadcaster = b
 		}
-		registerParallelDispatch(host, taskExecutor, broadcaster, logger, delegationObserver)
+		registerParallelDispatch(host, taskExecutor, broadcaster, logger, delegationObserver, nestedToolGate)
 		count++
 
 		// 如果提供了 agentSpawner，注册 spawn_agent 工具

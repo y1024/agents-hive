@@ -132,6 +132,8 @@ cp config.example.json config.json
 - **安全执行系统**: 命令白名单 (allow/ask/deny)、环境变量监控
 - **ACP 控制平面**: 多会话限流、绑定管理
 - **上下文压缩**: LLM 摘要 + tiktoken 精确计数，自动降级
+- **Plan Runtime + Session Todos**: 长任务自动 checkpoint / resume,session-scoped todos 实时 UI 可见,Plan Runtime Guard 解耦"LLM 一轮结束"与"任务完成"。默认开启 (`agent.plan_runtime.enabled=true`)。`enter_plan_mode` / `todo_write` / `finish_plan` / `exit_plan_mode` 工具供 agent 自主进出计划态。详见 [docs/计划与路线/Agent-计划状态与Todos实时化重构计划.md](docs/计划与路线/Agent-计划状态与Todos实时化重构计划.md)
+- **System Prompt 治理**: 7 段独立 prompt (`base/execution/plan_runtime/business/code_editing/safety/reply`),PromptLoader 三层优先级 (DB override > 文件 > `//go:embed` 内置),管理台支持热更新与 smoke eval。详见 [docs/计划与路线/Agent-System-Prompt重整方案.md](docs/计划与路线/Agent-System-Prompt重整方案.md)
 
 ---
 

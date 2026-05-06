@@ -3,8 +3,10 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 
 	"go.uber.org/zap"
 
@@ -26,6 +28,12 @@ type toolSearchHit struct {
 	IsConcurrencySafe bool    `json:"is_concurrency_safe"`
 	Core              bool    `json:"core,omitempty"`
 	Score             float64 `json:"score"`
+}
+
+// ToolRecallHit 是工具目录召回结果，供 tool_search 和 Master 每轮候选召回复用。
+type ToolRecallHit struct {
+	Tool  mcphost.ToolDefinition
+	Score float64
 }
 
 func registerToolSearch(host *mcphost.Host, logger *zap.Logger) {
@@ -67,12 +75,10 @@ func handleToolSearch(host *mcphost.Host, raw json.RawMessage) (*mcphost.ToolRes
 	}
 
 	qLower := strings.ToLower(strings.TrimSpace(in.Query))
-	defs := host.ListTools()
-	hits := make([]toolSearchHit, 0, len(defs))
-	for _, def := range defs {
-		if !matchesQuery(qLower, def.Name, def.Description, nil, nil) {
-			continue
-		}
+	recalls := RecallToolCatalog(host.ListTools(), qLower, in.Limit)
+	hits := make([]toolSearchHit, 0, len(recalls))
+	for _, recall := range recalls {
+		def := recall.Tool
 		hits = append(hits, toolSearchHit{
 			Name:              def.Name,
 			Description:       def.Description,
@@ -80,18 +86,8 @@ func handleToolSearch(host *mcphost.Host, raw json.RawMessage) (*mcphost.ToolRes
 			RequiresApproval:  false,
 			IsConcurrencySafe: def.IsConcurrencySafe,
 			Core:              def.Core,
-			Score:             scoreHit(qLower, def.Name, def.Description, nil, false, 0),
+			Score:             recall.Score,
 		})
-	}
-
-	sort.SliceStable(hits, func(i, j int) bool {
-		if hits[i].Score == hits[j].Score {
-			return hits[i].Name < hits[j].Name
-		}
-		return hits[i].Score > hits[j].Score
-	})
-	if in.Limit > 0 && len(hits) > in.Limit {
-		hits = hits[:in.Limit]
 	}
 
 	out, _ := json.Marshal(map[string]any{
@@ -106,4 +102,254 @@ func inferToolDangerLevel(def mcphost.ToolDefinition) string {
 		return "safe"
 	}
 	return "unknown"
+}
+
+// RecallToolCatalog 基于工具 name/description/schema 召回当前 query 相关工具。
+// 它是只读纯函数，不执行工具、不改变注册表。
+func RecallToolCatalog(catalog []mcphost.ToolDefinition, query string, limit int) []ToolRecallHit {
+	if len(catalog) == 0 {
+		return nil
+	}
+	qLower := strings.ToLower(strings.TrimSpace(query))
+	hits := make([]ToolRecallHit, 0, len(catalog))
+	for _, def := range catalog {
+		schemaTerms := toolSearchSchemaTerms(def.InputSchema)
+		score := scoreToolSearchHit(qLower, def, schemaTerms)
+		if score <= 0 {
+			continue
+		}
+		hits = append(hits, ToolRecallHit{Tool: def, Score: score})
+	}
+
+	sort.SliceStable(hits, func(i, j int) bool {
+		if hits[i].Score == hits[j].Score {
+			return hits[i].Tool.Name < hits[j].Tool.Name
+		}
+		return hits[i].Score > hits[j].Score
+	})
+	if limit > 0 && len(hits) > limit {
+		hits = hits[:limit]
+	}
+	return hits
+}
+
+func matchesToolSearchQuery(qLower string, def mcphost.ToolDefinition, schemaTerms []string) bool {
+	return scoreToolSearchHit(qLower, def, schemaTerms) > 0
+}
+
+func scoreToolSearchHit(qLower string, def mcphost.ToolDefinition, schemaTerms []string) float64 {
+	score := scoreHit(qLower, def.Name, def.Description, nil, false, 0)
+	if qLower == "" {
+		return score + scoreToolSearchTerms(qLower, schemaTerms)
+	}
+	score += scoreToolSearchTerms(qLower, schemaTerms)
+	for _, term := range toolSearchQueryTerms(qLower) {
+		if term == qLower {
+			continue
+		}
+		score += 0.65 * scoreHit(term, def.Name, def.Description, nil, false, 0)
+		score += 0.65 * scoreToolSearchTerms(term, schemaTerms)
+	}
+	return score
+}
+
+func matchesToolSearchTerms(qLower string, terms []string) bool {
+	return scoreToolSearchTerms(qLower, terms) > 0
+}
+
+func scoreToolSearchTerms(qLower string, terms []string) float64 {
+	if qLower == "" {
+		return 0.5
+	}
+	normalizedQuery := normalizeToolSearchTerm(qLower)
+	score := 0.0
+	for _, term := range terms {
+		termLower := strings.ToLower(strings.TrimSpace(term))
+		if termLower == "" {
+			continue
+		}
+		normalizedTerm := normalizeToolSearchTerm(termLower)
+		switch {
+		case termLower == qLower || normalizedTerm == normalizedQuery:
+			score += 1.2
+		case strings.Contains(termLower, qLower) || strings.Contains(normalizedTerm, normalizedQuery) || strings.Contains(normalizedQuery, normalizedTerm):
+			score += 0.7
+		}
+		if score >= 2.4 {
+			break
+		}
+	}
+	return score
+}
+
+func toolSearchSchemaTerms(schema json.RawMessage) []string {
+	if len(schema) == 0 {
+		return nil
+	}
+	var v any
+	if err := json.Unmarshal(schema, &v); err != nil {
+		return nil
+	}
+	terms := make([]string, 0, 16)
+	collectToolSearchSchemaTerms(v, &terms)
+	return terms
+}
+
+var toolSearchSchemaKeyBlacklist = map[string]bool{
+	"$schema":              true,
+	"additionalproperties": true,
+	"anyof":                true,
+	"default":              true,
+	"items":                true,
+	"oneof":                true,
+	"properties":           true,
+	"required":             true,
+	"type":                 true,
+}
+
+var toolSearchTermSeparator = regexp.MustCompile(`[^a-z0-9\p{Han}]+`)
+
+var toolSearchQueryAliases = map[string][]string{
+	"发送":   {"send"},
+	"发给":   {"send"},
+	"消息":   {"message", "im"},
+	"通知":   {"message", "notify"},
+	"飞书":   {"feishu", "lark"},
+	"lark": {"feishu"},
+	"钉钉":   {"dingtalk"},
+	"微信":   {"wechat"},
+	"企微":   {"wecom"},
+	"企业微信": {"wecom"},
+	"用户":   {"user", "contact", "member"},
+	"联系人":  {"contact", "user"},
+	"群聊":   {"chat", "group"},
+	"群组":   {"chat", "group"},
+	"聊天":   {"chat"},
+}
+
+var toolSearchQueryStopwords = map[string]bool{
+	"a": true, "an": true, "and": true, "for": true, "of": true, "the": true, "to": true,
+}
+
+func collectToolSearchSchemaTerms(v any, terms *[]string) {
+	switch x := v.(type) {
+	case map[string]any:
+		for key, value := range x {
+			keyNorm := normalizeToolSearchTerm(key)
+			if !toolSearchSchemaKeyBlacklist[keyNorm] {
+				appendToolSearchTermVariants(terms, key)
+			}
+			collectToolSearchSchemaTerms(value, terms)
+		}
+	case []any:
+		for _, item := range x {
+			collectToolSearchSchemaTerms(item, terms)
+		}
+	case string:
+		appendToolSearchTermVariants(terms, x)
+	}
+}
+
+func appendToolSearchTermVariants(terms *[]string, raw string) {
+	term := strings.TrimSpace(strings.ToLower(raw))
+	if term == "" {
+		return
+	}
+	*terms = append(*terms, term)
+
+	spaced := strings.TrimSpace(toolSearchTermSeparator.ReplaceAllString(term, " "))
+	if spaced != "" && spaced != term {
+		*terms = append(*terms, spaced)
+	}
+
+	compact := normalizeToolSearchTerm(term)
+	if compact != "" && compact != term && compact != spaced {
+		*terms = append(*terms, compact)
+	}
+}
+
+func normalizeToolSearchTerm(s string) string {
+	return toolSearchTermSeparator.ReplaceAllString(strings.ToLower(strings.TrimSpace(s)), "")
+}
+
+func toolSearchQueryTerms(query string) []string {
+	query = strings.TrimSpace(strings.ToLower(query))
+	if query == "" {
+		return nil
+	}
+
+	seen := make(map[string]struct{})
+	terms := make([]string, 0, 12)
+	var add func(string)
+	add = func(raw string) {
+		raw = strings.TrimSpace(strings.ToLower(raw))
+		if !isUsefulToolSearchQueryTerm(raw) {
+			return
+		}
+		var variants []string
+		appendToolSearchTermVariants(&variants, raw)
+		for _, variant := range variants {
+			if !isUsefulToolSearchQueryTerm(variant) {
+				continue
+			}
+			if _, ok := seen[variant]; ok {
+				continue
+			}
+			seen[variant] = struct{}{}
+			terms = append(terms, variant)
+			for _, alias := range toolSearchQueryAliases[normalizeToolSearchTerm(variant)] {
+				add(alias)
+			}
+		}
+	}
+
+	for _, term := range strings.Fields(toolSearchTermSeparator.ReplaceAllString(query, " ")) {
+		add(term)
+	}
+	for _, term := range toolSearchHanNGrams(query) {
+		add(term)
+	}
+	return terms
+}
+
+func isUsefulToolSearchQueryTerm(term string) bool {
+	term = strings.TrimSpace(strings.ToLower(term))
+	if term == "" {
+		return false
+	}
+	normalized := normalizeToolSearchTerm(term)
+	if normalized == "" || toolSearchQueryStopwords[normalized] {
+		return false
+	}
+	return len([]rune(normalized)) > 1
+}
+
+func toolSearchHanNGrams(s string) []string {
+	var out []string
+	var seq []rune
+	flush := func() {
+		if len(seq) < 2 {
+			seq = seq[:0]
+			return
+		}
+		for n := 2; n <= 3; n++ {
+			if len(seq) < n {
+				continue
+			}
+			for i := 0; i+n <= len(seq); i++ {
+				out = append(out, string(seq[i:i+n]))
+			}
+		}
+		seq = seq[:0]
+	}
+
+	for _, r := range s {
+		if unicode.Is(unicode.Han, r) {
+			seq = append(seq, r)
+			continue
+		}
+		flush()
+	}
+	flush()
+	return out
 }

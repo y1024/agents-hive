@@ -62,7 +62,12 @@ const maxTaskTimeout = 30 * time.Minute
 // executor: TaskExecutor 实现（通常是 Master）
 // broadcaster: 广播接口（可选，用于实时广播任务组事件）
 // logger: 日志记录器
-func registerParallelDispatch(host *mcphost.Host, executor TaskExecutor, broadcaster ParallelDispatchBroadcaster, logger *zap.Logger, observer DelegationObserver) {
+func registerParallelDispatch(host *mcphost.Host, executor TaskExecutor, broadcaster ParallelDispatchBroadcaster, logger *zap.Logger, observer DelegationObserver, gates ...NestedToolGate) {
+	var gate NestedToolGate
+	if len(gates) > 0 {
+		gate = gates[0]
+	}
+
 	schema, _ := json.Marshal(map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -122,6 +127,20 @@ func registerParallelDispatch(host *mcphost.Host, executor TaskExecutor, broadca
 					Content: jsonText("错误：parallel_dispatch 工具仅允许 Master Agent 和固定 Agent 调用"),
 					IsError: true,
 				}, nil
+			}
+
+			if gate != nil {
+				if err := gate.CheckNestedToolAllowed(ctx, "parallel_dispatch"); err != nil {
+					logger.Warn("parallel_dispatch 工具调用被 plan mode gate 拒绝",
+						zap.String("caller_type", string(toolCtx.CallerType)),
+						zap.String("caller_name", toolCtx.CallerName),
+						zap.Error(err),
+					)
+					return &mcphost.ToolResult{
+						Content: jsonText(err.Error()),
+						IsError: true,
+					}, nil
+				}
 			}
 
 			// 检查调用深度，防止递归

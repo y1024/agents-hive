@@ -147,6 +147,8 @@
     "pausedHint": "发送一条消息以继续",
     "resume": "继续",
     "resumeRunning": "继续中",
+    "collapse": "折叠待办",
+    "expand": "展开待办",
     "emptyActivePlan": "计划已激活，待办稍后会显示在这里。",
     "source": {
       "specProjected": "从规格预测生成",
@@ -627,6 +629,8 @@
     "close": "关闭",
     "closeAll": "关闭全部",
     "copyAll": "复制全部",
+    "collapse": "折叠画布",
+    "expand": "展开画布",
     "noPreview": "此类型不支持预览",
     "enableScripts": "启用脚本",
     "disableScripts": "禁用脚本",

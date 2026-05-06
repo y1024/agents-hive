@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ChevronDown, ClipboardList, Play } from 'lucide-react';
+import { ChevronDown, ClipboardList, PanelRightClose, PanelRightOpen, Play } from 'lucide-react';
 import { useNodeClient } from '../../hooks/useNodeClient';
 import { shouldShowTodosPanel, useTodosStore, type PlanStatus } from '../../store/todos';
 import { TodoItem } from './TodoItem';
@@ -15,6 +15,7 @@ export function TodosList({ variant = 'desktop' }: { variant?: TodosListVariant 
   const error = useTodosStore((s) => s.error);
   const resumePlan = useTodosStore((s) => s.resumePlan);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [desktopCollapsed, setDesktopCollapsed] = useState(false);
 
   const orderedTodos = useMemo(
     () => (snapshot ? [...snapshot.todos].sort((a, b) => a.order - b.order) : []),
@@ -67,9 +68,38 @@ export function TodosList({ variant = 'desktop' }: { variant?: TodosListVariant 
     );
   }
 
+  if (desktopCollapsed) {
+    return (
+      <section
+        className="todos-panel todos-panel-enter hidden md:flex min-h-0 w-8 shrink-0 flex-col border-b border-[var(--border-color)] bg-[var(--bg-card)]"
+        role="complementary"
+        aria-label={t('todos.ariaLabel')}
+      >
+        <span className="sr-only" aria-live="polite" aria-atomic="true">
+          {t(`todos.planStatus.${visibleSnapshot.plan_status}`)}
+        </span>
+        <button
+          type="button"
+          onClick={() => setDesktopCollapsed(false)}
+          className="flex h-full min-h-32 w-8 flex-col items-center justify-between gap-2 py-2 text-[var(--text-secondary)] transition hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+          aria-label={t('todos.expand')}
+          aria-expanded="false"
+        >
+          <PanelRightOpen className="h-4 w-4 shrink-0" />
+          <span className="writing-vertical text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--text-secondary)]">
+            {t('todos.title')}
+          </span>
+          <span className="rounded-full bg-[var(--accent-subtle)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--accent-600)] dark:text-[var(--accent-300)]">
+            {orderedTodos.length}
+          </span>
+        </button>
+      </section>
+    );
+  }
+
   return (
     <section
-      className="todos-panel hidden md:flex min-h-0 w-80 shrink-0 flex-col border-b border-[var(--border-color)] bg-[var(--bg-card)]"
+      className="todos-panel todos-panel-enter hidden md:flex min-h-0 w-80 shrink-0 flex-col border-b border-[var(--border-color)] bg-[var(--bg-card)]"
       role="complementary"
       aria-label={t('todos.ariaLabel')}
     >
@@ -78,9 +108,18 @@ export function TodosList({ variant = 'desktop' }: { variant?: TodosListVariant 
         <h2 className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--text-primary)]">
           {t('todos.title')}
         </h2>
-        <span className="text-xs text-[var(--text-secondary)]">
+        <span className="text-xs text-[var(--text-secondary)]" aria-live="polite" aria-atomic="true">
           {t(`todos.planStatus.${visibleSnapshot.plan_status}`)}
         </span>
+        <button
+          type="button"
+          onClick={() => setDesktopCollapsed(true)}
+          className="rounded p-1 text-[var(--text-secondary)] transition hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+          aria-label={t('todos.collapse')}
+          aria-expanded="true"
+        >
+          <PanelRightClose className="h-4 w-4" />
+        </button>
       </div>
       <TodosPanelBody
         orderedTodos={orderedTodos}

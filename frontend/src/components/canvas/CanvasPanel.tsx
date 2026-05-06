@@ -1,6 +1,6 @@
 import { useCallback, useState, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { X, Download, Copy, Check, Eye, Code } from 'lucide-react';
+import { X, Download, Copy, Check, Eye, Code, PanelRightClose, PanelRightOpen } from 'lucide-react';
 import { useCanvasStore } from '../../store/canvas';
 import type { Artifact } from '../../store/canvas';
 import { HtmlRenderer } from './renderers/HtmlRenderer';
@@ -19,6 +19,7 @@ export function CanvasPanel() {
   const closeAll = useCanvasStore((s) => s.closeAll);
 
   const [copied, setCopied] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   useEffect(() => () => clearTimeout(timerRef.current), []);
@@ -61,8 +62,30 @@ export function CanvasPanel() {
 
   if (!active) return null;
 
+  if (collapsed) {
+    return (
+      <aside className="canvas-panel todos-panel-enter flex h-full w-8 shrink-0 flex-col border-l border-[var(--border-color)] bg-[var(--bg-card)]">
+        <button
+          type="button"
+          onClick={() => setCollapsed(false)}
+          className="flex h-full min-h-32 w-8 flex-col items-center justify-between gap-2 py-2 text-[var(--text-secondary)] transition hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+          aria-label={t('canvas.expand')}
+          aria-expanded="false"
+        >
+          <PanelRightOpen className="h-4 w-4 shrink-0" />
+          <span className="writing-vertical text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--text-secondary)]">
+            Canvas
+          </span>
+          <span className="rounded-full bg-[var(--accent-subtle)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--accent-600)] dark:text-[var(--accent-300)]">
+            {artifacts.length}
+          </span>
+        </button>
+      </aside>
+    );
+  }
+
   return (
-    <aside className="canvas-panel w-full flex flex-col border-l border-[var(--border-color)] bg-[var(--bg-primary)] h-full">
+    <aside className="canvas-panel todos-panel-enter w-full flex flex-col border-l border-[var(--border-color)] bg-[var(--bg-primary)] h-full">
       {/* 单层 header：左边 artifact 标签，右边预览/源码切换 + 操作 */}
       <div className="flex items-center border-b border-[var(--border-color)] bg-[var(--bg-card)] shrink-0 h-10 px-1 gap-1">
         {/* Artifact 标签 */}
@@ -135,6 +158,15 @@ export function CanvasPanel() {
             title={t('canvas.download')}
           >
             <Download className="w-3.5 h-3.5" />
+          </button>
+          <button
+            onClick={() => setCollapsed(true)}
+            className="p-1.5 rounded text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors"
+            title={t('canvas.collapse')}
+            aria-label={t('canvas.collapse')}
+            aria-expanded="true"
+          >
+            <PanelRightClose className="w-3.5 h-3.5" />
           </button>
           <button
             onClick={closeAll}

@@ -166,6 +166,33 @@ func TestExecuteToolGate_BlocksPlanModeWriteTools(t *testing.T) {
 	assertPlanModeAuditLog(t, m, "tool_blocked", "plan-gate", "", "write_file")
 }
 
+func TestExecuteToolGate_BlocksPlanModeParallelDispatch(t *testing.T) {
+	m := newPhase6MasterWithMCPHost(t)
+	m.obsCh = make(chan observabilityEntry, 16)
+
+	called := false
+	m.mcpHost.RegisterTool(
+		mcphost.ToolDefinition{Name: "parallel_dispatch", Description: "test"},
+		func(ctx context.Context, input json.RawMessage) (*mcphost.ToolResult, error) {
+			called = true
+			return &mcphost.ToolResult{Content: jsonTestText("dispatched")}, nil
+		},
+	)
+
+	session := newTestSession("plan-parallel-gate")
+	session.PlanMode = true
+	session.PlanStatus = sessiontodo.PlanStatusPlanning
+	tc := llm.ToolCall{ID: "parallel-1", Name: "parallel_dispatch", Arguments: json.RawMessage(`{"tasks":[]}`)}
+
+	result := m.executeTool(context.Background(), session, "", tc, "trace", "span")
+
+	assert.True(t, result.IsError)
+	assert.True(t, result.Terminal)
+	assert.False(t, called, "parallel_dispatch 必须在计划态执行前被 gate 拒绝")
+	assert.Contains(t, result.Content, "plan mode")
+	assertPlanModeAuditLog(t, m, "tool_blocked", "plan-parallel-gate", "", "parallel_dispatch")
+}
+
 func TestExecuteTool_SyncsPlanModeStateAfterPlanToolSuccess(t *testing.T) {
 	m := newPhase6MasterWithMCPHost(t)
 	m.eventBus = NewEventBus(zap.NewNop())

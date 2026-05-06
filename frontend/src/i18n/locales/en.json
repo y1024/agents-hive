@@ -147,6 +147,8 @@
     "pausedHint": "Send a message to continue",
     "resume": "Resume",
     "resumeRunning": "Resuming",
+    "collapse": "Collapse todos",
+    "expand": "Expand todos",
     "emptyActivePlan": "Plan is active; todos will appear here.",
     "source": {
       "specProjected": "Projected from spec",
@@ -627,6 +629,8 @@
     "close": "Close",
     "closeAll": "Close All",
     "copyAll": "Copy All",
+    "collapse": "Collapse canvas",
+    "expand": "Expand canvas",
     "noPreview": "Preview not available for this type",
     "enableScripts": "Enable Scripts",
     "disableScripts": "Disable Scripts",

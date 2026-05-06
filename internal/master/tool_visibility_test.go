@@ -71,6 +71,98 @@ func TestModelVisibleTools_PlanModeUsesExecutionGate(t *testing.T) {
 	}
 }
 
+func TestModelVisibleTools_PerTurnRecallAddsHiddenToolsWithoutDiscovery(t *testing.T) {
+	session := &SessionState{ID: "s1"}
+	catalog := []mcphost.ToolDefinition{
+		{Name: "read_file", Core: true},
+		{Name: "tool_search", Core: true},
+		{
+			Name:        "send_im_message",
+			Description: "发送消息到 IM 平台（钉钉/飞书/企业微信/个人微信）",
+			InputSchema: []byte(`{
+				"type": "object",
+				"properties": {
+					"platform": {"type": "string", "enum": ["dingtalk", "feishu", "wecom"]},
+					"chat_id": {"type": "string", "description": "聊天 ID"},
+					"content": {"type": "string", "description": "消息内容"}
+				}
+			}`),
+		},
+	}
+
+	initial := modelVisibleToolsForSession(session, catalog)
+	if hasTool(initial, "send_im_message") {
+		t.Fatal("hidden IM tool should not be baseline-visible before discovery")
+	}
+
+	recalled := modelVisibleToolsForSessionWithRecall(session, catalog, "发送给飞书用户:郭松")
+	if !hasTool(recalled, "send_im_message") {
+		t.Fatal("natural-language per-turn recall should add matching hidden IM tool")
+	}
+	if session.IsToolDiscovered("send_im_message") {
+		t.Fatal("per-turn recall should not persist hidden tool into session discovery state")
+	}
+}
+
+func TestModelVisibleTools_PerTurnRecallRespectsPlanModeGate(t *testing.T) {
+	session := &SessionState{
+		ID:         "s-plan",
+		PlanMode:   true,
+		PlanStatus: sessiontodo.PlanStatusPlanning,
+	}
+	catalog := []mcphost.ToolDefinition{
+		{Name: "read_file", Core: true},
+		{Name: "tool_search", Core: true},
+		{
+			Name:        "send_im_message",
+			Description: "发送消息到 IM 平台（钉钉/飞书/企业微信/个人微信）",
+			InputSchema: []byte(`{
+				"type": "object",
+				"properties": {
+					"platform": {"type": "string", "enum": ["dingtalk", "feishu", "wecom"]},
+					"chat_id": {"type": "string", "description": "聊天 ID"},
+					"content": {"type": "string", "description": "消息内容"}
+				}
+			}`),
+		},
+	}
+
+	visible := modelVisibleToolsForSessionWithRecall(session, catalog, "发送给飞书用户:郭松")
+	if hasTool(visible, "send_im_message") {
+		t.Fatal("per-turn recall must still respect plan mode execution gate")
+	}
+}
+
+func TestModelVisibleToolsFromPreparedMessages_UsesLatestUserMessage(t *testing.T) {
+	session := &SessionState{ID: "s1"}
+	catalog := []mcphost.ToolDefinition{
+		{Name: "read_file", Core: true},
+		{Name: "tool_search", Core: true},
+		{
+			Name:        "send_im_message",
+			Description: "发送消息到 IM 平台（钉钉/飞书/企业微信/个人微信）",
+			InputSchema: []byte(`{
+				"type": "object",
+				"properties": {
+					"platform": {"type": "string", "enum": ["dingtalk", "feishu", "wecom"]},
+					"chat_id": {"type": "string"},
+					"content": {"type": "string"}
+				}
+			}`),
+		},
+	}
+	messages := []llm.MessageWithTools{
+		{Role: "user", Content: llm.NewTextContent("先别发")},
+		{Role: "assistant", Content: llm.NewTextContent("好的")},
+		{Role: "user", Content: llm.NewTextContent("发送给飞书用户:郭松")},
+	}
+
+	visible := modelVisibleToolsForPreparedMessages(session, catalog, messages)
+	if !hasTool(visible, "send_im_message") {
+		t.Fatal("prepared messages should use the latest user query for per-turn recall")
+	}
+}
+
 func TestDiscoveredToolNamesFromToolSearchResult(t *testing.T) {
 	content := `{"count":2,"results":[{"name":"custom_ext"},{"name":"acme__publish"}]}`
 

@@ -367,11 +367,12 @@ func (m *Master) runReActLoop(
 			},
 		})
 
+		modelVisibleTools := modelVisibleToolsForPreparedMessages(session, availableTools, preparedMessages)
 		m.logger.Info("发起 LLM 调用",
 			zap.String("session_id", session.ID),
 			zap.String("model", sessionLLM.Model()),
 			zap.Int("iteration", i+1),
-			zap.Int("tools_available", len(modelVisibleToolsForSession(session, availableTools))),
+			zap.Int("tools_available", len(modelVisibleTools)),
 		)
 		llmCallStart := time.Now()
 		llmSpanID := observability.NewSpanID()
@@ -408,7 +409,7 @@ func (m *Master) runReActLoop(
 		llmReq := llm.ChatWithToolsRequest{
 			SystemPrompt:    systemPrompt,
 			Messages:        preparedMessages,
-			Tools:           modelVisibleToolsForSession(session, availableTools),
+			Tools:           modelVisibleTools,
 			Temperature:     temperature,
 			MaxTokens:       maxTokens,
 			ReasoningEffort: reasoningEffort,

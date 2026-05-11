@@ -48,6 +48,25 @@ interface Props {
   onRegenerate?: () => void;
 }
 
+function isIntegratedToolResult(msg: Message, assistantToolCallIds: Set<string>): boolean {
+  return msg.role === 'tool' && !!msg.tool_call_id && assistantToolCallIds.has(msg.tool_call_id);
+}
+
+function messageAvatarGroup(msg: Message): 'user' | 'assistant' {
+  return msg.role === 'user' ? 'user' : 'assistant';
+}
+
+function shouldShowMessageRole(messages: Message[], index: number, assistantToolCallIds: Set<string>): boolean {
+  const group = messageAvatarGroup(messages[index]);
+
+  for (let i = index - 1; i >= 0; i--) {
+    if (isIntegratedToolResult(messages[i], assistantToolCallIds)) continue;
+    return messageAvatarGroup(messages[i]) !== group;
+  }
+
+  return true;
+}
+
 export function MessageList({ messages, loading, streamingStatus, onRegenerate }: Props) {
   const { t } = useTranslation();
   const inlineApprovals = useChatStore((s) => s.inlineApprovals);
@@ -209,12 +228,11 @@ export function MessageList({ messages, loading, streamingStatus, onRegenerate }
       <div className="max-w-4xl mx-auto py-2">
         {messages.map((msg, i) => {
           // 跳过 tool 消息的独立渲染（结果已整合到 ToolCallCard 中）
-          if (msg.role === 'tool' && msg.tool_call_id && assistantToolCallIds.has(msg.tool_call_id)) {
+          if (isIntegratedToolResult(msg, assistantToolCallIds)) {
             return null;
           }
 
-          const prevRole = i > 0 ? messages[i - 1].role : null;
-          const showRole = msg.role !== prevRole;
+          const showRole = shouldShowMessageRole(messages, i, assistantToolCallIds);
 
           // 收集应显示在该消息之后的审批卡片和已处理提示
           const approvalsHere = inlineApprovals.filter((r) => r.afterMessageTimestamp === msg.timestamp);

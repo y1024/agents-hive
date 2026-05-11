@@ -23,6 +23,9 @@ type Store interface {
 	GetWechatConversationByOwnerPeer(ctx context.Context, ownerUserID, peerWxid string) (*store.WechatConversationRecord, error)
 	ListWechatConversationsByOwner(ctx context.Context, ownerUserID string) ([]*store.WechatConversationRecord, error)
 	UpdateWechatConversationSendState(ctx context.Context, ownerUserID, peerWxid string, canSend bool, sendState string) error
+	UpdateWechatConversationContextToken(ctx context.Context, ownerUserID, peerWxid, contextToken string) error
+	GetWechatConversationContextToken(ctx context.Context, ownerUserID, peerWxid string) (string, error)
+	ClearWechatConversationContextTokens(ctx context.Context, ownerUserID string) error
 }
 
 func metadataJSON(values map[string]any) json.RawMessage {

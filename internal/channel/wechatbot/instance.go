@@ -70,6 +70,7 @@ type BotInstance struct {
 	stopped       bool
 	recovering    bool
 	recoverCancel context.CancelFunc
+	handlerOnce   sync.Once
 }
 
 func NewInstance(opts InstanceOptions) *BotInstance {
@@ -162,9 +163,7 @@ func (i *BotInstance) login(ctx context.Context, force bool, resetRecovery bool)
 	}
 	i.enforceCredentialPermission()
 
-	i.backend.OnMessage(func(msg *SDKMessage) {
-		i.handleIncoming(context.Background(), msg)
-	})
+	i.registerMessageHandler()
 	runCtx, cancel := context.WithCancel(context.Background())
 	i.mu.Lock()
 	if i.cancel != nil {
@@ -176,6 +175,14 @@ func (i *BotInstance) login(ctx context.Context, force bool, resetRecovery bool)
 	go i.runLoop(runCtx)
 	i.setStatus(StatusOnline, "")
 	return nil
+}
+
+func (i *BotInstance) registerMessageHandler() {
+	i.handlerOnce.Do(func() {
+		i.backend.OnMessage(func(msg *SDKMessage) {
+			i.handleIncoming(context.Background(), msg)
+		})
+	})
 }
 
 func (i *BotInstance) Stop() {
@@ -209,9 +216,59 @@ func (i *BotInstance) Send(ctx context.Context, peerWxid, content string) error 
 			}
 			i.emitMetric(MetricUnavailableTotal, map[string]any{"reason": "no_context"})
 			i.emitMetric(MetricOutboundTotal, map[string]any{"status": "no_context"})
+			if i.store != nil {
+				if token, tokenErr := i.store.GetWechatConversationContextToken(ctx, i.ownerUserID, peerWxid); tokenErr == nil && token != "" {
+					return i.sendWithContextToken(ctx, peerWxid, token, content)
+				}
+			}
 			return ErrNoContextToken
 		}
 		i.emitMetric(MetricSDKErrorsTotal, map[string]any{"reason": "send_failed"})
+		i.emitMetric(MetricOutboundTotal, map[string]any{"status": "failure"})
+		return err
+	}
+	if i.store != nil {
+		_ = i.store.UpdateWechatConversationSendState(ctx, i.ownerUserID, peerWxid, true, "ready")
+	}
+	i.emitMetric(MetricOutboundTotal, map[string]any{"status": "success"})
+	return nil
+}
+
+func (i *BotInstance) sendWithContextToken(ctx context.Context, peerWxid, contextToken, content string) error {
+	if contextToken == "" {
+		return ErrNoContextToken
+	}
+	err := i.backend.SendWithContextToken(ctx, peerWxid, contextToken, content)
+	if err != nil {
+		i.emitMetric(MetricSDKErrorsTotal, map[string]any{"reason": "send_with_context_failed"})
+		i.emitMetric(MetricOutboundTotal, map[string]any{"status": "failure"})
+		return err
+	}
+	if i.store != nil {
+		_ = i.store.UpdateWechatConversationSendState(ctx, i.ownerUserID, peerWxid, true, "ready")
+	}
+	i.emitMetric(MetricOutboundTotal, map[string]any{"status": "success"})
+	return nil
+}
+
+func (i *BotInstance) Reply(ctx context.Context, peerWxid, contextToken, content string) error {
+	if i.Status() != StatusOnline {
+		i.emitMetric(MetricUnavailableTotal, map[string]any{"reason": "offline"})
+		i.emitMetric(MetricOutboundTotal, map[string]any{"status": "offline"})
+		return errors.New("wechatbot offline")
+	}
+	if contextToken == "" {
+		i.emitMetric(MetricUnavailableTotal, map[string]any{"reason": "no_context"})
+		i.emitMetric(MetricOutboundTotal, map[string]any{"status": "no_context"})
+		return ErrNoContextToken
+	}
+	tctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	_ = i.backend.StopTyping(tctx, peerWxid)
+	cancel()
+
+	err := i.backend.Reply(ctx, &SDKMessage{UserID: peerWxid, ContextToken: contextToken}, content)
+	if err != nil {
+		i.emitMetric(MetricSDKErrorsTotal, map[string]any{"reason": "reply_failed"})
 		i.emitMetric(MetricOutboundTotal, map[string]any{"status": "failure"})
 		return err
 	}
@@ -311,6 +368,9 @@ func (i *BotInstance) autoRecoverLoop(ctx context.Context, lastErr string, delay
 	}
 
 	i.setStatus(StatusReloginRequired, lastErr)
+	if i.store != nil {
+		_ = i.store.ClearWechatConversationContextTokens(context.Background(), i.ownerUserID)
+	}
 	i.emitMetric(MetricAutoRecoverTotal, map[string]any{"result": "manual_required"})
 }
 
@@ -361,6 +421,16 @@ func (i *BotInstance) handleIncoming(ctx context.Context, msg *SDKMessage) {
 			zap.String("message_id", messageID(msg)))
 		return
 	}
+	if msg.ContextToken != "" {
+		tctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		if err := i.backend.SendTyping(tctx, msg.UserID); err != nil {
+			i.logger.Debug("wechatbot 输入中状态发送失败",
+				zap.String("owner_user_hash", safeWechatID(i.ownerUserID)),
+				zap.String("peer_wxid_hash", safeWechatID(msg.UserID)),
+				zap.Error(err))
+		}
+		cancel()
+	}
 	i.emitMetric(MetricInboundTotal, map[string]any{"msg_type": string(msg.Type)})
 	now := time.Now()
 	content := messageContent(msg)
@@ -396,10 +466,11 @@ func (i *BotInstance) handleIncoming(ctx context.Context, msg *SDKMessage) {
 			LastMessageAt:      &now,
 			CanSend:            msg.ContextToken != "",
 			SendState:          map[bool]string{true: "ready", false: "unknown"}[msg.ContextToken != ""],
-			Metadata: metadataJSON(map[string]any{
-				"message_type": string(msg.Type),
-			}),
+			Metadata:           metadataJSON(messageMetadata(msg)),
 		})
+		if msg.ContextToken != "" {
+			_ = i.store.UpdateWechatConversationContextToken(ctx, i.ownerUserID, msg.UserID, msg.ContextToken)
+		}
 	}
 
 	if i.router == nil {
@@ -419,6 +490,7 @@ func (i *BotInstance) handleIncoming(ctx context.Context, msg *SDKMessage) {
 		SenderID:    msg.UserID,
 		Content:     content,
 		MessageType: string(msg.Type),
+		ReplyToken:  msg.ContextToken,
 		NoDebounce:  false,
 		Timestamp:   msg.Timestamp,
 	}
@@ -449,6 +521,34 @@ func (i *BotInstance) setStatus(status Status, errMsg string) {
 			Error:  errMsg,
 		})
 	}
+}
+
+func messageMetadata(msg *SDKMessage) map[string]any {
+	meta := map[string]any{
+		"message_type": string(msg.Type),
+	}
+	if len(msg.Images) > 0 {
+		meta["image_count"] = len(msg.Images)
+	}
+	if len(msg.Voices) > 0 {
+		meta["voice_count"] = len(msg.Voices)
+		if msg.Voices[0].Text != "" {
+			meta["voice_text_available"] = true
+		}
+	}
+	if len(msg.Files) > 0 {
+		meta["file_count"] = len(msg.Files)
+		meta["first_file_name"] = msg.Files[0].FileName
+		meta["first_file_size"] = msg.Files[0].Size
+	}
+	if len(msg.Videos) > 0 {
+		meta["video_count"] = len(msg.Videos)
+	}
+	if msg.QuotedMessage != nil {
+		meta["has_quote"] = true
+		meta["quote_type"] = string(msg.QuotedMessage.Type)
+	}
+	return meta
 }
 
 func messageContent(msg *SDKMessage) string {

@@ -68,6 +68,15 @@ func (r *staticResolver) Resolve(_ context.Context, _ *InboundMessage) (*imctx.I
 	return r.out, r.err
 }
 
+type pendingAwarePlugin struct {
+	mockPlugin
+	pending bool
+}
+
+func (p *pendingAwarePlugin) HasPendingInput(_ context.Context, _ InboundMessage, _ string) bool {
+	return p.pending
+}
+
 type metricCaptureWriter struct {
 	mu      sync.Mutex
 	metrics []observability.Metric
@@ -616,6 +625,91 @@ func TestRouterUserScopedSkipsEnrichCtxAndInjectsOwnerUser(t *testing.T) {
 	assert.Equal(t, "msg-owner-1", sent.ReplyTo)
 }
 
+func TestRouterWeChatBotOutboundPreservesReplyToken(t *testing.T) {
+	logger := zap.NewNop()
+	proc := &ctxCaptureProcessor{response: master.TaskResponse{Content: "ok", Completed: true}}
+	router := NewRouter(proc, logger)
+
+	plugin := &mockPlugin{platform: PlatformWeChatBot}
+	router.RegisterPlugin(plugin)
+	router.SetOwnerUserResolver(func(_ context.Context, userID string) (*auth.User, error) {
+		return &auth.User{ID: userID, Status: "active"}, nil
+	})
+
+	err := router.HandleMessage(context.Background(), InboundMessage{
+		MessageID:   "msg-owner-1",
+		Platform:    PlatformWeChatBot,
+		TenantKey:   "user-owner-1",
+		OwnerUserID: "user-owner-1",
+		ChatID:      "wx-chat-1",
+		SenderID:    "wx-sender-1",
+		ChatType:    ChatDirect,
+		Content:     "hello",
+		ReplyToken:  "ctx-1",
+		NoDebounce:  true,
+	})
+	assert.NoError(t, err)
+
+	sent := plugin.getLastMsg()
+	assert.Equal(t, "ctx-1", sent.ReplyToken)
+	assert.Equal(t, "msg-owner-1", sent.ReplyTo)
+	assert.Equal(t, "user-owner-1", sent.OwnerUserID)
+	assert.Equal(t, "user-owner-1", sent.TenantKey)
+}
+
+func TestRouterWeChatBotDebouncePreservesOwnerScopeAndReplyToken(t *testing.T) {
+	logger := zap.NewNop()
+	proc := &ctxCaptureProcessor{response: master.TaskResponse{Content: "ok", Completed: true}}
+	router := NewRouter(proc, logger)
+	defer router.Stop()
+
+	plugin := &mockPlugin{platform: PlatformWeChatBot}
+	router.RegisterPlugin(plugin)
+	router.SetOwnerUserResolver(func(_ context.Context, userID string) (*auth.User, error) {
+		return &auth.User{ID: userID, Status: "active"}, nil
+	})
+
+	err := router.HandleMessage(context.Background(), InboundMessage{
+		MessageID:   "msg-owner-1",
+		Platform:    PlatformWeChatBot,
+		TenantKey:   "user-owner-1",
+		OwnerUserID: "user-owner-1",
+		ChatID:      "wx-chat-1",
+		SenderID:    "wx-sender-1",
+		ChatType:    ChatDirect,
+		Content:     "第一句",
+		ReplyToken:  "ctx-1",
+	})
+	assert.NoError(t, err)
+	err = router.HandleMessage(context.Background(), InboundMessage{
+		MessageID:   "msg-owner-2",
+		Platform:    PlatformWeChatBot,
+		TenantKey:   "user-owner-1",
+		OwnerUserID: "user-owner-1",
+		ChatID:      "wx-chat-1",
+		SenderID:    "wx-sender-1",
+		ChatType:    ChatDirect,
+		Content:     "第二句",
+		ReplyToken:  "ctx-2",
+	})
+	assert.NoError(t, err)
+
+	deadline := time.Now().Add(debounceWindow + time.Second)
+	for time.Now().Before(deadline) {
+		sent := plugin.getLastMsg()
+		if sent.Content != "" {
+			assert.Equal(t, "user-owner-1", sent.TenantKey)
+			assert.Equal(t, "user-owner-1", sent.OwnerUserID)
+			assert.Equal(t, "wx-chat-1", sent.ChatID)
+			assert.Equal(t, "msg-owner-2", sent.ReplyTo)
+			assert.Equal(t, "ctx-2", sent.ReplyToken)
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("debounced wechatbot message was not sent")
+}
+
 func TestRouterUserScopedRejectsTenantMismatch(t *testing.T) {
 	logger := zap.NewNop()
 	proc := &ctxCaptureProcessor{response: master.TaskResponse{Content: "ok", Completed: true}}
@@ -772,6 +866,7 @@ func TestRouterSendMessageConvertsSendRequest(t *testing.T) {
 		Content:     "Web 回复",
 		MsgType:     string(MsgTypeText),
 		ReplyTo:     "msg-source-1",
+		ReplyToken:  "ctx-source-1",
 	})
 	assert.NoError(t, err)
 
@@ -783,6 +878,7 @@ func TestRouterSendMessageConvertsSendRequest(t *testing.T) {
 	assert.Equal(t, "Web 回复", sent.Content)
 	assert.Equal(t, MsgTypeText, sent.MsgType)
 	assert.Equal(t, "msg-source-1", sent.ReplyTo)
+	assert.Equal(t, "ctx-source-1", sent.ReplyToken)
 }
 
 func TestRouterHandleMessage_FeishuResolverPassesIMContextAndMetrics(t *testing.T) {
@@ -880,6 +976,36 @@ func TestRouterHandleMessage_FeishuResolverErrorStillEmitsDurationMetric(t *test
 	durationMetric := writer.waitMetric(t, "feishu.resolver.duration_ms")
 	assert.Equal(t, "error", durationMetric.Labels["status"])
 	assert.Equal(t, "default", durationMetric.Labels["tenant_key_hash"])
+}
+
+func TestRouterHandleMessage_PendingInputSkipsDebounce(t *testing.T) {
+	logger := zap.NewNop()
+	proc := &mockProcessor{response: master.TaskResponse{Content: "ok", Completed: true}}
+	router := NewRouter(proc, logger)
+	t.Cleanup(router.Stop)
+
+	plugin := &pendingAwarePlugin{
+		mockPlugin: mockPlugin{platform: PlatformWeChatBot},
+		pending:    true,
+	}
+	router.RegisterPlugin(plugin)
+	router.SetOwnerUserResolver(func(_ context.Context, userID string) (*auth.User, error) {
+		return &auth.User{ID: userID, Status: "active"}, nil
+	})
+
+	err := router.HandleMessage(context.Background(), InboundMessage{
+		MessageID:   "wechat-msg-1",
+		Platform:    PlatformWeChatBot,
+		TenantKey:   "owner-1",
+		OwnerUserID: "owner-1",
+		ChatID:      "wx-peer",
+		SenderID:    "wx-peer",
+		ChatType:    ChatDirect,
+		Content:     "北京",
+	})
+	assert.NoError(t, err)
+
+	assert.Equal(t, "北京", proc.getLastInput())
 }
 
 // TestHandleMessage_NoAuthEngine 验证未设置 enrichCtx 时，消息正常处理，context 中无 user

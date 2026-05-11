@@ -61,6 +61,21 @@ type InboundController interface {
 	ControlInbound(ctx context.Context, msg InboundMessage, currentSessionID string) (InboundControlResult, error)
 }
 
+// PendingInputDetector 是可选能力接口：平台可告知 Router 当前会话是否正在等待
+// 用户输入。Router 据此跳过 sender-level debounce，让澄清/选择/审批回复立即进入
+// ControlInbound，而不是被当作新一轮普通消息延迟合并。
+type PendingInputDetector interface {
+	HasPendingInput(ctx context.Context, msg InboundMessage, currentSessionID string) bool
+}
+
+// InputCoordinator 是 IM 平台桥接 HITL 的最小契约。
+// 它不改变权限策略，只负责把 master 已经产生的 pending input 显示到平台，
+// 并把用户回复提交回同一个 request。
+type InputCoordinator interface {
+	PendingInputs(taskID string) []*master.InputRequest
+	SubmitInput(resp master.InputResponse) error
+}
+
 // RendererError 包装 renderer 内部错误并暴露最后一次成功落地的完整内容，
 // 供 Router 以 plugin.Send(baseMsg with LastContent) 做非流式兜底。
 // 不带 LastContent 的 RendererError（LastContent==""）= 彻底失败，Router 会

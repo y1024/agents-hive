@@ -365,6 +365,45 @@ func (m *MemoryStore) UpdateWechatConversationSendState(_ context.Context, owner
 	return nil
 }
 
+func (m *MemoryStore) UpdateWechatConversationContextToken(_ context.Context, ownerUserID, peerWxid, contextToken string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec, ok := m.wechatConvs[wechatConvOwnerPeerKey(ownerUserID, peerWxid)]
+	if !ok {
+		return ErrNotFound
+	}
+	rec.ContextToken = contextToken
+	rec.CanSend = true
+	rec.SendState = "ready"
+	rec.UpdatedAt = time.Now()
+	return nil
+}
+
+func (m *MemoryStore) GetWechatConversationContextToken(_ context.Context, ownerUserID, peerWxid string) (string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	rec, ok := m.wechatConvs[wechatConvOwnerPeerKey(ownerUserID, peerWxid)]
+	if !ok || rec.ContextToken == "" {
+		return "", ErrNotFound
+	}
+	return rec.ContextToken, nil
+}
+
+func (m *MemoryStore) ClearWechatConversationContextTokens(_ context.Context, ownerUserID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, rec := range m.wechatConvs {
+		if rec.OwnerUserID != ownerUserID {
+			continue
+		}
+		rec.ContextToken = ""
+		rec.CanSend = false
+		rec.SendState = "expired"
+		rec.UpdatedAt = time.Now()
+	}
+	return nil
+}
+
 // LLM Provider/Model — MemoryStore 提供内存实现，供测试使用
 func (m *MemoryStore) GetLLMProvider(_ context.Context, name string) (*LLMProviderRecord, error) {
 	m.mu.RLock()

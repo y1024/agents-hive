@@ -9,6 +9,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/chef-guo/agents-hive/internal/auth"
 	"github.com/chef-guo/agents-hive/internal/imctx"
 	"github.com/chef-guo/agents-hive/internal/master"
 )
@@ -88,6 +89,7 @@ type mockRendererPlugin struct {
 	mockPlugin
 	mu         sync.Mutex
 	gotEvents  []master.BroadcastMessage
+	gotScope   SessionScope
 	renderDone chan struct{}
 	// 测试注入：renderer 返回该 error（nil 表示正常收敛）
 	returnErr error
@@ -104,6 +106,9 @@ func newMockRendererPlugin(platform Platform) *mockRendererPlugin {
 
 func (p *mockRendererPlugin) RenderEventStream(ctx context.Context, scope SessionScope, eventCh <-chan master.BroadcastMessage) error {
 	p.called.Store(true)
+	p.mu.Lock()
+	p.gotScope = scope
+	p.mu.Unlock()
 	defer close(p.renderDone)
 	for {
 		select {
@@ -132,6 +137,12 @@ func (p *mockRendererPlugin) snapshotEvents() []master.BroadcastMessage {
 	out := make([]master.BroadcastMessage, len(p.gotEvents))
 	copy(out, p.gotEvents)
 	return out
+}
+
+func (p *mockRendererPlugin) snapshotScope() SessionScope {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.gotScope
 }
 
 // --- Tests ---
@@ -169,6 +180,41 @@ func TestRouter_RendererPath_SubscribesAndUnsubscribes(t *testing.T) {
 	}
 	if !plugin.called.Load() {
 		t.Fatal("renderer.RenderEventStream 应被调用")
+	}
+}
+
+func TestRouter_RendererPath_PassesOwnerTenantAndReplyToken(t *testing.T) {
+	logger := zap.NewNop()
+	proc := &mockProcessor{response: master.TaskResponse{Content: "done"}}
+	router := NewRouter(proc, logger)
+	t.Cleanup(router.Stop)
+
+	eb := newMockEventBus()
+	router.SetEventBusSubscriber(eb)
+	router.SetRendererEnabled(func(Platform) bool { return true })
+
+	plugin := newMockRendererPlugin(PlatformWeChatBot)
+	router.RegisterPlugin(plugin)
+	router.SetOwnerUserResolver(func(_ context.Context, userID string) (*auth.User, error) {
+		return &auth.User{ID: userID, Status: "active"}, nil
+	})
+
+	msg := InboundMessage{
+		MessageID:   "msg-1",
+		Platform:    PlatformWeChatBot,
+		TenantKey:   "owner-1",
+		OwnerUserID: "owner-1",
+		ChatID:      "wx-peer",
+		SenderID:    "wx-peer",
+		ChatType:    ChatDirect,
+		Content:     "hello",
+		ReplyToken:  "ctx-1",
+	}
+	router.processMessageImpl(msg)
+
+	scope := plugin.snapshotScope()
+	if scope.OwnerUserID != "owner-1" || scope.TenantKey != "owner-1" || scope.ReplyToken != "ctx-1" {
+		t.Fatalf("renderer scope missing owner/tenant/reply token: %+v", scope)
 	}
 }
 

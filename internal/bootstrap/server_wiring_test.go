@@ -9,6 +9,7 @@ import (
 
 // TestBuildRendererEnabledFn 覆盖 Section 8.3 的平台级 renderer 开关回调：
 //   - 仅 feishu 读 cfg.Feishu.RendererEnabled()
+//   - wechatbot 随官方通道开关启用文本 renderer
 //   - 其它平台一律 false（即便他们今后实现了 EventRenderer，也必须在这个 switch 里显式启用）
 //   - cfg==nil 返回全平台 false 的降级闭包，保证 server.go 误用不 panic
 //
@@ -19,7 +20,7 @@ func TestBuildRendererEnabledFn(t *testing.T) {
 		if fn == nil {
 			t.Fatal("expected non-nil callback even for nil cfg")
 		}
-		for _, p := range []channel.Platform{channel.PlatformFeishu, channel.PlatformDingTalk, channel.PlatformWeCom} {
+		for _, p := range []channel.Platform{channel.PlatformFeishu, channel.PlatformDingTalk, channel.PlatformWeCom, channel.PlatformWeChatBot} {
 			if fn(p) {
 				t.Errorf("cfg==nil: fn(%q) = true, want false (degrade-safe)", p)
 			}
@@ -45,18 +46,29 @@ func TestBuildRendererEnabledFn(t *testing.T) {
 		}
 	})
 
-	t.Run("non_feishu_platforms_always_false", func(t *testing.T) {
-		// 即便 feishu 开启，其他平台也不得返回 true——renderer 能力当前平台绑定。
+	t.Run("wechatbot_follows_enabled", func(t *testing.T) {
 		cfg := &config.Config{}
+		fn := BuildRendererEnabledFn(cfg)
+		if fn(channel.PlatformWeChatBot) {
+			t.Error("fn(wechatbot) = true, want false when official channel disabled")
+		}
+		cfg.Channel.WeChatBot.Enabled = true
+		if !fn(channel.PlatformWeChatBot) {
+			t.Error("fn(wechatbot) = false, want true when official channel enabled")
+		}
+	})
+
+	t.Run("other_platforms_always_false", func(t *testing.T) {
+		cfg := &config.Config{}
+		cfg.Channel.WeChatBot.Enabled = true
 		fn := BuildRendererEnabledFn(cfg)
 		others := []channel.Platform{
 			channel.PlatformDingTalk,
 			channel.PlatformWeCom,
-			channel.PlatformWeChatBot,
 		}
 		for _, p := range others {
 			if fn(p) {
-				t.Errorf("fn(%q) = true, want false (only feishu implements EventRenderer currently)", p)
+				t.Errorf("fn(%q) = true, want false", p)
 			}
 		}
 	})

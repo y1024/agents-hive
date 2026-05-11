@@ -2,7 +2,6 @@ package skills
 
 import (
 	"context"
-	"regexp"
 	"strings"
 	"time"
 
@@ -104,24 +103,52 @@ func formatSandboxExecDiagnostic(diag *SandboxExecDiagnostic) string {
 	return strings.TrimSpace(sb.String())
 }
 
-// reDynamic 匹配 !`command` 动态上下文占位符
-var reDynamic = regexp.MustCompile("!`([^`]+)`")
-
 // ExecuteDynamicContext 将内容中的 !`command` 占位符替换为
 // 通过给定 ShellExecutor 执行每个命令的输出
 func ExecuteDynamicContext(content string, executor ShellExecutor) (string, error) {
 	var lastErr error
-	result := reDynamic.ReplaceAllStringFunc(content, func(match string) string {
-		sub := reDynamic.FindStringSubmatch(match)
-		if len(sub) < 2 {
-			return match
+	var out strings.Builder
+
+	for i := 0; i < len(content); {
+		if !isDynamicContextStart(content, i) {
+			out.WriteByte(content[i])
+			i++
+			continue
 		}
-		stdout, _, err := executor.Execute(sub[1])
+
+		end := strings.IndexByte(content[i+2:], '`')
+		if end < 0 {
+			out.WriteString(content[i:])
+			break
+		}
+		end += i + 2
+		command := content[i+2 : end]
+		if strings.ContainsAny(command, "\r\n") {
+			out.WriteString(content[i : end+1])
+			i = end + 1
+			continue
+		}
+
+		stdout, _, err := executor.Execute(command)
 		if err != nil {
 			lastErr = err
-			return match
+			out.WriteString(content[i : end+1])
+		} else {
+			out.WriteString(stdout)
 		}
-		return stdout
-	})
-	return result, lastErr
+		i = end + 1
+	}
+
+	return out.String(), lastErr
+}
+
+func isDynamicContextStart(content string, i int) bool {
+	if i+1 >= len(content) || content[i] != '!' || content[i+1] != '`' {
+		return false
+	}
+	if i == 0 {
+		return true
+	}
+	prev := content[i-1]
+	return prev == ' ' || prev == '\t' || prev == '\n' || prev == '\r'
 }

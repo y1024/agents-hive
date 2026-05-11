@@ -242,7 +242,7 @@
   },
   "wechatConnection": {
     "title": "WeChat Bot Connection",
-    "subtitle": "Connect an official wechatbot.dev iLink Bot. Ask contacts to message clawbot in WeChat.",
+    "subtitle": "When a customer messages clawbot in WeChat, the Agent replies inside WeChat. This page only manages connection and recent contact status; it does not show message content or read ordinary private chats sent to your personal WeChat account.",
     "disabledHint": "Official WeChat Bot channel is not enabled. Ask an admin to enable channel.wechatbot.enabled.",
     "account": "Bot Account",
     "unbound": "Unbound",
@@ -255,12 +255,12 @@
     "logout": "Disconnect",
     "disconnecting": "Disconnecting...",
     "scanTitle": "Scan with WeChat to connect the Bot",
-    "scanHint": "After scanning, clawbot appears in WeChat. The official SDK only receives messages sent to clawbot, not normal private chats sent to your WeChat account.",
+    "scanHint": "After scanning, customers must open clawbot in WeChat and send messages there; ordinary private chats sent to the scanned WeChat account do not enter this system.",
     "qrRendering": "Generating QR code...",
     "qrAlt": "WeChat Bot connection QR code",
     "recentConversations": "Recent WeChat Bot Contacts",
     "noConversations": "No WeChat Bot contacts yet",
-    "noConversationsHint": "Ask the contact to message clawbot in WeChat; recent contact status appears here.",
+    "noConversationsHint": "Ask customers to message clawbot in WeChat; this page shows recent contact status, not message bodies.",
     "statusOnly": "Status",
     "contactStatusOnly": "Contact status only",
     "lastSeenAt": "Last interaction {{time}}",
@@ -539,13 +539,13 @@
       "desc": "Connect DingTalk, Feishu, WeCom, or the official WeChat Bot to chat with agents in IM",
       "overview": {
         "title": "1. Supported IM Platforms & Architecture",
-        "desc": "The Channel system bridges IM messages to Agent sessions:\n\nIM Platform → Webhook/Long Poll → Channel Router → ACP Control Plane → Master Agent\n\nSupported platforms:\n• DingTalk (dingtalk) — Enterprise, requires DingTalk app creation\n• Feishu (feishu) — Enterprise, requires Feishu app creation\n• WeCom (wecom) — Enterprise, requires WeCom admin access\n• WeChat Bot — official wechatbot/iLink Bot; only receives messages sent to clawbot, not normal private chats sent to a personal WeChat account\n\nMessage types: direct (DM), group (group chat), channel.",
-        "detail": "## Architecture Flow\n\n```\nIM User Message\n    ↓\nWebhook / Long Poll ingress\n    ↓\nChannel Router (lookup Binding mapping)\n    ↓\nACP Control Plane (rate limiting, auth)\n    ↓\nMaster Agent (process and reply)\n    ↓\nIM Reply Message\n```\n\n## Supported Platforms\n\n| Platform | ID | Type | Requirements |\n|----------|-----|------|-------------|\n| DingTalk | `dingtalk` | Enterprise | Create DingTalk app |\n| Feishu | `feishu` | Enterprise | Create Feishu app |\n| WeCom | `wecom` | Enterprise | WeCom admin access |\n| WeChat Bot | `wechatbot` | Official iLink Bot | Users connect official wechatbot in `/settings`; contacts must message clawbot; normal Web Chat does not show IM sessions |\n\n## Message Types\n\n| Type | ID | Description |\n|------|-----|-------------|\n| Direct | `direct` | One-on-one private messages |\n| Group | `group` | Group chat messages |\n| Channel | `channel` | Channel/topic messages |"
+        "desc": "The Channel system bridges IM messages to Agent sessions:\n\nIM Platform → Webhook/Long Poll → Channel Router → ACP Control Plane → Master Agent\n\nSupported platforms:\n• DingTalk (dingtalk) — Enterprise, requires DingTalk app creation\n• Feishu (feishu) — Enterprise, requires Feishu app creation\n• WeCom (wecom) — Enterprise, requires WeCom admin access\n• WeChat Bot — clawbot backed by official wechatbot/iLink; only receives messages sent to clawbot, not normal private chats sent to a personal WeChat account\n\nMessage types: direct (DM), group (group chat), channel.",
+        "detail": "## Architecture Flow\n\n```\nIM User Message\n    ↓\nWebhook / Long Poll ingress\n    ↓\nChannel Router (lookup Binding mapping)\n    ↓\nACP Control Plane (rate limiting, auth)\n    ↓\nMaster Agent (process and reply)\n    ↓\nIM Reply Message\n```\n\n## Supported Platforms\n\n| Platform | ID | Type | Requirements |\n|----------|-----|------|-------------|\n| DingTalk | `dingtalk` | Enterprise | Create DingTalk app |\n| Feishu | `feishu` | Enterprise | Create Feishu app |\n| WeCom | `wecom` | Enterprise | WeCom admin access |\n| WeChat Bot | `wechatbot` | Official wechatbot/iLink clawbot | Users scan in `/settings` to connect clawbot; contacts must message clawbot; normal Web Chat does not show IM sessions |\n\n## Message Types\n\n| Type | ID | Description |\n|------|-----|-------------|\n| Direct | `direct` | One-on-one private messages |\n| Group | `group` | Group chat messages |\n| Channel | `channel` | Channel/topic messages |"
       },
       "channelConfig": {
         "title": "2. Platform Configuration",
         "desc": "Enable and configure platforms in the channel section of config.json:\n\nDingTalk: requires app_key, app_secret, callback token, aes_key, and agent_id\nFeishu: requires app_id, app_secret, verification_token, and encrypt_key\nWeCom: requires corp_id, agent_id, secret, callback token, and encoding_aes_key\n\nWeChat Bot enters settings through an official wechatbot user-level connection; legacy protocol configuration has been removed.",
-        "tip": "Legacy personal WeChat protocol settings have been removed. Users can connect an official wechatbot iLink Bot in /settings. It only handles messages sent to clawbot.",
+        "tip": "Legacy personal WeChat protocol settings have been removed. Users scan in /settings to connect clawbot through official wechatbot. It only handles messages sent to clawbot.",
         "detail": "## DingTalk Configuration\n\n```json\n{\n  \"channel\": {\n    \"dingtalk\": {\n      \"enabled\": true,\n      \"app_key\": \"your-app-key\",\n      \"app_secret\": \"your-app-secret\",\n      \"token\": \"callback-token\",\n      \"aes_key\": \"callback-aes-key\",\n      \"agent_id\": \"your-agent-id\"\n    }\n  }\n}\n```\n\n## Feishu Configuration\n\n```json\n{\n  \"channel\": {\n    \"feishu\": {\n      \"enabled\": true,\n      \"app_id\": \"your-app-id\",\n      \"app_secret\": \"your-app-secret\",\n      \"verification_token\": \"your-verification-token\",\n      \"encrypt_key\": \"your-encrypt-key\"\n    }\n  }\n}\n```\n\n## WeCom Configuration\n\n```json\n{\n  \"channel\": {\n    \"wecom\": {\n      \"enabled\": true,\n      \"corp_id\": \"your-corp-id\",\n      \"agent_id\": \"your-agent-id\",\n      \"secret\": \"your-secret\",\n      \"token\": \"callback-token\",\n      \"encoding_aes_key\": \"your-encoding-aes-key\"\n    }\n  }\n}\n```\n\n## WeChat Bot\n\nWeChat Bot enters settings through an official wechatbot user-level connection; legacy protocol configuration has been removed. It is not normal personal WeChat private-chat hosting; contacts must message clawbot in WeChat."
       },
       "webhook": {
@@ -671,7 +671,7 @@
     "feishu": "Feishu",
     "wecom": "WeCom",
     "wechatbot": "WeChat Bot (official wechatbot)",
-    "wechatbotHint": "This only controls whether the official WeChat Bot entry is open. Users connect an iLink Bot from personal settings. Base URL, credential root, and log level are deployment settings.",
+    "wechatbotHint": "This only controls whether the official WeChat Bot entry is open. Users scan from personal settings to connect clawbot in WeChat. Base URL, credential root, and log level are deployment settings.",
     "appKey": "App Key",
     "appSecret": "App Secret",
     "appId": "App ID",
@@ -727,7 +727,7 @@
     "notStarted": "Not started",
     "noConfigItems": "No configurable fields",
     "wechatTip1": "Legacy personal WeChat protocol settings have been removed",
-    "wechatTip2": "Users can connect an official wechatbot iLink Bot in /settings",
+    "wechatTip2": "Users can scan in /settings to connect clawbot through official wechatbot",
     "wechatTip3": "Enterprise IM channels remain configurable on this settings page",
     "wechatTip4": "No legacy protocol service is required"
   },

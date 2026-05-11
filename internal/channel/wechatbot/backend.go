@@ -22,7 +22,11 @@ type Backend interface {
 	OnMessage(handler func(*SDKMessage))
 	Run(ctx context.Context) error
 	Stop()
+	Reply(ctx context.Context, msg *SDKMessage, text string) error
 	Send(ctx context.Context, userID, text string) error
+	SendWithContextToken(ctx context.Context, userID, contextToken, text string) error
+	SendTyping(ctx context.Context, userID string) error
+	StopTyping(ctx context.Context, userID string) error
 }
 
 // BackendOptions 是官方 SDK adapter 的构造参数。
@@ -78,6 +82,22 @@ func (b *sdkBackend) Stop() {
 	b.bot.Stop()
 }
 
+func (b *sdkBackend) Reply(ctx context.Context, msg *SDKMessage, text string) error {
+	return b.bot.Reply(ctx, msg, text)
+}
+
 func (b *sdkBackend) Send(ctx context.Context, userID, text string) error {
 	return b.bot.Send(ctx, userID, text)
+}
+
+func (b *sdkBackend) SendWithContextToken(ctx context.Context, userID, contextToken, text string) error {
+	return b.bot.Reply(ctx, &SDKMessage{UserID: userID, ContextToken: contextToken}, text)
+}
+
+func (b *sdkBackend) SendTyping(ctx context.Context, userID string) error {
+	return b.bot.SendTyping(ctx, userID)
+}
+
+func (b *sdkBackend) StopTyping(ctx context.Context, userID string) error {
+	return b.bot.StopTyping(ctx, userID)
 }

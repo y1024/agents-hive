@@ -50,7 +50,7 @@ export function WeChatConnectionPanel() {
               {t('wechatConnection.title', '微信 Bot 连接')}
             </h3>
             <p className="mt-0.5 text-xs text-[var(--text-secondary)]">
-              {t('wechatConnection.subtitle', '使用官方 wechatbot.dev 连接 iLink Bot。请让对方给微信里的 clawbot 发消息。')}
+              {t('wechatConnection.subtitle', '客户给微信里的 clawbot 发消息后，Agent 会在微信内自动回复；这里仅管理连接和最近联系人状态，不展示消息内容，也不会读取你微信号本人的普通私聊。')}
             </p>
           </div>
         </div>
@@ -136,7 +136,7 @@ export function WeChatConnectionPanel() {
                 {t('wechatConnection.noConversations', '暂无微信会话')}
               </p>
               <p className="mt-1 text-xs text-[var(--text-secondary)]">
-                {t('wechatConnection.noConversationsHint', '请让对方给微信里的 clawbot 发消息，系统会在这里显示最近联系人状态。')}
+                {t('wechatConnection.noConversationsHint', '请让客户给微信里的 clawbot 发消息；这里会显示最近联系人状态，但不会显示消息正文。')}
               </p>
             </div>
           ) : (
@@ -234,7 +234,7 @@ function QRCodeBlock({ qrUrl }: { qrUrl: string }) {
         )}
         <div className="min-w-0 flex-1">
           <p className="text-xs leading-5 text-[var(--text-secondary)]">
-            {t('wechatConnection.scanHint', '扫码后会在微信里出现 clawbot。当前官方 SDK 只接收发给 clawbot 的消息，不会读取你微信号本人的普通私聊。')}
+            {t('wechatConnection.scanHint', '扫码确认后，客户需要在微信中打开 clawbot 并发送消息；B 给扫码微信号本人的普通私聊不会进入系统。')}
           </p>
           <div className="mt-3 break-all rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] px-3 py-2 font-mono text-xs text-[var(--text-primary)]">
             {qrUrl}

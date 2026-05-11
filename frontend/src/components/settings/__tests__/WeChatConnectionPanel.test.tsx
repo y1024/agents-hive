@@ -28,9 +28,15 @@ vi.mock('../../../hooks/useWechatConnection', () => ({
     status: {
       enabled: true,
       status: 'waiting_qr_scan',
-      conversation_count: 0,
+      conversation_count: 1,
     },
-    conversations: [],
+    conversations: [{
+      peer_wxid: 'wx-peer',
+      peer_nickname: '客户 A',
+      peer_avatar_url: '',
+      chat_type: 'direct',
+      last_message_at: '2026-05-11T10:00:00Z',
+    }],
     qrUrl: 'https://liteapp.weixin.qq.com/q/7GiQu1?qrcode=test&bot_type=3',
     lastEvent: null,
     loading: false,
@@ -66,11 +72,28 @@ describe('WeChatConnectionPanel', () => {
       );
     });
 
-    const image = await screen.findByRole('img', { name: '微信登录二维码' });
+    const image = await screen.findByRole('img', { name: '微信 Bot 连接二维码' });
     expect(image).toHaveAttribute('src', 'data:image/png;base64,qr-image');
     expect(image).not.toHaveAttribute(
       'src',
       'https://liteapp.weixin.qq.com/q/7GiQu1?qrcode=test&bot_type=3',
     );
+  });
+
+  it('states the official Bot boundary and does not render an IM session link', async () => {
+    qrcodeMock.toDataURL.mockResolvedValue('data:image/png;base64,qr-image');
+
+    render(
+      <MemoryRouter>
+        <WeChatConnectionPanel />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText(/客户给微信里的 clawbot 发消息后/)).toBeInTheDocument();
+    expect(screen.getByText(/不会读取你微信号本人的普通私聊/)).toBeInTheDocument();
+    expect(screen.getByText('客户 A')).toBeInTheDocument();
+    expect(screen.queryByRole('link')).not.toBeInTheDocument();
+    expect(screen.queryByText(/im-wechatbot/)).not.toBeInTheDocument();
+    expect(await screen.findByRole('img', { name: '微信 Bot 连接二维码' })).toBeInTheDocument();
   });
 });

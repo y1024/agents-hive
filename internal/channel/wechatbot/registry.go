@@ -154,13 +154,19 @@ func (r *BotRegistry) Ensure(ctx context.Context, ownerUserID string, force bool
 
 	r.mu.RLock()
 	inst := r.instances[ownerUserID]
+	st := r.store
 	r.mu.RUnlock()
 	if inst != nil {
 		if force {
 			inst.Stop()
+			if st != nil {
+				_ = st.ClearWechatConversationContextTokens(ctx, ownerUserID)
+			}
 		} else {
 			return inst, nil
 		}
+	} else if force && st != nil {
+		_ = st.ClearWechatConversationContextTokens(ctx, ownerUserID)
 	}
 
 	credPath, err := r.credentialPath(ownerUserID)
@@ -245,6 +251,7 @@ func (r *BotRegistry) Logout(ctx context.Context, ownerUserID string) error {
 	}
 	if r.store != nil {
 		_ = r.store.DeleteUserExternalID(ctx, ownerUserID, providerType)
+		_ = r.store.ClearWechatConversationContextTokens(ctx, ownerUserID)
 	}
 	cfg := r.configSnapshot()
 	credDir := filepath.Join(cfg.CredRoot, "users", ownerUserID)

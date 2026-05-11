@@ -32,16 +32,40 @@ func TestExecuteDynamicContext(t *testing.T) {
 			expected: "Version: hello",
 		},
 		{
+			name:     "command at line start",
+			content:  "!`echo hello`",
+			outputs:  map[string]string{"echo hello": "hello"},
+			expected: "hello",
+		},
+		{
 			name:     "multiple commands",
 			content:  "A: !`cmd1`, B: !`cmd2`",
 			outputs:  map[string]string{"cmd1": "val1", "cmd2": "val2"},
 			expected: "A: val1, B: val2",
 		},
 		{
+			name:     "multiline markdown after exclamation is not command",
+			content:  "Template: `Done!`\n- keep markdown\n`later code`",
+			outputs:  map[string]string{},
+			expected: "Template: `Done!`\n- keep markdown\n`later code`",
+		},
+		{
+			name:     "dynamic command cannot span lines",
+			content:  "Broken: !`echo hello\nmore markdown`",
+			outputs:  map[string]string{},
+			expected: "Broken: !`echo hello\nmore markdown`",
+		},
+		{
 			name:     "no commands",
 			content:  "Plain text without dynamic context.",
 			outputs:  map[string]string{},
 			expected: "Plain text without dynamic context.",
+		},
+		{
+			name:     "exclamation before inline code is plain markdown",
+			content:  "Template: `Lead the way!`\n\n6. Only output greeting:\n- no markdown\n- no extra text\n\nExample: `skill greet`",
+			outputs:  map[string]string{},
+			expected: "Template: `Lead the way!`\n\n6. Only output greeting:\n- no markdown\n- no extra text\n\nExample: `skill greet`",
 		},
 		{
 			name:     "command fails",

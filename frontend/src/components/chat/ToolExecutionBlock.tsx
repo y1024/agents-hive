@@ -73,7 +73,7 @@ export function ToolExecutionBlock({
 
   return (
     <div
-      className={`rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] overflow-hidden${
+      className={`rounded-2xl border border-[var(--border-color)] bg-[var(--bg-card)] overflow-hidden${
         isErrState ? ' ring-1 ring-[var(--danger)]/30' : ''
       }`}
     >

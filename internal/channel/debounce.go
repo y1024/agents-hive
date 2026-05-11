@@ -36,9 +36,10 @@ func newMessageBatcher(flush func(merged InboundMessage), logger *zap.Logger) *m
 	}
 }
 
-// senderKey 生成发送者唯一标识
+// senderKey 生成发送者唯一标识。
+// tenant/owner 必须参与 key，避免 user-scoped IM 在相同外部 peer ID 下串批。
 func senderKey(msg InboundMessage) string {
-	return string(msg.Platform) + ":" + msg.ChatID + ":" + msg.SenderID
+	return string(msg.Platform) + ":" + normalizeBindingTenantKey(msg.TenantKey) + ":" + msg.OwnerUserID + ":" + msg.ChatID + ":" + msg.SenderID
 }
 
 // Add 添加消息到合并队列，返回 true 表示消息被缓冲（等待合并），false 表示无需合并直接处理
@@ -110,14 +111,14 @@ func (b *messageBatcher) flushBatch(key string, gen int) {
 	b.flush(merged)
 }
 
-// mergeBatch 将多条消息合并为一条
-// 策略：内容用换行拼接，保留最后一条的 MessageID 和 Timestamp
+// mergeBatch 将多条消息合并为一条。
+// 策略：以最后一条消息为基准保留 scope / metadata / reply token，只合并 Content。
 func mergeBatch(messages []InboundMessage) InboundMessage {
 	if len(messages) == 1 {
 		return messages[0]
 	}
 
-	last := messages[len(messages)-1]
+	merged := messages[len(messages)-1]
 	var content string
 	for i, msg := range messages {
 		if i > 0 {
@@ -126,16 +127,8 @@ func mergeBatch(messages []InboundMessage) InboundMessage {
 		content += msg.Content
 	}
 
-	return InboundMessage{
-		MessageID:  last.MessageID,
-		Platform:   last.Platform,
-		ChatType:   last.ChatType,
-		ChatID:     last.ChatID,
-		SenderID:   last.SenderID,
-		SenderName: last.SenderName,
-		Content:    content,
-		Timestamp:  last.Timestamp,
-	}
+	merged.Content = content
+	return merged
 }
 
 // Stop 优雅停止：先标记停止防止新 flush，再停止所有计时器，最后等待 in-flight flush 完成

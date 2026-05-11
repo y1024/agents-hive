@@ -8,6 +8,7 @@ describe('ai-elements Tool theme integration', () => {
 
     const root = container.querySelector('[data-slot="collapsible"]');
     expect(root?.className).toContain('border-[var(--border-color)]');
+    expect(root?.className).toContain('rounded-2xl');
   });
 
   it('uses Hive danger token for tool error state', () => {

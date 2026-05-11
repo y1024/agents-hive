@@ -679,9 +679,21 @@ func BuildReloadChannelFuncWithStore(
 
 		case "wechatbot":
 			wbCfg := wechatbot.ConfigFromApp(channelCfg.WeChatBot, cfg.SessionsDir)
+			var inputCoordinator channel.InputCoordinator
+			if c, ok := hitlSubmitter.(channel.InputCoordinator); ok {
+				inputCoordinator = c
+			}
 			if existing, ok := router.GetPlugin(channel.PlatformWeChatBot); ok {
 				if configurable, ok := existing.(interface{ SetConfig(wechatbot.Config) }); ok {
 					configurable.SetConfig(wbCfg)
+					if inputCoordinator != nil {
+						if withCoordinator, ok := existing.(interface {
+							WithInputCoordinator(channel.InputCoordinator) *wechatbot.Plugin
+						}); ok {
+							withCoordinator.WithInputCoordinator(inputCoordinator)
+						}
+					}
+					router.SetRendererEnabled(BuildRendererEnabledFn(cfg))
 					if !channelCfg.WeChatBot.Enabled {
 						logger.Info("官方 wechatbot 通道已禁用")
 					} else {
@@ -692,13 +704,14 @@ func BuildReloadChannelFuncWithStore(
 				_ = router.UnregisterPlugin(channel.PlatformWeChatBot)
 			}
 			registry := wechatbot.NewRegistry(wbCfg, router, wechatStore, logger)
-			plugin := wechatbot.NewPlugin(registry, logger)
+			plugin := wechatbot.NewPlugin(registry, logger).WithInputCoordinator(inputCoordinator)
 			if provider, ok := any(router).(interface {
 				MetricsWriter() observability.MetricsWriter
 			}); ok {
 				plugin.SetMetricsWriter(provider.MetricsWriter())
 			}
 			router.RegisterPlugin(plugin)
+			router.SetRendererEnabled(BuildRendererEnabledFn(cfg))
 			logger.Info("官方 wechatbot 通道已热重载", zap.Bool("enabled", channelCfg.WeChatBot.Enabled))
 
 		default:
@@ -1153,16 +1166,15 @@ func BuildLLMExtraConfig(cfg *config.Config) map[string]any {
 // BuildRendererEnabledFn 构造 channel.Router.SetRendererEnabled 的平台级回调。
 //
 // 契约：
-//   - 仅 PlatformFeishu 读配置 `cfg.Channel.Feishu.RendererEnabled()`（语义为 `!Renderer.Disabled`）。
-//   - 其余平台一律返回 false——截至 Section 8，只有 feishu 实现 EventRenderer，
-//     其他平台在 Router 侧会走 legacy Send，保持 bit-identical 行为。
+//   - PlatformFeishu 读配置 `cfg.Channel.Feishu.RendererEnabled()`（语义为 `!Renderer.Disabled`）。
+//   - PlatformWeChatBot 在官方通道启用时走文本 renderer，用于流式 partial 与 HITL 澄清/选择回路。
 //   - cfg == nil 返回全平台 false 的降级闭包，避免 server.go 误用导致 panic。
 //   - 闭包 pointer-capture `*config.Config`；热重载对 `cfg.Channel.Feishu` 整块赋值后，
 //     下一次调用读到最新 Disabled 字段。`BuildReloadChannelFunc` feishu 分支仍显式重调
 //     `SetRendererEnabled` 做 defensive 双保险，防止未来重构破坏该隐式契约。
 //
 // 扩展规则：新平台实现 EventRenderer 时，本函数的 switch 与
-// `server_wiring_test.go:TestBuildRendererEnabledFn/non_feishu_platforms_always_false`
+// `server_wiring_test.go:TestBuildRendererEnabledFn`
 // 两处必须同步更新，否则测试会回归失败保护你。
 //
 // 抽出为命名函数的目的：server.go 里的匿名闭包不可测，抽到这里后由
@@ -1172,9 +1184,13 @@ func BuildRendererEnabledFn(cfg *config.Config) func(channel.Platform) bool {
 		return func(channel.Platform) bool { return false }
 	}
 	return func(p channel.Platform) bool {
-		if p == channel.PlatformFeishu {
+		switch p {
+		case channel.PlatformFeishu:
 			return cfg.Channel.Feishu.RendererEnabled()
+		case channel.PlatformWeChatBot:
+			return cfg.Channel.WeChatBot.Enabled
+		default:
+			return false
 		}
-		return false
 	}
 }

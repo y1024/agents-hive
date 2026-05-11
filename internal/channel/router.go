@@ -524,6 +524,10 @@ func (r *Router) LookupSessionForTenant(platform Platform, tenantKey, chatID str
 //
 // P0-#9：dedup 经 fail-closed 短超时（默认 200ms）。后端故障 → 当 dup 处理 + 落 retry_queue。
 func (r *Router) HandleMessage(ctx context.Context, msg InboundMessage) error {
+	if r.hasPendingInputForInbound(ctx, msg) {
+		msg.NoDebounce = true
+	}
+
 	// 消息去重：防止 webhook 重试或 webhook+longconn 并存时重复处理
 	// 注意：仅对不走 debounce 的消息在此去重
 	// 走 debounce 的消息在 processMessage 中去重，避免缓冲后被丢弃时 MessageID 被永久标记
@@ -553,6 +557,30 @@ func (r *Router) HandleMessage(ctx context.Context, msg InboundMessage) error {
 	// 无法 debounce 的消息（如 SenderID 为空）直接处理
 	r.processMessage(msg)
 	return nil
+}
+
+func (r *Router) hasPendingInputForInbound(ctx context.Context, msg InboundMessage) bool {
+	plugin, ok := r.GetPlugin(msg.Platform)
+	if !ok {
+		return false
+	}
+	detector, ok := plugin.(PendingInputDetector)
+	if !ok {
+		return false
+	}
+	sessionID := r.LookupSessionForTenant(msg.Platform, msg.TenantKey, msg.ChatID)
+	if sessionID == "" {
+		tenantKey := msg.TenantKey
+		if tenantKey == "" {
+			tenantKey = defaultTenantKey
+		}
+		built, err := imctx.BuildSessionID(imctx.Platform(msg.Platform), tenantKey, msg.ChatID)
+		if err != nil {
+			return false
+		}
+		sessionID = built
+	}
+	return detector.HasPendingInput(ctx, msg, sessionID)
 }
 
 // processMessage 消息处理核心逻辑，由 HandleMessage 和 debouncer flush 回调调用
@@ -690,6 +718,7 @@ func (r *Router) processMessageImpl(msg InboundMessage) {
 					ChatID:      msg.ChatID,
 					Content:     result.Response,
 					ReplyTo:     msg.MessageID,
+					ReplyToken:  msg.ReplyToken,
 				}); err != nil {
 					r.logger.Error("发送命令回复失败",
 						zap.String("message_id", msg.MessageID),
@@ -861,6 +890,7 @@ func (r *Router) processViaLegacySend(ctx context.Context, plugin ChannelPlugin,
 		ChatID:      msg.ChatID,
 		Content:     replyContent,
 		ReplyTo:     msg.MessageID,
+		ReplyToken:  msg.ReplyToken,
 	}
 	if err := plugin.Send(ctx, outMsg); err != nil {
 		r.logger.Error("发送回复失败",
@@ -907,11 +937,14 @@ const rendererDrainDelay = 200 * time.Millisecond
 //  6. ProcessMessage 本身错误 → 沿用 NotifyError，不再重复发错（renderer 已监听 error 事件）
 func (r *Router) processViaRenderer(ctx context.Context, renderer EventRenderer, plugin ChannelPlugin, msg InboundMessage, sessionID string) {
 	scope := SessionScope{
-		SessionID: sessionID,
-		ChatID:    msg.ChatID,
-		UserID:    msg.SenderID,
-		MessageID: msg.MessageID,
-		ReplyToID: msg.MessageID,
+		SessionID:   sessionID,
+		TenantKey:   msg.TenantKey,
+		OwnerUserID: msg.OwnerUserID,
+		ChatID:      msg.ChatID,
+		UserID:      msg.SenderID,
+		MessageID:   msg.MessageID,
+		ReplyToID:   msg.MessageID,
+		ReplyToken:  msg.ReplyToken,
 	}
 
 	// 先拿订阅（eventCh 由 EventBus 提供、在 Unsubscribe 时 close），
@@ -993,6 +1026,7 @@ func (r *Router) processViaRenderer(ctx context.Context, renderer EventRenderer,
 			ChatID:      msg.ChatID,
 			Content:     wrapRawJSON(rerr.LastContent),
 			ReplyTo:     msg.MessageID,
+			ReplyToken:  msg.ReplyToken,
 		}
 		if sendErr := plugin.Send(ctx, fallback); sendErr != nil {
 			r.logger.Error("renderer 兜底 Send 也失败",
@@ -1075,6 +1109,7 @@ func (r *Router) SendMessage(ctx context.Context, req imctx.SendRequest) error {
 		Content:     req.Content,
 		MsgType:     MsgType(req.MsgType),
 		ReplyTo:     req.ReplyTo,
+		ReplyToken:  req.ReplyToken,
 	}
 
 	// 发送消息
@@ -1100,6 +1135,7 @@ func (r *Router) NotifyError(ctx context.Context, msg InboundMessage, processErr
 		ChatID:      msg.ChatID,
 		Content:     "抱歉，消息处理失败，请稍后重试。",
 		ReplyTo:     msg.MessageID,
+		ReplyToken:  msg.ReplyToken,
 	}
 
 	if err := plugin.Send(ctx, errMsg); err != nil {

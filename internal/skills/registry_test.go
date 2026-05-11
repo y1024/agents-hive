@@ -344,6 +344,25 @@ func TestInvokeFull_WithDynamicContext(t *testing.T) {
 	}
 }
 
+func TestInvokeFull_DoesNotExecuteMarkdownInlineCodeAfterExclamation(t *testing.T) {
+	r := newTestRegistry()
+	content := "Template: `Lead the way!`\n\n6. Only output greeting:\n- no markdown\n- no extra text\n\nExample: `skill greet`"
+	r.Register(&Skill{
+		Metadata: SkillMetadata{Name: "markdown-skill"},
+		Content:  content,
+		Loaded:   LevelFullContent,
+	})
+
+	ctx := context.Background()
+	result, err := r.InvokeFull(ctx, "markdown-skill", RenderContext{}, &mockExecutor{}, nil, nil)
+	if err != nil {
+		t.Fatalf("InvokeFull should not execute markdown inline code: %v", err)
+	}
+	if result != content {
+		t.Errorf("expected markdown unchanged, got %q", result)
+	}
+}
+
 func TestInvokeFull_PreHookFailure_StopsPipeline(t *testing.T) {
 	logger, _ := zap.NewDevelopment()
 	r := newTestRegistry()

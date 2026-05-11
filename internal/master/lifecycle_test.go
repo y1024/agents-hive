@@ -537,6 +537,28 @@ func TestPermissionManager_StructuredDanger_SendIMAsks(t *testing.T) {
 	}
 }
 
+func TestPermissionManager_NormalToolsDoNotAskInMinimalMode(t *testing.T) {
+	m, cancel := setupDefaultPermissionMaster(t)
+	defer cancel()
+	defer m.Stop()
+
+	subID, ch := m.SubscribeWSBroadcast()
+	defer m.UnsubscribeWSBroadcast(subID)
+
+	err := callCheckPermission(t, m, "im-wechatbot-normal", "read_file", mustJSON(t, map[string]any{
+		"path": "README.md",
+	}))
+	if err != nil {
+		t.Fatalf("read_file minimal mode should not ask: %v", err)
+	}
+
+	select {
+	case msg := <-ch:
+		t.Fatalf("normal tool emitted unexpected HITL request: %+v", msg)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestPermissionManager_StructuredDanger_TaskboardDeleteAsksButListAllows(t *testing.T) {
 	m, cancel := setupDefaultPermissionMaster(t)
 	defer cancel()

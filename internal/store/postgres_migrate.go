@@ -734,6 +734,7 @@ CREATE TABLE IF NOT EXISTS wechat_conversations (
     last_message_at      TIMESTAMPTZ,
     can_send             BOOLEAN NOT NULL DEFAULT FALSE,
     send_state           TEXT NOT NULL DEFAULT 'unknown',
+    context_token        TEXT NOT NULL DEFAULT '',
     metadata             JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -742,6 +743,9 @@ CREATE TABLE IF NOT EXISTS wechat_conversations (
 );
 CREATE INDEX IF NOT EXISTS idx_wechat_conversations_owner_last
     ON wechat_conversations(owner_user_id, last_message_at DESC NULLS LAST);
+
+ALTER TABLE wechat_conversations
+    ADD COLUMN IF NOT EXISTS context_token TEXT NOT NULL DEFAULT '';
 
 -- 登录历史表
 CREATE TABLE IF NOT EXISTS login_history (

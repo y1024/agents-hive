@@ -12,4 +12,5 @@ type SendRequest struct {
 	Content     string
 	MsgType     string
 	ReplyTo     string
+	ReplyToken  string
 }

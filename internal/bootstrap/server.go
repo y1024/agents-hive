@@ -1355,7 +1355,8 @@ func initChannels(sc *ServerComponents, cfg *config.Config, logger *zap.Logger) 
 	channelRouter.SetRendererEnabled(BuildRendererEnabledFn(cfg))
 	logger.Info("Channel Router EventRenderer 已装配",
 		zap.Bool("event_bus_subscriber", sc.Master != nil),
-		zap.Bool("feishu_renderer_enabled", cfg.Channel.Feishu.RendererEnabled()))
+		zap.Bool("feishu_renderer_enabled", cfg.Channel.Feishu.RendererEnabled()),
+		zap.Bool("wechatbot_renderer_enabled", cfg.Channel.WeChatBot.Enabled))
 
 	// 注入用户上下文丰富器（auth 启用时，IM 消息可关联已注册用户）
 	if sc.AuthEngine != nil {
@@ -1461,7 +1462,7 @@ func initChannels(sc *ServerComponents, cfg *config.Config, logger *zap.Logger) 
 	}
 	wbCfg := wechatbot.ConfigFromApp(cfg.Channel.WeChatBot, cfg.SessionsDir)
 	registry := wechatbot.NewRegistry(wbCfg, channelRouter, sc.DB, logger)
-	plugin := wechatbot.NewPlugin(registry, logger)
+	plugin := wechatbot.NewPlugin(registry, logger).WithInputCoordinator(sc.Master)
 	if pgStore, ok := sc.DB.(*store.PostgresStore); ok && pgStore != nil {
 		plugin.SetMetricsWriter(observability.NewPgMetricsWriter(pgStore.Pool(), logger))
 	}

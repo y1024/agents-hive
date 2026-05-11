@@ -624,7 +624,7 @@ function ErrorCard({ content }: { content: string }) {
   const toggleLabel = expanded ? t('tools.clickToCollapse') : t('tools.clickToExpand');
 
   return (
-    <div className="rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] overflow-hidden ring-1 ring-[var(--danger)]/30">
+    <div className="rounded-2xl border border-[var(--border-color)] bg-[var(--bg-card)] overflow-hidden ring-1 ring-[var(--danger)]/30">
       <div
         className="flex items-center gap-2 px-3 py-2 min-h-[44px] cursor-pointer"
         onClick={() => setExpanded(!expanded)}

@@ -750,9 +750,9 @@ func (s *PostgresStore) UpsertWechatConversation(ctx context.Context, rec *Wecha
 		INSERT INTO wechat_conversations (
 			owner_user_id, owner_account_id, peer_wxid, session_id,
 			peer_nickname, peer_avatar_url, chat_type, last_message_preview,
-			last_message_at, can_send, send_state, metadata
+			last_message_at, can_send, send_state, context_token, metadata
 		)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'',$12::jsonb)
 		ON CONFLICT (owner_user_id, peer_wxid) DO UPDATE SET
 			owner_account_id = EXCLUDED.owner_account_id,
 			session_id = EXCLUDED.session_id,
@@ -783,7 +783,7 @@ func (s *PostgresStore) scanWechatConversation(scanner interface {
 	err := scanner.Scan(
 		&rec.ID, &rec.OwnerUserID, &rec.OwnerAccountID, &rec.PeerWxid, &rec.SessionID,
 		&rec.PeerNickname, &rec.PeerAvatarURL, &rec.ChatType, &rec.LastMessagePreview,
-		&lastMessageAt, &rec.CanSend, &rec.SendState, &metadata, &rec.CreatedAt, &rec.UpdatedAt,
+		&lastMessageAt, &rec.CanSend, &rec.SendState, &rec.ContextToken, &metadata, &rec.CreatedAt, &rec.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -802,7 +802,7 @@ func (s *PostgresStore) GetWechatConversationBySessionID(ctx context.Context, se
 	rec, err := s.scanWechatConversation(s.pool.QueryRow(ctx, `
 		SELECT id, owner_user_id, owner_account_id, peer_wxid, session_id,
 			peer_nickname, peer_avatar_url, chat_type, last_message_preview,
-			last_message_at, can_send, send_state, metadata, created_at, updated_at
+			last_message_at, can_send, send_state, context_token, metadata, created_at, updated_at
 		FROM wechat_conversations
 		WHERE session_id = $1`, sessionID))
 	if err != nil {
@@ -818,7 +818,7 @@ func (s *PostgresStore) GetWechatConversationByOwnerPeer(ctx context.Context, ow
 	rec, err := s.scanWechatConversation(s.pool.QueryRow(ctx, `
 		SELECT id, owner_user_id, owner_account_id, peer_wxid, session_id,
 			peer_nickname, peer_avatar_url, chat_type, last_message_preview,
-			last_message_at, can_send, send_state, metadata, created_at, updated_at
+			last_message_at, can_send, send_state, context_token, metadata, created_at, updated_at
 		FROM wechat_conversations
 		WHERE owner_user_id = $1 AND peer_wxid = $2`, ownerUserID, peerWxid))
 	if err != nil {
@@ -834,7 +834,7 @@ func (s *PostgresStore) ListWechatConversationsByOwner(ctx context.Context, owne
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, owner_user_id, owner_account_id, peer_wxid, session_id,
 			peer_nickname, peer_avatar_url, chat_type, last_message_preview,
-			last_message_at, can_send, send_state, metadata, created_at, updated_at
+			last_message_at, can_send, send_state, context_token, metadata, created_at, updated_at
 		FROM wechat_conversations
 		WHERE owner_user_id = $1
 		ORDER BY last_message_at DESC NULLS LAST, updated_at DESC`,
@@ -866,6 +866,55 @@ func (s *PostgresStore) UpdateWechatConversationSendState(ctx context.Context, o
 	}
 	if ct.RowsAffected() == 0 {
 		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) UpdateWechatConversationContextToken(ctx context.Context, ownerUserID, peerWxid, contextToken string) error {
+	encrypted, err := encryptToken(contextToken)
+	if err != nil {
+		return errs.Wrap(errs.CodeStoreWriteFailed, "加密微信 context_token 失败", err)
+	}
+	ct, err := s.pool.Exec(ctx, `
+		UPDATE wechat_conversations
+		SET context_token = $3, can_send = TRUE, send_state = 'ready', updated_at = NOW()
+		WHERE owner_user_id = $1 AND peer_wxid = $2`,
+		ownerUserID, peerWxid, encrypted)
+	if err != nil {
+		return errs.Wrap(errs.CodeStoreWriteFailed, "保存微信 context_token 失败", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) GetWechatConversationContextToken(ctx context.Context, ownerUserID, peerWxid string) (string, error) {
+	var stored string
+	err := s.pool.QueryRow(ctx, `
+		SELECT context_token FROM wechat_conversations
+		WHERE owner_user_id = $1 AND peer_wxid = $2`,
+		ownerUserID, peerWxid).Scan(&stored)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return "", ErrNotFound
+		}
+		return "", errs.Wrap(errs.CodeStoreReadFailed, "读取微信 context_token 失败", err)
+	}
+	if stored == "" {
+		return "", ErrNotFound
+	}
+	return decryptToken(stored)
+}
+
+func (s *PostgresStore) ClearWechatConversationContextTokens(ctx context.Context, ownerUserID string) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE wechat_conversations
+		SET context_token = '', can_send = FALSE, send_state = 'expired', updated_at = NOW()
+		WHERE owner_user_id = $1`,
+		ownerUserID)
+	if err != nil {
+		return errs.Wrap(errs.CodeStoreWriteFailed, "清理微信 context_token 失败", err)
 	}
 	return nil
 }

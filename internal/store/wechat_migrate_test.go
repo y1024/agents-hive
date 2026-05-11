@@ -24,8 +24,10 @@ func TestPGInitSQLIncludesUserExternalIDsAndWechatConversations(t *testing.T) {
 		"chat_type TEXT NOT NULL DEFAULT 'direct'",
 		"can_send BOOLEAN NOT NULL DEFAULT FALSE",
 		"send_state TEXT NOT NULL DEFAULT 'unknown'",
+		"context_token TEXT NOT NULL DEFAULT ''",
 		"UNIQUE (owner_user_id, peer_wxid)",
 		"UNIQUE (session_id)",
+		"ALTER TABLE wechat_conversations ADD COLUMN IF NOT EXISTS context_token TEXT NOT NULL DEFAULT ''",
 		"CREATE INDEX IF NOT EXISTS idx_wechat_conversations_owner_last",
 		"ON wechat_conversations(owner_user_id, last_message_at DESC NULLS LAST)",
 	}
@@ -52,7 +54,6 @@ func TestWeChatMigration_RunTwice_Idempotent(t *testing.T) {
 	}
 	forbidden := []string{
 		"ALTER TABLE user_external_ids ADD COLUMN",
-		"ALTER TABLE wechat_conversations ADD COLUMN",
 		"CREATE INDEX idx_user_external_ids_user_provider",
 		"CREATE INDEX idx_wechat_conversations_owner_last",
 		"CREATE TABLE user_external_ids",

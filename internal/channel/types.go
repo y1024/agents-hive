@@ -79,11 +79,14 @@ type InboundContextResolver interface {
 // 使 renderer 无需回查任何状态即可完成"事件 → 平台 API 调用"的翻译。
 // SessionID 是 subscriber 端 filter EventBus 事件的唯一依据。
 type SessionScope struct {
-	SessionID string `json:"session_id"`            // 用于 filter EventBus 事件
-	ChatID    string `json:"chat_id,omitempty"`     // 平台 chat / open_chat_id
-	ReplyToID string `json:"reply_to_id,omitempty"` // 用户原消息 ID（飞书 reply_message_id）
-	UserID    string `json:"user_id,omitempty"`     // 平台 user_id（用于 @ 或权限）
-	MessageID string `json:"message_id,omitempty"`  // 用户原消息 ID，用于 ack 表情
+	SessionID   string `json:"session_id"`              // 用于 filter EventBus 事件
+	TenantKey   string `json:"tenant_key,omitempty"`    // 平台租户/owner 作用域
+	OwnerUserID string `json:"owner_user_id,omitempty"` // user-scoped 平台 owner（wechatbot）
+	ChatID      string `json:"chat_id,omitempty"`       // 平台 chat / open_chat_id
+	ReplyToID   string `json:"reply_to_id,omitempty"`   // 用户原消息 ID（飞书 reply_message_id）
+	ReplyToken  string `json:"reply_token,omitempty"`   // 平台私有回复上下文（wechatbot=iLink context_token）
+	UserID      string `json:"user_id,omitempty"`       // 平台 user_id（用于 @ 或权限）
+	MessageID   string `json:"message_id,omitempty"`    // 用户原消息 ID，用于 ack 表情
 }
 
 // InboundMessage 从 IM 平台收到的统一消息结构
@@ -105,6 +108,9 @@ type InboundMessage struct {
 	Content     string       `json:"content"`
 	MessageType string       `json:"message_type,omitempty"`
 	Attachments []Attachment `json:"attachments,omitempty"`
+	// ReplyToken 是平台私有的短期回复上下文。
+	// wechatbot 使用 iLink context_token；飞书/钉钉/企微保持空值。
+	ReplyToken string `json:"reply_token,omitempty"`
 	// NoDebounce 用于历史回放 / gap fetch 这类“必须逐条重放”的场景。
 	// 为 true 时 Router 跳过 sender-level debounce，避免同一发送者的多条历史消息被错误合并。
 	NoDebounce bool `json:"no_debounce,omitempty"`
@@ -145,6 +151,9 @@ type OutboundMessage struct {
 	Content     string   `json:"content"`
 	MsgType     MsgType  `json:"msg_type,omitempty"` // 消息格式，默认 text
 	ReplyTo     string   `json:"reply_to,omitempty"`
+	// ReplyToken 是平台私有的短期回复上下文。
+	// wechatbot 使用 iLink context_token；飞书/钉钉/企微保持空值。
+	ReplyToken string `json:"reply_token,omitempty"`
 }
 
 // Binding IM 通道与会话的绑定关系

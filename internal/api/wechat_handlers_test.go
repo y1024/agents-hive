@@ -118,6 +118,9 @@ func TestWeChatConversationsExposeOnlyContactStatus(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("save conversation: %v", err)
 	}
+	if err := st.UpdateWechatConversationContextToken(context.Background(), "owner-1", "wx-peer", "ctx-token"); err != nil {
+		t.Fatalf("save context token: %v", err)
+	}
 
 	service := wechatbot.NewService(nil, st)
 	srv := NewServer(config.ServerConfig{Port: 0}, config.HITLConfig{}, config.WebUIConfig{}, nil, nil, config.Default(), "", nil, st, nil, zap.NewNop())
@@ -131,7 +134,7 @@ func TestWeChatConversationsExposeOnlyContactStatus(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	for _, forbidden := range []string{"last_message_preview", "这条微信正文不能到浏览器", "session_id", "im-wechatbot-owner-1-wx-peer", "can_send", "send_state"} {
+	for _, forbidden := range []string{"last_message_preview", "这条微信正文不能到浏览器", "session_id", "im-wechatbot-owner-1-wx-peer", "can_send", "send_state", "context_token", "ctx-token"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("wechat conversations leaked %q in body: %s", forbidden, body)
 		}

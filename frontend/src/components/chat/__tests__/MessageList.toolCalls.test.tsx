@@ -74,6 +74,50 @@ describe('MessageList tool call rendering', () => {
     expect(screen.queryByText(/已写入 5 字节到/)).toBeNull();
   });
 
+  it('shows the assistant avatar only once across a continuous assistant/tool turn', () => {
+    useChatStore.setState({
+      inlineApprovals: [],
+      toolCallStatuses: {},
+      toolCallStartTimes: {},
+    });
+
+    const messages: Message[] = [
+      {
+        role: 'user',
+        content: 'Build a greeting skill',
+        timestamp: '2026-05-04T01:00:00.000Z',
+      },
+      {
+        role: 'assistant',
+        content: '',
+        timestamp: '2026-05-04T01:00:01.000Z',
+        tool_calls: [
+          {
+            id: 'call-ls',
+            name: 'ls',
+            arguments: '{}',
+          },
+        ],
+      },
+      {
+        role: 'tool',
+        content: 'README.md\nfrontend',
+        timestamp: '2026-05-04T01:00:02.000Z',
+        tool_call_id: 'call-ls',
+        tool_name: 'ls',
+      },
+      {
+        role: 'assistant',
+        content: 'I found the project files.',
+        timestamp: '2026-05-04T01:00:03.000Z',
+      },
+    ];
+
+    const { container } = render(<MessageList messages={messages} />);
+
+    expect(container.querySelectorAll('.msg-container linearGradient[id^="claw-grad-"]').length).toBe(1);
+  });
+
   it('keeps orphan tool result visible when no assistant tool_call references it', () => {
     useChatStore.setState({
       inlineApprovals: [],

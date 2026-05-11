@@ -69,6 +69,9 @@ type Store interface {
 	GetWechatConversationByOwnerPeer(ctx context.Context, ownerUserID, peerWxid string) (*WechatConversationRecord, error)
 	ListWechatConversationsByOwner(ctx context.Context, ownerUserID string) ([]*WechatConversationRecord, error)
 	UpdateWechatConversationSendState(ctx context.Context, ownerUserID, peerWxid string, canSend bool, sendState string) error
+	UpdateWechatConversationContextToken(ctx context.Context, ownerUserID, peerWxid, contextToken string) error
+	GetWechatConversationContextToken(ctx context.Context, ownerUserID, peerWxid string) (string, error)
+	ClearWechatConversationContextTokens(ctx context.Context, ownerUserID string) error
 
 	// 通道 Push 定时任务
 	SaveScheduledPush(ctx context.Context, rec *ScheduledPushRecord) error
@@ -173,6 +176,7 @@ type WechatConversationRecord struct {
 	LastMessageAt      *time.Time      `json:"last_message_at,omitempty"`
 	CanSend            bool            `json:"can_send"`
 	SendState          string          `json:"send_state"`
+	ContextToken       string          `json:"-"`
 	Metadata           json.RawMessage `json:"metadata,omitempty"`
 	CreatedAt          time.Time       `json:"created_at,omitempty"`
 	UpdatedAt          time.Time       `json:"updated_at,omitempty"`

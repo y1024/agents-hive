@@ -108,7 +108,7 @@ var DefaultToolRecallConfigValue = ToolRecallConfig{
 var DefaultCompactionPipelineStages = []string{"tool_budget", "session_memory", "truncate"}
 
 // DefaultPermissionRules 定义默认的工具权限规则。
-// 默认采用低摩擦策略：常规读写、计划、编排工具放行；危险 shell、外部发送、删除/账号/社交副作用进入权限层细分。
+// 默认采用低摩擦策略：常规读写、计划、编排和普通 IM 发送放行；危险 shell、删除/账号/社交副作用进入权限层细分。
 var DefaultPermissionRules = defaultPermissionRules()
 
 // Channel 默认值
@@ -199,7 +199,7 @@ func defaultPermissionRules() []skills.PermissionRule {
 		{ToolName: "run_command", Action: skills.PermissionAsk},
 		{ToolName: "create_tool", Action: skills.PermissionAsk},
 		{ToolName: "remove_tool", Action: skills.PermissionAsk},
-		{ToolName: "send_im_message", Action: skills.PermissionAsk},
+		{ToolName: "send_im_message", Action: skills.PermissionAllow},
 	}
 	for _, rule := range router.ToolActionRiskRules() {
 		for _, action := range rule.Actions {

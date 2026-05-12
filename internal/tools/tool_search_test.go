@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"go.uber.org/zap"
@@ -107,8 +108,8 @@ func TestToolSearchFindsRegisteredToolsWithoutMutatingRegistry(t *testing.T) {
 	if got.Invocation != "direct_tool" {
 		t.Fatalf("invocation = %q, want direct_tool", got.Invocation)
 	}
-	if got.RouteStatus != "recommended" {
-		t.Fatalf("route_status = %q, want recommended", got.RouteStatus)
+	if got.RouteStatus != "discovery_only" {
+		t.Fatalf("route_status = %q, want discovery_only", got.RouteStatus)
 	}
 	if got.Score <= 0 {
 		t.Fatalf("expected positive score, got %f", got.Score)
@@ -164,6 +165,133 @@ func TestToolSearchExposesExternalMCPRiskMetadata(t *testing.T) {
 	}
 	if got.Kind != "mcp_tool" || got.Domain != "github" || got.Source != "mcp_server" || got.Invocation != "direct_tool" {
 		t.Fatalf("unexpected typed metadata: %+v", got)
+	}
+}
+
+func TestToolSearchResultsAreDiscoveryOnly(t *testing.T) {
+	logger := zap.NewNop()
+	host := mcphost.NewHost(logger)
+	registerToolSearch(host, logger)
+	host.RegisterTool(mcphost.ToolDefinition{
+		Name:        "feishu_api",
+		Description: "飞书应用 API 工具。search_contacts send_message",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["search_contacts","send_message"]}}}`),
+	}, func(context.Context, json.RawMessage) (*mcphost.ToolResult, error) {
+		t.Fatal("tool_search must not execute matched tools")
+		return nil, nil
+	})
+
+	result, err := host.ExecuteTool(context.Background(), "tool_search", json.RawMessage(`{"query":"飞书","limit":1}`))
+	if err != nil {
+		t.Fatalf("ExecuteTool(tool_search): %v", err)
+	}
+
+	var out struct {
+		Results []struct {
+			Name          string `json:"name"`
+			RouteStatus   string `json:"route_status"`
+			CallableNow   bool   `json:"callable_now"`
+			ExecutionNote string `json:"execution_note"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(result.DecodeContent()), &out); err != nil {
+		t.Fatalf("decode tool_search output: %v; content=%s", err, result.DecodeContent())
+	}
+	if len(out.Results) != 1 || out.Results[0].Name != "feishu_api" {
+		t.Fatalf("expected one feishu_api result, got %#v", out.Results)
+	}
+	if out.Results[0].RouteStatus != "discovery_only" {
+		t.Fatalf("route_status = %q, want discovery_only", out.Results[0].RouteStatus)
+	}
+	if out.Results[0].CallableNow {
+		t.Fatal("tool_search result must not claim callable_now")
+	}
+	if !strings.Contains(out.Results[0].ExecutionNote, "不授权执行") {
+		t.Fatalf("execution_note should explain no authorization, got %q", out.Results[0].ExecutionNote)
+	}
+}
+
+func TestToolSearchFeishuApprovalMetadataIsActionAware(t *testing.T) {
+	logger := zap.NewNop()
+	host := mcphost.NewHost(logger)
+	RegisterFeishuTools(host, logger, &mockFeishuProvider{}, nil)
+	registerToolSearch(host, logger)
+
+	result, err := host.ExecuteTool(context.Background(), "tool_search", json.RawMessage(`{"query":"飞书","limit":1}`))
+	if err != nil {
+		t.Fatalf("ExecuteTool(tool_search): %v", err)
+	}
+
+	var out struct {
+		Results []struct {
+			Name                string   `json:"name"`
+			DangerLevel         string   `json:"danger_level"`
+			RequiresApproval    bool     `json:"requires_approval"`
+			DangerousActions    []string `json:"dangerous_actions"`
+			ActionField         string   `json:"action_field"`
+			ReadOnlyActions     []string `json:"read_only_actions"`
+			LocalWriteActions   []string `json:"local_write_actions"`
+			ExternalSendActions []string `json:"external_send_actions"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(result.DecodeContent()), &out); err != nil {
+		t.Fatalf("decode tool_search output: %v; content=%s", err, result.DecodeContent())
+	}
+	if len(out.Results) != 1 || out.Results[0].Name != "feishu_api" {
+		t.Fatalf("expected one feishu_api result, got %#v", out.Results)
+	}
+	got := out.Results[0]
+	if got.DangerLevel != "mixed" {
+		t.Fatalf("danger_level = %q, want mixed", got.DangerLevel)
+	}
+	if got.RequiresApproval {
+		t.Fatalf("feishu_api should not be blanket approval-required: %+v", got)
+	}
+	if got.ActionField != "action" {
+		t.Fatalf("action_field = %q, want action", got.ActionField)
+	}
+	if !containsStringForToolTest(got.DangerousActions, "create_task") || !containsStringForToolTest(got.ReadOnlyActions, "get_doc_content") || !containsStringForToolTest(got.ExternalSendActions, "send_message") {
+		t.Fatalf("missing action-aware metadata: %+v", got)
+	}
+}
+
+func TestToolSearchMixedOperationApprovalMetadataIsActionAware(t *testing.T) {
+	logger := zap.NewNop()
+	host := mcphost.NewHost(logger)
+	registerMemory(host, logger, nil)
+	registerToolSearch(host, logger)
+
+	result, err := host.ExecuteTool(context.Background(), "tool_search", json.RawMessage(`{"query":"memory","limit":1}`))
+	if err != nil {
+		t.Fatalf("ExecuteTool(tool_search): %v", err)
+	}
+
+	var out struct {
+		Results []struct {
+			Name              string   `json:"name"`
+			DangerLevel       string   `json:"danger_level"`
+			RequiresApproval  bool     `json:"requires_approval"`
+			DangerousActions  []string `json:"dangerous_actions"`
+			ActionField       string   `json:"action_field"`
+			ReadOnlyActions   []string `json:"read_only_actions"`
+			LocalWriteActions []string `json:"local_write_actions"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(result.DecodeContent()), &out); err != nil {
+		t.Fatalf("decode tool_search output: %v; content=%s", err, result.DecodeContent())
+	}
+	if len(out.Results) != 1 || out.Results[0].Name != "memory" {
+		t.Fatalf("expected one memory result, got %#v", out.Results)
+	}
+	got := out.Results[0]
+	if got.DangerLevel != "mixed" || got.RequiresApproval {
+		t.Fatalf("memory should be mixed without blanket approval, got %+v", got)
+	}
+	if got.ActionField != "operation" {
+		t.Fatalf("action_field = %q, want operation", got.ActionField)
+	}
+	if !containsStringForToolTest(got.ReadOnlyActions, "search") || !containsStringForToolTest(got.LocalWriteActions, "save") || !containsStringForToolTest(got.DangerousActions, "delete") {
+		t.Fatalf("missing operation-aware metadata: %+v", got)
 	}
 }
 
@@ -238,11 +366,11 @@ func TestToolSearchTypedMetadataPhase0Kinds(t *testing.T) {
 		}{hit.Kind, hit.Domain, hit.Source, hit.Invocation, hit.RouteStatus}
 	}
 
-	assertToolSearchMeta(t, byName, "tool_search", "builtin_tool", "discovery", "builtin", "discovery_only", "discoverable")
-	assertToolSearchMeta(t, byName, "mcp-builder", "skill_workflow", "mcp_server_building", "local_skill", "skill_tool", "discoverable")
-	assertToolSearchMeta(t, byName, "github__create_issue", "mcp_tool", "github", "mcp_server", "direct_tool", "discoverable")
-	assertToolSearchMeta(t, byName, "project_status", "custom_tool", "custom", "custom_dir", "direct_tool", "discoverable")
-	assertToolSearchMeta(t, byName, "opaque_candidate", "unknown", "unknown", "unknown", "discovery_only", "discoverable")
+	assertToolSearchMeta(t, byName, "tool_search", "builtin_tool", "discovery", "builtin", "discovery_only", "discovery_only")
+	assertToolSearchMeta(t, byName, "mcp-builder", "skill_workflow", "mcp_server_building", "local_skill", "skill_tool", "discovery_only")
+	assertToolSearchMeta(t, byName, "github__create_issue", "mcp_tool", "github", "mcp_server", "direct_tool", "discovery_only")
+	assertToolSearchMeta(t, byName, "project_status", "custom_tool", "custom", "custom_dir", "direct_tool", "discovery_only")
+	assertToolSearchMeta(t, byName, "opaque_candidate", "unknown", "unknown", "unknown", "discovery_only", "discovery_only")
 }
 
 func TestToolSearchFindsToolsBySchemaEnumValues(t *testing.T) {
@@ -494,4 +622,13 @@ func assertToolSearchMeta(t *testing.T, got map[string]struct {
 	if meta.RouteStatus != routeStatus {
 		t.Fatalf("%s route_status = %q, want %q", name, meta.RouteStatus, routeStatus)
 	}
+}
+
+func containsStringForToolTest(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
 }

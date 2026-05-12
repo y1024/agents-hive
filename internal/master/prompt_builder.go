@@ -188,7 +188,7 @@ func (m *Master) buildToolPrompt(tools []mcphost.ToolDefinition) string {
 				b.WriteString(fmt.Sprintf("- **%s**: %s\n", t.Name, t.Description))
 			}
 		}
-		b.WriteString("\n更多扩展工具默认不进入候选集。需要不常用、外部 MCP 或自定义能力时，先调用 **tool_search** 按需发现；发现后的工具会在后续轮次进入可调用列表。\n\n")
+		b.WriteString("\n更多扩展工具默认不进入候选集。需要不常用、外部 MCP 或自定义能力时，可以先调用 **tool_search** 查看工具目录。tool_search 只用于发现工具，不会授权执行；某个工具是否能在当前回合调用，取决于本轮工具列表、RouteDecision、plan mode 和权限审批。\n\n")
 
 		// 外部 MCP 工具提示（按服务端分组，帮助 LLM 了解可用的外部集成）
 		externalTools := make(map[string][]mcphost.ToolDefinition)

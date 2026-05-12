@@ -106,6 +106,7 @@ func (a *Agent) resolveLLM() *llm.Client {
 
 // handleTask 处理摘要生成任务
 func (a *Agent) handleTask(ctx context.Context, req subagent.TaskRequest) subagent.TaskResponse {
+	ctx = subagent.ContextFromTaskRequest(ctx, req)
 	a.sessionID = req.SessionID
 	a.userID = req.UserID
 	payload, _ := subagent.ExtractPayload(req)

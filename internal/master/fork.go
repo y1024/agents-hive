@@ -7,9 +7,12 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/chef-guo/agents-hive/internal/auth"
 	"github.com/chef-guo/agents-hive/internal/errs"
 	"github.com/chef-guo/agents-hive/internal/skills"
 	"github.com/chef-guo/agents-hive/internal/subagent"
+	"github.com/chef-guo/agents-hive/internal/toolctx"
+	"github.com/chef-guo/agents-hive/internal/tools"
 )
 
 // ForkExecutor 在隔离的 sub-agent 上下文中运行 skill，
@@ -86,8 +89,18 @@ func (f *ForkExecutor) ExecuteForked(ctx context.Context, skill *skills.Skill, r
 		"instruction": "请根据系统提示词中的指令执行任务，并返回执行结果。",
 	})
 
+	tc := toolctx.GetToolContext(ctx)
 	taskReq := subagent.TaskRequest{
-		Payload: taskPayload,
+		ID:            fmt.Sprintf("fork-%s", skill.Metadata.Name),
+		Type:          "execute",
+		SessionID:     toolctx.GetSessionID(ctx),
+		UserID:        auth.UserIDFrom(ctx),
+		TraceID:       tools.DeriveChildTraceID(tc.TraceID, agent.ID()),
+		ParentSpanID:  tc.SpanID,
+		ParentTraceID: tc.TraceID,
+		TurnID:        tc.TurnIDOrTraceID(),
+		ToolCallID:    tc.ToolCallID,
+		Payload:       taskPayload,
 	}
 
 	resp, err := agent.SendTask(ctx, taskReq)

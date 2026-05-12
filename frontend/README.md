@@ -328,7 +328,6 @@ frontend/
 │   │   └── api.ts            # API 和 WebSocket 类型
 │   ├── utils/                # 工具函数
 │   ├── App.tsx               # 根组件
-│   ├── App.css               # 应用样式
 │   ├── main.tsx              # 入口文件
 │   └── index.css             # 全局样式
 ├── public/                   # 静态资源

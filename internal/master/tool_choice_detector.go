@@ -6,8 +6,11 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/chef-guo/agents-hive/internal/config"
 	"github.com/chef-guo/agents-hive/internal/imctx"
 	"github.com/chef-guo/agents-hive/internal/llm"
+	"github.com/chef-guo/agents-hive/internal/mcphost"
+	"github.com/chef-guo/agents-hive/internal/router"
 )
 
 // ToolChoiceMode 合法值集合（与 openai-go SDK 对齐）。
@@ -86,6 +89,13 @@ func detectToolChoice(userQuery string, skillsIndex map[string]bool) string {
 	return detectToolChoiceWithContext(userQuery, skillsIndex, nil)
 }
 
+func detectToolChoiceWithIntent(userQuery string, skillsIndex map[string]bool, refs []imctx.DocRef, intent router.IntentFrame) string {
+	if isStructuredExternalSendIntent(intent) {
+		return ToolChoiceRequired
+	}
+	return detectToolChoiceWithContext(userQuery, skillsIndex, refs)
+}
+
 func detectToolChoiceWithContext(userQuery string, skillsIndex map[string]bool, refs []imctx.DocRef) string {
 	q := strings.TrimSpace(userQuery)
 	if q == "" {
@@ -120,6 +130,57 @@ func detectToolChoiceWithContext(userQuery string, skillsIndex map[string]bool, 
 	}
 
 	return ToolChoiceAuto
+}
+
+func shouldEvaluateToolChoiceForTurn(userQuery string, refs []imctx.DocRef, guards config.QualityGuardsConfig, intent router.IntentFrame) bool {
+	if guards.ToolChoiceForce || len(refs) > 0 {
+		return true
+	}
+	return isStructuredExternalSendIntent(intent)
+}
+
+func toolChoiceRequiredTrigger(userQuery string, skillsIndex map[string]bool, refs []imctx.DocRef, intent router.IntentFrame) string {
+	q := strings.TrimSpace(userQuery)
+	if len(refs) > 0 {
+		return "refs"
+	}
+	if q == "" {
+		return "auto"
+	}
+	if isStructuredExternalSendIntent(intent) {
+		return "external_send"
+	}
+	if skillRefPattern.MatchString(q) {
+		return "skill_ref"
+	}
+	if urlPattern.MatchString(q) {
+		return "url"
+	}
+	if filePathPattern.MatchString(q) {
+		return "file_path"
+	}
+	if target := extractWhatIsTarget(q); target != "" {
+		if skillsIndex == nil || !skillsIndex[strings.ToLower(target)] {
+			return "what_is"
+		}
+	}
+	return "auto"
+}
+
+func hasRequiredIntentCallableTool(tools []mcphost.ToolDefinition, intent router.IntentFrame) bool {
+	if intent.Kind == router.IntentUnknown {
+		return false
+	}
+	profiles := make([]router.ToolProfile, 0, len(tools))
+	for _, tool := range tools {
+		profiles = append(profiles, router.InferToolProfile(tool, router.ProfileHint{}))
+	}
+	decision := router.BuildRouteDecision(intent, profiles)
+	return len(decision.AllowedTools) > 0
+}
+
+func isStructuredExternalSendIntent(intent router.IntentFrame) bool {
+	return intent.Kind == router.IntentExternalWrite && intent.AllowsSideEffects && intent.RequiresExternal
 }
 
 func refsForToolChoice(imCtx *imctx.IMMessageContext, imRefsRead bool) []imctx.DocRef {

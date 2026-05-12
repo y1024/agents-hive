@@ -68,6 +68,34 @@ func TestDefault(t *testing.T) {
 	}
 }
 
+func TestDefaultPermissionRulesMinimalIMAndMixedActions(t *testing.T) {
+	assertRule := func(toolName, pattern, action string) {
+		t.Helper()
+		for _, rule := range DefaultPermissionRules {
+			if rule.ToolName == toolName && rule.Pattern == pattern && string(rule.Action) == action {
+				return
+			}
+		}
+		t.Fatalf("DefaultPermissionRules missing tool=%s pattern=%s action=%s", toolName, pattern, action)
+	}
+	assertNoRule := func(toolName, pattern, action string) {
+		t.Helper()
+		for _, rule := range DefaultPermissionRules {
+			if rule.ToolName == toolName && rule.Pattern == pattern && string(rule.Action) == action {
+				t.Fatalf("DefaultPermissionRules contains forbidden tool=%s pattern=%s action=%s", toolName, pattern, action)
+			}
+		}
+	}
+
+	assertRule("send_im_message", "", "allow")
+	assertRule("feishu_api", "create_approval", "ask")
+	assertRule("feishu_api", "", "allow")
+	assertRule("memory", "delete", "ask")
+	assertRule("taskboard", "delete", "ask")
+	assertNoRule("send_im_message", "", "ask")
+	assertNoRule("feishu_api", "", "ask")
+}
+
 func TestLoad_ChannelWechatbotFlag(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")

@@ -925,8 +925,16 @@ func (r *Router) emitInputReceived(sessionID, channelMessageID string) {
 
 // rendererDrainDelay 是 ProcessMessage 返回后、UnsubscribeWSBroadcast 前的 drain 窗口。
 // 给尚未到 renderer 的 in-flight 事件留出消费时间；过短会丢尾部事件，过长延迟下一消息。
-// 200ms 是 spec 5.2 明确给出的阈值。
 const rendererDrainDelay = 200 * time.Millisecond
+
+const wechatbotRendererDrainDelay = 2 * time.Second
+
+func rendererDrainDelayFor(platform Platform) time.Duration {
+	if platform == PlatformWeChatBot {
+		return wechatbotRendererDrainDelay
+	}
+	return rendererDrainDelay
+}
 
 // processViaRenderer 是 subscriber-based 编排路径：
 //  1. 先 Subscribe（保证订阅在 ProcessMessage 广播 input_received 之前就位）
@@ -976,7 +984,7 @@ func (r *Router) processViaRenderer(ctx context.Context, renderer EventRenderer,
 
 	// drain 200ms → Unsubscribe（触发 eventCh close）→ 等 renderer goroutine 退出
 	select {
-	case <-time.After(rendererDrainDelay):
+	case <-time.After(rendererDrainDelayFor(plugin.Platform())):
 	case <-ctx.Done():
 	}
 	r.eventBus.UnsubscribeWSBroadcast(subID)

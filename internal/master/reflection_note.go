@@ -28,6 +28,8 @@ func buildReflectionSystemNote(in reflectionNoteInput) string {
 		return "[系统反思] 当前回答被质量护栏拦截。下一步必须补证据、调用必要工具或明确无法完成，不能直接复述被拦截内容。"
 	case "validation_failure":
 		return "[系统反思] 当前产物未通过后置验证。下一步必须根据验证错误修正证据链或输出结构。"
+	case "intent_fulfillment":
+		return "[系统反思] 用户目标尚未完成。下一步必须补齐缺失的能力链：如果用户要求发送给某人，先完成联系人查找；如果联系人有歧义，调用 question 工具向用户确认；确认后调用发送工具。不能把中间查询结果当作最终回复。"
 	default:
 		return "[系统反思] 当前执行路径没有取得进展。请总结阻塞原因并改变策略。"
 	}

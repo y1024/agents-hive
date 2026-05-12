@@ -6,8 +6,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/chef-guo/agents-hive/internal/config"
 	"github.com/chef-guo/agents-hive/internal/imctx"
 	"github.com/chef-guo/agents-hive/internal/llm"
+	"github.com/chef-guo/agents-hive/internal/mcphost"
+	"github.com/chef-guo/agents-hive/internal/router"
 )
 
 func TestDetectToolChoice_Required(t *testing.T) {
@@ -87,6 +90,35 @@ func TestDetectToolChoice_WithIMReferencesForcesRequired(t *testing.T) {
 	got := detectToolChoiceWithContext("分析一下这个文档", nil, refs)
 	if got != ToolChoiceRequired {
 		t.Fatalf("want required, got %q", got)
+	}
+}
+
+func TestDetectToolChoice_UsesStructuredExternalSendIntent(t *testing.T) {
+	intent := router.IntentFrame{Kind: router.IntentExternalWrite, AllowsSideEffects: true, RequiresExternal: true}
+	if got := detectToolChoiceWithIntent("给郭松发一下今天的天气信息", nil, nil, intent); got != ToolChoiceRequired {
+		t.Fatalf("structured external-send intent should require tools, got %q", got)
+	}
+	if got := detectToolChoiceWithIntent("给郭松发一下今天的天气信息", nil, nil, router.IntentFrame{Kind: router.IntentAnswer}); got != ToolChoiceAuto {
+		t.Fatalf("answer intent should not require tools from send-like text alone, got %q", got)
+	}
+}
+
+func TestShouldEvaluateToolChoiceForTurn_StructuredExternalSendBypassesQualityGuardFlag(t *testing.T) {
+	intent := router.IntentFrame{Kind: router.IntentExternalWrite, AllowsSideEffects: true, RequiresExternal: true}
+	if !shouldEvaluateToolChoiceForTurn("给郭松发一下今天的天气信息", nil, config.QualityGuardsConfig{}, intent) {
+		t.Fatal("structured external-send intent must evaluate tool choice even when ToolChoiceForce is disabled")
+	}
+	if !shouldEvaluateToolChoiceForTurn("分析一下这个文档", []imctx.DocRef{{URL: "https://example.com/doc"}}, config.QualityGuardsConfig{}, router.IntentFrame{}) {
+		t.Fatal("IM refs must still evaluate tool choice")
+	}
+	if shouldEvaluateToolChoiceForTurn("给郭松发一下今天的天气信息", nil, config.QualityGuardsConfig{}, router.IntentFrame{Kind: router.IntentAnswer}) {
+		t.Fatal("send-like text without structured external-send intent must not force tools")
+	}
+	if shouldEvaluateToolChoiceForTurn("LangGraph Checkpointer 是什么", nil, config.QualityGuardsConfig{}, router.IntentFrame{}) {
+		t.Fatal("non-send broad heuristics should remain behind ToolChoiceForce")
+	}
+	if !shouldEvaluateToolChoiceForTurn("LangGraph Checkpointer 是什么", nil, config.QualityGuardsConfig{ToolChoiceForce: true}, router.IntentFrame{}) {
+		t.Fatal("ToolChoiceForce still enables broad required heuristics")
 	}
 }
 
@@ -224,6 +256,46 @@ func TestIsChitchat_NotTrippedByMixedQuestion(t *testing.T) {
 	}
 	if isChitchat("hi, what is LangGraph") {
 		t.Fatal("mixed greeting + english question must not be chitchat")
+	}
+}
+
+func TestToolChoiceRequiredTrigger(t *testing.T) {
+	cases := []struct {
+		name   string
+		q      string
+		refs   []imctx.DocRef
+		intent router.IntentFrame
+		want   string
+	}{
+		{name: "refs", q: "分析一下这个文档", refs: []imctx.DocRef{{URL: "https://example.com/doc"}}, want: "refs"},
+		{name: "skill ref", q: "女娲.skill 是什么", want: "skill_ref"},
+		{name: "url", q: "看看 https://example.com", want: "url"},
+		{name: "file", q: "./internal/master/react_processor.go 里有什么", want: "file_path"},
+		{name: "what is", q: "LangGraph Checkpointer 是什么", want: "what_is"},
+		{name: "external send", q: "给郭松发一下今天的天气信息", intent: router.IntentFrame{Kind: router.IntentExternalWrite, AllowsSideEffects: true, RequiresExternal: true}, want: "external_send"},
+		{name: "send-like text without structured intent", q: "给郭松发一下今天的天气信息", intent: router.IntentFrame{Kind: router.IntentAnswer}, want: "auto"},
+		{name: "auto", q: "今天天气怎么样", want: "auto"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := toolChoiceRequiredTrigger(tc.q, nil, tc.refs, tc.intent); got != tc.want {
+				t.Fatalf("trigger = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestHasRequiredIntentCallableTool(t *testing.T) {
+	intent := router.IntentFrame{Kind: router.IntentExternalWrite, AllowsSideEffects: true, RequiresExternal: true}
+	if !hasRequiredIntentCallableTool([]mcphost.ToolDefinition{{
+		Name:        "feishu_api",
+		Description: "飞书应用 API 工具。search_contacts send_message",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["search_contacts","send_message"]}}}`),
+	}}, intent) {
+		t.Fatal("feishu_api should satisfy external-send required intent")
+	}
+	if hasRequiredIntentCallableTool([]mcphost.ToolDefinition{{Name: "tool_search", Core: true}}, intent) {
+		t.Fatal("tool_search alone must not satisfy external-send required intent")
 	}
 }
 

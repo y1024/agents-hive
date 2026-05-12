@@ -73,7 +73,6 @@ func registerSpawnAgent(host *mcphost.Host, executor TaskExecutor, spawner Agent
 			Name:        "spawn_agent",
 			Description: "动态创建专用 Agent 并立即执行任务。当你需要访问数据库（MySQL/PostgreSQL/Redis等）、查询监控系统（Grafana/Prometheus）、调用外部API、或执行任何需要专业知识的操作时，创建一个带有专用 system_prompt 的 Agent。该 Agent 通常使用 bash 工具通过命令行完成实际操作。",
 			InputSchema: schema,
-			Core:        true,
 		},
 		func(ctx context.Context, input json.RawMessage) (*mcphost.ToolResult, error) {
 			// 检查调用者权限：仅 Master 可调用

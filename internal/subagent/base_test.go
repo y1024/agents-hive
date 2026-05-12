@@ -8,8 +8,10 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/chef-guo/agents-hive/internal/auth"
 	"github.com/chef-guo/agents-hive/internal/errs"
 	"github.com/chef-guo/agents-hive/internal/skills"
+	"github.com/chef-guo/agents-hive/internal/toolctx"
 )
 
 func testLogger() *zap.Logger {
@@ -56,6 +58,70 @@ func TestBaseAgent_RunAndSendTask(t *testing.T) {
 	}
 	if resp.AgentID != "test-agent" {
 		t.Errorf("expected agent_id test-agent, got %s", resp.AgentID)
+	}
+}
+
+func TestBaseAgent_HandlerReceivesRequestScopedContext(t *testing.T) {
+	card := AgentCard{ID: "ctx-agent", Name: "Context Agent"}
+	seen := make(chan struct {
+		sessionID string
+		userID    string
+		toolCtx   toolctx.ToolContext
+	}, 1)
+	agent := NewBaseAgent(card, func(ctx context.Context, req TaskRequest) TaskResponse {
+		seen <- struct {
+			sessionID string
+			userID    string
+			toolCtx   toolctx.ToolContext
+		}{
+			sessionID: toolctx.GetSessionID(ctx),
+			userID:    auth.UserIDFrom(ctx),
+			toolCtx:   *toolctx.GetToolContext(ctx),
+		}
+		return TaskResponse{Status: "completed"}
+	}, testSkillReg(), testLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		agent.Run(ctx)
+		close(done)
+	}()
+	defer func() { cancel(); <-done }()
+	time.Sleep(10 * time.Millisecond)
+
+	_, err := agent.SendTask(ctx, TaskRequest{
+		ID:           "req-context",
+		Type:         "test",
+		SessionID:    "sess-req",
+		UserID:       "user-req",
+		TraceID:      "trace-child",
+		ParentSpanID: "span-parent",
+		TurnID:       "turn-req",
+		ToolCallID:   "call-parent",
+	})
+	if err != nil {
+		t.Fatalf("SendTask error: %v", err)
+	}
+
+	got := <-seen
+	if got.sessionID != "sess-req" {
+		t.Fatalf("sessionID = %q, want sess-req", got.sessionID)
+	}
+	if got.userID != "user-req" {
+		t.Fatalf("userID = %q, want user-req", got.userID)
+	}
+	if got.toolCtx.TraceID != "trace-child" {
+		t.Fatalf("traceID = %q, want trace-child", got.toolCtx.TraceID)
+	}
+	if got.toolCtx.ParentSpanID != "span-parent" {
+		t.Fatalf("parentSpanID = %q, want span-parent", got.toolCtx.ParentSpanID)
+	}
+	if got.toolCtx.TurnID != "turn-req" {
+		t.Fatalf("turnID = %q, want turn-req", got.toolCtx.TurnID)
+	}
+	if got.toolCtx.ToolCallID != "call-parent" {
+		t.Fatalf("toolCallID = %q, want call-parent", got.toolCtx.ToolCallID)
 	}
 }
 

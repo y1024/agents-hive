@@ -74,7 +74,10 @@ func detectInterpreter(scriptPath string) (string, error) {
 
 // RunScript 从 skill 目录执行单个脚本并返回其 stdout
 func (r *ScriptRunner) RunScript(ctx context.Context, skillDir, scriptName string, args ...string) (string, error) {
-	scriptPath := filepath.Join(skillDir, "scripts", scriptName)
+	scriptPath, err := resolveScriptPath(skillDir, scriptName)
+	if err != nil {
+		return "", err
+	}
 
 	info, err := os.Stat(scriptPath)
 	if err != nil {
@@ -82,6 +85,9 @@ func (r *ScriptRunner) RunScript(ctx context.Context, skillDir, scriptName strin
 	}
 	if info.IsDir() {
 		return "", errs.New(errs.CodeSkillScriptFailed, fmt.Sprintf("script %q is a directory", scriptName))
+	}
+	if err := verifyResolvedScriptPath(skillDir, scriptPath, scriptName); err != nil {
+		return "", err
 	}
 
 	interpreter, err := detectInterpreter(scriptPath)
@@ -95,11 +101,7 @@ func (r *ScriptRunner) RunScript(ctx context.Context, skillDir, scriptName strin
 		zap.String("skill_dir", skillDir),
 	)
 
-	// 构建完整命令字符串
-	interpParts := strings.Fields(interpreter)
-	cmdParts := append(interpParts, scriptPath)
-	cmdParts = append(cmdParts, args...)
-	fullCmd := strings.Join(cmdParts, " ")
+	fullCmd := buildScriptCommand(interpreter, scriptPath, args)
 
 	// 优先委托给 Executor（WorkDir=skillDir）
 	if r.Executor == nil {
@@ -126,6 +128,55 @@ func (r *ScriptRunner) RunScript(ctx context.Context, skillDir, scriptName strin
 			fmt.Sprintf("script %q exited with code %d", scriptName, result.ExitCode))
 	}
 	return strings.TrimRight(output, "\n"), nil
+}
+
+func resolveScriptPath(skillDir, scriptName string) (string, error) {
+	if filepath.IsAbs(scriptName) {
+		return "", errs.New(errs.CodeSkillScriptFailed, fmt.Sprintf("script %q must be relative to scripts/", scriptName))
+	}
+	scriptsDir := filepath.Clean(filepath.Join(skillDir, "scripts"))
+	scriptPath := filepath.Clean(filepath.Join(scriptsDir, scriptName))
+	rel, err := filepath.Rel(scriptsDir, scriptPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", errs.New(errs.CodeSkillScriptFailed, fmt.Sprintf("script %q escapes scripts directory", scriptName))
+	}
+	return scriptPath, nil
+}
+
+func verifyResolvedScriptPath(skillDir, scriptPath, scriptName string) error {
+	scriptsDir := filepath.Clean(filepath.Join(skillDir, "scripts"))
+	realScriptsDir, err := filepath.EvalSymlinks(scriptsDir)
+	if err != nil {
+		return errs.Wrap(errs.CodeSkillScriptFailed, fmt.Sprintf("resolve scripts directory for %q", scriptName), err)
+	}
+	realScriptPath, err := filepath.EvalSymlinks(scriptPath)
+	if err != nil {
+		return errs.Wrap(errs.CodeSkillScriptFailed, fmt.Sprintf("resolve script %q", scriptName), err)
+	}
+	rel, err := filepath.Rel(realScriptsDir, realScriptPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return errs.New(errs.CodeSkillScriptFailed, fmt.Sprintf("script %q resolves outside scripts directory", scriptName))
+	}
+	return nil
+}
+
+func buildScriptCommand(interpreter, scriptPath string, args []string) string {
+	interpParts := strings.Fields(interpreter)
+	cmdParts := make([]string, 0, len(interpParts)+1+len(args))
+	cmdParts = append(cmdParts, interpParts...)
+	cmdParts = append(cmdParts, scriptPath)
+	cmdParts = append(cmdParts, args...)
+	for i, part := range cmdParts {
+		cmdParts[i] = shellQuote(part)
+	}
+	return strings.Join(cmdParts, " ")
+}
+
+func shellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // RunAllScripts 按顺序执行所有列出的脚本并返回脚本名称 → 输出的映射

@@ -186,6 +186,9 @@ func blockReason(intent IntentFrame, profile ToolProfile) string {
 	if profile.Risk == RiskRuntimeExec && intent.Kind != IntentManageTool {
 		return "runtime execution not required by intent"
 	}
+	if externalSendMixedToolBlockedForIntent(intent, profile) {
+		return "side effect not allowed by intent"
+	}
 	if profile.SideEffect && !intent.AllowsSideEffects && !IsMixedReadWriteTool(profile.Name) {
 		return "side effect not allowed by intent"
 	}
@@ -218,20 +221,55 @@ func isCallable(intent IntentFrame, profile ToolProfile) (string, map[string]str
 			}
 		}
 		return "", nil, false
-	case IntentRead, IntentAnswer, IntentPlan:
+	case IntentRead, IntentExternalRead, IntentAnswer, IntentPlan:
 		if profile.ReadOnly && !profile.SideEffect && profile.Risk == RiskReadOnly {
 			return profile.Name, nil, true
 		}
 		if IsMixedReadWriteTool(profile.Name) {
+			if allowed := MixedAllowedToolInputsForIntent(intent, profile.Name); len(allowed) > 0 {
+				return profile.Name, allowed, true
+			}
+		}
+		return "", nil, false
+	case IntentWriteLocal:
+		if !intent.AllowsSideEffects || profile.OpenWorld {
+			return "", nil, false
+		}
+		if IsMixedReadWriteTool(profile.Name) {
+			if allowed := MixedAllowedToolInputsForIntent(intent, profile.Name); len(allowed) > 0 {
+				return profile.Name, allowed, true
+			}
+		}
+		if profile.Risk == RiskLocalWrite && !profile.Destructive && !profile.OpenWorld {
 			return profile.Name, nil, true
 		}
 		return "", nil, false
 	case IntentExternalWrite:
 		if intent.AllowsSideEffects && !profile.OpenWorld && slices.Contains(profile.Capabilities, CapabilityExternalSend) {
+			if allowed := MixedAllowedToolInputsForIntent(intent, profile.Name); len(allowed) > 0 {
+				return profile.Name, allowed, true
+			}
+			if IsMixedReadWriteTool(profile.Name) {
+				return "", nil, false
+			}
 			return profile.Name, nil, true
 		}
 		return "", nil, false
 	default:
 		return "", nil, false
+	}
+}
+
+func externalSendMixedToolBlockedForIntent(intent IntentFrame, profile ToolProfile) bool {
+	if !IsMixedReadWriteTool(profile.Name) || len(ExternalSendActions(profile.Name)) == 0 {
+		return false
+	}
+	switch intent.Kind {
+	case IntentExternalRead:
+		return false
+	case IntentExternalWrite:
+		return !intent.AllowsSideEffects
+	default:
+		return true
 	}
 }

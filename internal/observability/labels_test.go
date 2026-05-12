@@ -40,6 +40,12 @@ func TestSanitizeMetricLabels_AllowsMetricSpecificLabels(t *testing.T) {
 	assert.Equal(t, "task", got["msg_type"])
 	assert.Equal(t, "cli", got["route"])
 	assert.NotContains(t, got, "trace_id")
+
+	triggerLabels := SanitizeMetricLabels("tool_choice_required_total", map[string]any{
+		"trigger":    "router_intent",
+		"session_id": "s1",
+	})
+	assert.Equal(t, map[string]any{"trigger": "router_intent"}, triggerLabels)
 }
 
 func TestSanitizeMetricLabels_ReturnsNilWhenEmptyAfterFiltering(t *testing.T) {

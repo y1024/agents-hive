@@ -1,6 +1,7 @@
 package skills
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -22,12 +23,33 @@ type SkipToolCallCallbackKey struct{}
 
 // ToolBridge 连接技能系统到 MCP 工具执行层
 type ToolBridge struct {
-	host       *mcphost.Host
-	logger     *zap.Logger
-	onToolCall func(toolName string, args string) // 工具调用回调
-	pluginMgr  *plugin.Manager                    // 插件管理器（可选）
-	fileCache  *cache.FileCache                   // 文件缓存
-	metrics    *Metrics                           // 指标收集（可选）
+	host          *mcphost.Host
+	logger        *zap.Logger
+	onToolCall    func(toolName string, args string) // 工具调用回调
+	pluginMgr     *plugin.Manager                    // 插件管理器（可选）
+	fileCache     *cache.FileCache                   // 文件缓存
+	metrics       *Metrics                           // 指标收集（可选）
+	executionGate ExecutionGate                      // 执行层 gate（可选）
+}
+
+// ExecutionGate 在真正执行工具前做运行时边界检查。
+// 它用于把 Master 的 RouteDecision / plan mode 边界下沉到 sub-agent
+// 的 ToolBridge.CallTool 路径，避免委托执行绕过父会话决策。
+type ExecutionGate func(ctx context.Context, toolName string, input json.RawMessage) error
+
+// DirectExecutionGate 保持旧调用点命名兼容；语义与 ExecutionGate 相同。
+type DirectExecutionGate = ExecutionGate
+
+type directExecutionOptions struct {
+	gate DirectExecutionGate
+}
+
+type DirectExecutionOption func(*directExecutionOptions)
+
+func WithDirectExecutionGate(gate DirectExecutionGate) DirectExecutionOption {
+	return func(opts *directExecutionOptions) {
+		opts.gate = gate
+	}
 }
 
 // NewToolBridge 创建新的 ToolBridge
@@ -55,6 +77,11 @@ func (b *ToolBridge) SetOnToolCall(fn func(toolName string, args string)) {
 	b.onToolCall = fn
 }
 
+// SetExecutionGate 设置工具执行层 gate。
+func (b *ToolBridge) SetExecutionGate(gate ExecutionGate) {
+	b.executionGate = gate
+}
+
 // CallTool 执行工具,遵守 ToolFilter 限制和权限检查
 func (b *ToolBridge) CallTool(ctx context.Context, filter *ToolFilter, perm *PermissionManager, toolName string, input json.RawMessage) (*mcphost.ToolResult, error) {
 	// 1. ToolFilter 检查
@@ -64,14 +91,23 @@ func (b *ToolBridge) CallTool(ctx context.Context, filter *ToolFilter, perm *Per
 		}
 	}
 
-	// 2. Permission 检查
+	// 2. 执行层 gate 检查。必须在权限审批前执行，避免 RouteDecision 已拒绝的
+	// 操作先触发无意义的 HITL 审批。
+	if b.executionGate != nil {
+		if err := b.executionGate(ctx, toolName, input); err != nil {
+			return nil, err
+		}
+	}
+
+	// 3. Permission 检查
 	if perm != nil {
 		if err := perm.CheckPermission(ctx, toolName, input); err != nil {
 			return nil, err
 		}
 	}
 
-	// 3. 插件 ToolExecuteBefore hook
+	// 4. 插件 ToolExecuteBefore hook
+	checkedInput := cloneRawMessage(input)
 	if b.pluginMgr != nil {
 		hookInput := &plugin.ToolExecuteInput{
 			ToolName: toolName,
@@ -80,8 +116,23 @@ func (b *ToolBridge) CallTool(ctx context.Context, filter *ToolFilter, perm *Per
 		if err := b.pluginMgr.TriggerToolBefore(ctx, hookInput); err != nil {
 			return nil, err
 		}
+		if hookInput.ToolName != toolName {
+			return nil, errs.New(errs.CodePermissionDenied, fmt.Sprintf("插件不允许改写工具名: %s -> %s", toolName, hookInput.ToolName))
+		}
 		// hook 可能修改了参数
 		input = hookInput.Args
+	}
+	if !sameRawJSON(input, checkedInput) {
+		if b.executionGate != nil {
+			if err := b.executionGate(ctx, toolName, input); err != nil {
+				return nil, err
+			}
+		}
+		if perm != nil {
+			if err := perm.CheckPermission(ctx, toolName, input); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	b.logger.Debug("执行工具",
@@ -195,8 +246,16 @@ func (b *ToolBridge) CallTool(ctx context.Context, filter *ToolFilter, perm *Per
 // ExecuteDirect 直接执行工具，跳过 ToolFilter 和权限检查。
 // 供 Master.executeTool 使用：Master 自己已完成权限检查和策略过滤，
 // 但仍需要 ToolBridge 提供的插件 hooks、read_file 缓存、指标收集和 tool-not-found 友好提示。
-func (b *ToolBridge) ExecuteDirect(ctx context.Context, toolName string, input json.RawMessage) (*mcphost.ToolResult, error) {
+func (b *ToolBridge) ExecuteDirect(ctx context.Context, toolName string, input json.RawMessage, execOpts ...DirectExecutionOption) (*mcphost.ToolResult, error) {
+	var opts directExecutionOptions
+	for _, opt := range execOpts {
+		if opt != nil {
+			opt(&opts)
+		}
+	}
+
 	// 1. 插件 ToolExecuteBefore hook
+	checkedInput := cloneRawMessage(input)
 	if b.pluginMgr != nil {
 		hookInput := &plugin.ToolExecuteInput{
 			ToolName: toolName,
@@ -205,7 +264,15 @@ func (b *ToolBridge) ExecuteDirect(ctx context.Context, toolName string, input j
 		if err := b.pluginMgr.TriggerToolBefore(ctx, hookInput); err != nil {
 			return nil, err
 		}
+		if hookInput.ToolName != toolName {
+			return nil, errs.New(errs.CodePermissionDenied, fmt.Sprintf("插件不允许改写工具名: %s -> %s", toolName, hookInput.ToolName))
+		}
 		input = hookInput.Args
+	}
+	if opts.gate != nil && !sameRawJSON(input, checkedInput) {
+		if err := opts.gate(ctx, toolName, input); err != nil {
+			return nil, err
+		}
 	}
 
 	// 2. 检查 read_file 缓存
@@ -297,6 +364,17 @@ func (b *ToolBridge) ExecuteDirect(ctx context.Context, toolName string, input j
 	}
 
 	return result, err
+}
+
+func cloneRawMessage(in json.RawMessage) json.RawMessage {
+	if len(in) == 0 {
+		return nil
+	}
+	return append(json.RawMessage(nil), in...)
+}
+
+func sameRawJSON(left, right json.RawMessage) bool {
+	return bytes.Equal(bytes.TrimSpace(left), bytes.TrimSpace(right))
 }
 
 // AvailableTools 返回经 ToolFilter 过滤的工具列表

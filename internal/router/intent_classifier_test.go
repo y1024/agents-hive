@@ -15,10 +15,10 @@ func TestIntentClassifierRuleFallbackClassifiesCoreIntents(t *testing.T) {
 		msg  string
 		want IntentKind
 	}{
-		{name: "create skill", msg: "创建一个跟我打招呼的技能", want: IntentCreateSkill},
-		{name: "mcp server", msg: "创建 MCP server 接入 GitHub API", want: IntentManageTool},
+		{name: "create skill remains answer without structured classifier", msg: "创建一个跟我打招呼的技能", want: IntentAnswer},
+		{name: "mcp server remains answer without structured classifier", msg: "创建 MCP server 接入 GitHub API", want: IntentAnswer},
 		{name: "negated send", msg: "帮我写飞书通知文案，不要发送", want: IntentWriteLocal},
-		{name: "external send", msg: "发送给飞书用户郭松", want: IntentExternalWrite},
+		{name: "send-like text remains answer without structured classifier", msg: "发送给飞书用户郭松", want: IntentAnswer},
 		{name: "read", msg: "读取本地配置", want: IntentRead},
 	}
 
@@ -37,8 +37,59 @@ func TestIntentClassifierRuleFallbackClassifiesCoreIntents(t *testing.T) {
 
 func TestIntentClassifierDoesNotTreatSkillWithMCPContextAsManageTool(t *testing.T) {
 	got := RuleClassifyIntent("创建一个 skill，MCP 只是实现背景，不要创建 MCP server")
-	if got.Kind != IntentCreateSkill {
-		t.Fatalf("Kind = %q, want create_skill; intent=%+v", got.Kind, got)
+	if got.Kind != IntentAnswer {
+		t.Fatalf("Kind = %q, want answer; intent=%+v", got.Kind, got)
+	}
+}
+
+func TestIntentClassifierStructuredExternalSend(t *testing.T) {
+	llm := &fakeIntentLLM{intent: IntentFrame{
+		Kind:              IntentExternalWrite,
+		AllowsSideEffects: true,
+		RequiresExternal:  true,
+		Confidence:        0.92,
+		Signals:           []string{"llm"},
+	}}
+	classifier := NewIntentClassifier(WithIntentLLMClassifier(llm))
+
+	got := classifier.Classify(context.Background(), "s1", "给郭松发一下今天的天气信息")
+	if got.Intent.Kind != IntentExternalWrite {
+		t.Fatalf("Kind = %q, want external_write; result=%+v", got.Intent.Kind, got)
+	}
+	if got.Source != "llm" || got.Degraded {
+		t.Fatalf("structured classifier metadata wrong: %+v", got)
+	}
+	if !got.Intent.AllowsSideEffects || !got.Intent.RequiresExternal {
+		t.Fatalf("external-send intent must carry side-effect/external flags: %+v", got.Intent)
+	}
+}
+
+func TestRuleClassifyIntent_DoesNotKeywordGuessExternalSend(t *testing.T) {
+	cases := []struct {
+		name string
+		q    string
+		want IntentKind
+	}{
+		{name: "send feishu user remains answer in rule fallback", q: "发送给飞书用户郭松", want: IntentAnswer},
+		{name: "send weather to named person remains answer in rule fallback", q: "给郭松发一下今天的天气信息", want: IntentAnswer},
+		{name: "send to group remains answer in rule fallback", q: "发到群里：今天 18:00 开会", want: IntentAnswer},
+		{name: "forward to boss remains answer in rule fallback", q: "把这条消息转给老板", want: IntentAnswer},
+		{name: "english send remains answer in rule fallback", q: "send this to john", want: IntentAnswer},
+		{name: "english forward remains answer in rule fallback", q: "forward this to john", want: IntentAnswer},
+		{name: "notify users remains answer in rule fallback", q: "通知所有用户系统升级", want: IntentAnswer},
+		{name: "push to group remains answer in rule fallback", q: "推送到飞书群聊", want: IntentAnswer},
+		{name: "notify me is answer", q: "通知我下班时间", want: IntentAnswer},
+		{name: "brainstorm false positive", q: "给我发散一下思路", want: IntentAnswer},
+		{name: "negated send", q: "不要发送", want: IntentWriteLocal},
+		{name: "weather answer", q: "今天天气怎么样", want: IntentAnswer},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := RuleClassifyIntent(tc.q)
+			if got.Kind != tc.want {
+				t.Fatalf("Kind = %q, want %q, result=%+v", got.Kind, tc.want, got)
+			}
+		})
 	}
 }
 
@@ -117,8 +168,8 @@ func TestIntentClassifierLLMFailureFallsBackToRules(t *testing.T) {
 	classifier := NewIntentClassifier(WithIntentLLMClassifier(llm))
 
 	got := classifier.Classify(context.Background(), "s1", "创建一个跟我打招呼的技能")
-	if got.Intent.Kind != IntentCreateSkill {
-		t.Fatalf("fallback kind = %q, want create_skill; result=%+v", got.Intent.Kind, got)
+	if got.Intent.Kind != IntentAnswer {
+		t.Fatalf("fallback kind = %q, want answer; result=%+v", got.Intent.Kind, got)
 	}
 	if !got.Degraded || got.Source != "rule_fallback" || !got.LLMAttempt {
 		t.Fatalf("llm failure fallback metadata wrong: %+v", got)

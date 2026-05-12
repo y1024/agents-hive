@@ -25,13 +25,15 @@ import (
 //   - 运行时：appendSessionMessage / EventBus.Broadcast 在 assistant role 上 panic
 //
 // 这样本测试不再追"红方今天又写出哪种 IIFE / shadow / Builder / reflect"，只锁
-// 三条结构不变量 + 两条 runtime smoke：
-//   1. react_processor.go 内 MessageWithTools{Role:"assistant",...} 字面量仅可
-//      出现在 persistAssistant 函数体（其他地方写就触发 runtime panic，但 AST
-//      规则提前一步拦在 build 阶段）
-//   2. payload["role"] = "assistant" 字面赋值仅可出现在 broadcastAssistant 函数体
-//   3. assistantcap.GrantPass 第二参数必须是 requiredGuardPass 标识符（防止
-//      GrantPass(0, 0) 之类伪造调用骗过编译期检查）
+// 四条结构不变量 + 两条 runtime smoke：
+//  1. react_processor.go 内 MessageWithTools{Role:"assistant",...} 字面量仅可
+//     出现在 persistAssistant 函数体（其他地方写就触发 runtime panic，但 AST
+//     规则提前一步拦在 build 阶段）
+//  2. payload["role"] = "assistant" 字面赋值仅可出现在 broadcastAssistant 函数体
+//  3. assistantcap.GrantPass 第二参数必须是 requiredGuardPass 标识符（防止
+//     GrantPass(0, 0) 之类伪造调用骗过编译期检查）
+//  4. IntentFulfillmentGate 必须在 persistAssistant 之前运行，避免未完成意图的
+//     assistant 最终回复先污染 DB/UI
 //
 // runtime smoke：直接调 appendSessionMessage(Role:"assistant") 与
 // EventBus.Broadcast(payload role:"assistant") 必须 panic 且消息含 lock prefix。
@@ -179,6 +181,34 @@ func TestReActLoop_StructuralLock(t *testing.T) {
 			t.Fatal("未发现 assistantcap.GrantPass 调用 —— 结构性锁的 token 颁发口被绕过？")
 		}
 	})
+
+	t.Run("rule4_fulfillment_gate_before_persist", func(t *testing.T) {
+		var gateLine, persistLine int
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Decide" {
+				if isIntentFulfillmentGateDecideCall(sel) {
+					gateLine = fset.Position(call.Pos()).Line
+				}
+			}
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "persistAssistant" {
+				persistLine = fset.Position(call.Pos()).Line
+			}
+			return true
+		})
+		if gateLine == 0 {
+			t.Fatal("未发现 IntentFulfillmentGate Decide 调用")
+		}
+		if persistLine == 0 {
+			t.Fatal("未发现 persistAssistant 调用")
+		}
+		if gateLine > persistLine {
+			t.Fatalf("IntentFulfillmentGate must run before persistAssistant; gate L%d persist L%d", gateLine, persistLine)
+		}
+	})
 }
 
 // TestStructuralLock_AppendSessionMessagePanic 是 sink-side runtime smoke。
@@ -267,6 +297,19 @@ func isMessageWithToolsType(t ast.Expr) bool {
 		return e.Name == "MessageWithTools"
 	}
 	return false
+}
+
+func isIntentFulfillmentGateDecideCall(sel *ast.SelectorExpr) bool {
+	expr := sel.X
+	if paren, ok := expr.(*ast.ParenExpr); ok {
+		expr = paren.X
+	}
+	composite, ok := expr.(*ast.CompositeLit)
+	if !ok {
+		return false
+	}
+	ident, ok := composite.Type.(*ast.Ident)
+	return ok && ident.Name == "IntentFulfillmentGate"
 }
 
 // exprIdentChain 把表达式树打成"x.y.z"风格字符串，仅识别 Ident/SelectorExpr/

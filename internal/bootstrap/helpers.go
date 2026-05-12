@@ -93,7 +93,7 @@ func buildFeishuWelcomeSender(
 
 func (h *hitlApprovalBridge) RequestApproval(ctx context.Context, toolName, description string, details map[string]string) (bool, error) {
 	// 构建审批提示
-	prompt := fmt.Sprintf("请求创建工具: %s\n%s", toolName, description)
+	prompt := fmt.Sprintf("请求审批: %s\n%s", toolName, description)
 	for k, v := range details {
 		prompt += fmt.Sprintf("\n  %s: %s", k, v)
 	}

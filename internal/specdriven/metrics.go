@@ -10,8 +10,7 @@ package specdriven
 //      做一一锁定。
 //   2. 名称一旦发布就是外部契约（Prometheus scrape target / Grafana dashboard ID）。
 //      集中放便于 review、rename 时扫描引用点。
-//   3. Sprint 2 → 3 gate 的准入证据：`sprint_gate.sh --sprint=2` 验证这个文件的
-//      enum 测试绿 + 对应 emit 点存在。
+//   3. CI 的 specdriven gate 验证这个文件的 enum 测试绿 + 对应 emit 点存在。
 
 // Counter 名称常量。不要在业务代码里 hard-code 字符串，通过常量引用。
 const (

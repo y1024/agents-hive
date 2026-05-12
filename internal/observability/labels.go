@@ -22,6 +22,7 @@ var allowedMetricLabels = map[string]map[string]bool{
 		"target_type":        true,
 		"result":             true,
 		"msg_type":           true,
+		"trigger":            true,
 	},
 	"hive.eventbus.dropped": {
 		"msg_type": true,

@@ -201,7 +201,7 @@ func reflectionFailureType(trigger string) agentquality.FailureType {
 		return agentquality.FailureTool
 	case "guard_failure":
 		return agentquality.FailurePrompt
-	case "validation_failure":
+	case "validation_failure", "intent_fulfillment":
 		return agentquality.FailureModel
 	default:
 		return agentquality.FailureRuntime
@@ -225,6 +225,8 @@ func reflectionSummary(trigger string) string {
 		return "quality guard blocked model output"
 	case "validation_failure":
 		return "post-validation blocked model output"
+	case "intent_fulfillment":
+		return "final answer did not satisfy user intent"
 	default:
 		return "execution path needs strategy change"
 	}

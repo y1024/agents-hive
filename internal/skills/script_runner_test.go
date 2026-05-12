@@ -151,6 +151,82 @@ func TestScriptRunner_RunScript_WithArgs(t *testing.T) {
 	}
 }
 
+func TestScriptRunner_RunScript_QuotesArguments(t *testing.T) {
+	runner := newTestScriptRunner()
+	dir := t.TempDir()
+
+	writeScript(t, dir, "echo.sh", "#!/bin/sh\nprintf '%s' \"$1\"")
+
+	ctx := context.Background()
+	output, err := runner.RunScript(ctx, dir, "echo.sh", "hello world 'quoted'")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if output != "hello world 'quoted'" {
+		t.Errorf("got %q, want quoted argument preserved", output)
+	}
+}
+
+func TestScriptRunner_RunScript_ArgumentCommandSubstitutionIsLiteral(t *testing.T) {
+	runner := newTestScriptRunner()
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "pwned")
+
+	writeScript(t, dir, "echo.sh", "#!/bin/sh\nprintf '%s' \"$1\"")
+
+	payload := "$(touch " + marker + ")"
+	output, err := runner.RunScript(context.Background(), dir, "echo.sh", payload)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if output != payload {
+		t.Fatalf("payload should be passed literally, got %q", output)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("command substitution executed unexpectedly, stat err=%v", err)
+	}
+}
+
+func TestScriptRunner_RunScript_ScriptNameCannotEscapeScriptsDir(t *testing.T) {
+	runner := newTestScriptRunner()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "escape.sh"), []byte("#!/bin/sh\necho escaped"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := runner.RunScript(context.Background(), dir, "../escape.sh")
+	if err == nil {
+		t.Fatal("expected directory traversal error")
+	}
+	if !errs.IsCode(err, errs.CodeSkillScriptFailed) {
+		t.Fatalf("expected CodeSkillScriptFailed, got %v", err)
+	}
+}
+
+func TestScriptRunner_RunScript_SymlinkCannotEscapeScriptsDir(t *testing.T) {
+	runner := newTestScriptRunner()
+	dir := t.TempDir()
+	outside := filepath.Join(dir, "outside.sh")
+	if err := os.WriteFile(outside, []byte("#!/bin/sh\necho escaped"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scriptsDir := filepath.Join(dir, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(scriptsDir, "link.sh")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	_, err := runner.RunScript(context.Background(), dir, "link.sh")
+	if err == nil {
+		t.Fatal("expected symlink escape error")
+	}
+	if !errs.IsCode(err, errs.CodeSkillScriptFailed) {
+		t.Fatalf("expected CodeSkillScriptFailed, got %v", err)
+	}
+}
+
 func TestScriptRunner_RunScript_NotFound(t *testing.T) {
 	runner := newTestScriptRunner()
 	dir := t.TempDir()

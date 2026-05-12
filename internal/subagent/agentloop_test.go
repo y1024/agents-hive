@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
+	"github.com/chef-guo/agents-hive/internal/auth"
 	"github.com/chef-guo/agents-hive/internal/llm"
 	"github.com/chef-guo/agents-hive/internal/mcphost"
 	"github.com/chef-guo/agents-hive/internal/skills"
@@ -293,6 +294,54 @@ func TestAgentLoop_Run_ToolExecutionError(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "文件不存在", result)
 	assert.Len(t, mockBridge.calls, 1)
+}
+
+func TestAgentLoop_Run_ExecutionGateDeniedDoesNotExecuteTool(t *testing.T) {
+	// 测试执行层 gate 拒绝时，错误反馈给 LLM，底层工具不应被调用
+	mockLLM := &mockLLMClient{
+		responses: []*llm.ChatWithToolsResponse{
+			{
+				ToolCalls: []llm.ToolCall{
+					{ID: "call_1", Name: "memory", Arguments: json.RawMessage(`{"operation":"delete","id":1}`)},
+				},
+				FinishReason: "tool_calls",
+			},
+			{
+				Content:      "已拒绝删除记忆",
+				FinishReason: "stop",
+			},
+		},
+	}
+
+	host := mcphost.NewHost(zap.NewNop())
+	called := false
+	host.RegisterTool(
+		mcphost.ToolDefinition{Name: "memory", Description: "memory"},
+		func(ctx context.Context, input json.RawMessage) (*mcphost.ToolResult, error) {
+			called = true
+			return &mcphost.ToolResult{Content: json.RawMessage(`{"ok":true}`)}, nil
+		},
+	)
+	bridge := skills.NewToolBridge(host, zap.NewNop())
+	bridge.SetExecutionGate(func(context.Context, string, json.RawMessage) error {
+		return errors.New("route decision denied nested tool memory operation \"delete\"")
+	})
+
+	loop := &AgentLoop{
+		llmClient:  mockLLM,
+		toolBridge: bridge,
+		permMgr:    nil,
+		logger:     zap.NewNop(),
+		maxTurns:   25,
+	}
+
+	result, err := loop.Run(context.Background(), "system prompt", []llm.MessageWithTools{
+		{Role: "user", Content: llm.NewTextContent("删除记忆")},
+	}, nil)
+
+	require.NoError(t, err)
+	assert.Equal(t, "已拒绝删除记忆", result)
+	assert.False(t, called, "执行层 gate 拒绝后不应执行底层工具")
 }
 
 func TestAgentLoop_Run_ToolResultError(t *testing.T) {
@@ -664,6 +713,72 @@ func TestAgentLoop_SessionIDFromContext(t *testing.T) {
 	tc := toolctx.GetToolContext(capturedCtx)
 	assert.Equal(t, toolctx.CallerFixedAgent, tc.CallerType)
 	assert.Equal(t, "general", tc.CallerName)
+}
+
+func TestAgentLoop_ToolCallInheritsRequestScopedContext(t *testing.T) {
+	var capturedCtx context.Context
+	bridge := &mockToolBridge{
+		results: map[string]*mcphost.ToolResult{
+			"test_tool": {Content: jsonBytes("ok"), IsError: false},
+		},
+		tools: []mcphost.ToolDefinition{{Name: "test_tool"}},
+	}
+	captureBridge := &ctxCaptureBridge{inner: bridge, captured: &capturedCtx}
+
+	llmClient := &mockLLMClient{
+		responses: []*llm.ChatWithToolsResponse{
+			{
+				FinishReason: "tool_calls",
+				ToolCalls: []llm.ToolCall{
+					{ID: "tc-request", Name: "test_tool", Arguments: json.RawMessage(`{}`)},
+				},
+			},
+			{Content: "done", FinishReason: "stop"},
+		},
+	}
+
+	loop := &AgentLoop{
+		llmClient:  llmClient,
+		toolBridge: captureBridge,
+		logger:     zap.NewNop(),
+		maxTurns:   25,
+		agentID:    "worker",
+		callerType: toolctx.CallerSubAgent,
+		userID:     "user-req",
+	}
+
+	ctx := context.Background()
+	ctx = toolctx.WithSessionID(ctx, "sess-req")
+	ctx = toolctx.WithToolContext(ctx, &toolctx.ToolContext{
+		CallerType:   toolctx.CallerFixedAgent,
+		CallerName:   "general",
+		Depth:        7,
+		TraceID:      "trace-child",
+		SpanID:       "span-agent",
+		ParentSpanID: "span-delegation",
+		TurnID:       "turn-req",
+		ToolCallID:   "call-delegation",
+	})
+
+	_, err := loop.Run(ctx, "test", []llm.MessageWithTools{
+		{Role: "user", Content: llm.NewTextContent("hello")},
+	}, nil)
+	require.NoError(t, err)
+
+	require.NotNil(t, capturedCtx)
+	assert.Equal(t, "sess-req", toolctx.GetSessionID(capturedCtx))
+	assert.Equal(t, "user-req", auth.UserIDFrom(capturedCtx))
+
+	tc := toolctx.GetToolContext(capturedCtx)
+	assert.Equal(t, toolctx.CallerSubAgent, tc.CallerType)
+	assert.Equal(t, "worker", tc.CallerName)
+	assert.Equal(t, 0, tc.Depth)
+	assert.Equal(t, "trace-child", tc.TraceID)
+	assert.NotEmpty(t, tc.SpanID)
+	assert.NotEqual(t, "span-agent", tc.SpanID)
+	assert.Equal(t, "span-agent", tc.ParentSpanID)
+	assert.Equal(t, "turn-req", tc.TurnID)
+	assert.Equal(t, "tc-request", tc.ToolCallID)
 }
 
 func TestAgentLoop_SessionIDFallbackToField(t *testing.T) {

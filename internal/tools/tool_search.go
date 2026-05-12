@@ -22,18 +22,25 @@ type toolSearchInput struct {
 }
 
 type toolSearchHit struct {
-	Name              string  `json:"name"`
-	Description       string  `json:"description,omitempty"`
-	DangerLevel       string  `json:"danger_level"`
-	RequiresApproval  bool    `json:"requires_approval"`
-	IsConcurrencySafe bool    `json:"is_concurrency_safe"`
-	Core              bool    `json:"core,omitempty"`
-	Kind              string  `json:"kind"`
-	Domain            string  `json:"domain,omitempty"`
-	Source            string  `json:"source"`
-	Invocation        string  `json:"invocation"`
-	RouteStatus       string  `json:"route_status"`
-	Score             float64 `json:"score"`
+	Name                string   `json:"name"`
+	Description         string   `json:"description,omitempty"`
+	DangerLevel         string   `json:"danger_level"`
+	RequiresApproval    bool     `json:"requires_approval"`
+	DangerousActions    []string `json:"dangerous_actions,omitempty"`
+	ActionField         string   `json:"action_field,omitempty"`
+	ReadOnlyActions     []string `json:"read_only_actions,omitempty"`
+	LocalWriteActions   []string `json:"local_write_actions,omitempty"`
+	ExternalSendActions []string `json:"external_send_actions,omitempty"`
+	IsConcurrencySafe   bool     `json:"is_concurrency_safe"`
+	Core                bool     `json:"core,omitempty"`
+	Kind                string   `json:"kind"`
+	Domain              string   `json:"domain,omitempty"`
+	Source              string   `json:"source"`
+	Invocation          string   `json:"invocation"`
+	RouteStatus         string   `json:"route_status"`
+	CallableNow         bool     `json:"callable_now"`
+	ExecutionNote       string   `json:"execution_note,omitempty"`
+	Score               float64  `json:"score"`
 }
 
 // ToolRecallHit 是工具目录召回结果，供 tool_search 和 Master 每轮候选召回复用。
@@ -88,18 +95,25 @@ func handleToolSearch(host *mcphost.Host, raw json.RawMessage) (*mcphost.ToolRes
 		profile := router.InferToolProfile(def, router.ProfileHint{})
 		kind, domain, source, invocation, routeStatus := inferToolSearchMetadata(profile, qLower)
 		hits = append(hits, toolSearchHit{
-			Name:              def.Name,
-			Description:       def.Description,
-			DangerLevel:       inferToolDangerLevel(profile),
-			RequiresApproval:  router.ProfileHasSideEffect(profile) && !def.IsConcurrencySafe,
-			IsConcurrencySafe: def.IsConcurrencySafe,
-			Core:              def.Core,
-			Kind:              kind,
-			Domain:            domain,
-			Source:            source,
-			Invocation:        invocation,
-			RouteStatus:       routeStatus,
-			Score:             recall.Score,
+			Name:                def.Name,
+			Description:         def.Description,
+			DangerLevel:         inferToolDangerLevel(profile),
+			RequiresApproval:    router.ProfileRequiresApproval(profile) && !def.IsConcurrencySafe,
+			DangerousActions:    router.StructuredDangerousActions(profile.Name),
+			ActionField:         router.MixedActionField(profile.Name),
+			ReadOnlyActions:     router.MixedReadOnlyActions(profile.Name),
+			LocalWriteActions:   router.MixedLocalWriteActions(profile.Name),
+			ExternalSendActions: router.ExternalSendActions(profile.Name),
+			IsConcurrencySafe:   def.IsConcurrencySafe,
+			Core:                def.Core,
+			Kind:                kind,
+			Domain:              domain,
+			Source:              source,
+			Invocation:          invocation,
+			RouteStatus:         routeStatus,
+			CallableNow:         false,
+			ExecutionNote:       "tool_search 只返回工具目录信息，不授权执行；是否可调用由本轮工具列表、RouteDecision、plan mode 和权限审批决定。",
+			Score:               recall.Score,
 		})
 	}
 
@@ -137,11 +151,7 @@ func inferToolSearchMetadata(profile router.ToolProfile, queryLower string) (kin
 	domain = profile.Domain
 	source = string(profile.Source)
 	invocation = string(profile.Invocation)
-	if queryLower == "" {
-		routeStatus = "discoverable"
-	} else {
-		routeStatus = "recommended"
-	}
+	routeStatus = "discovery_only"
 	return kind, domain, source, invocation, routeStatus
 }
 

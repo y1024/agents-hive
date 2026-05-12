@@ -130,6 +130,7 @@ func (a *Agent) SetMemoryExtractor(ext memory.MemoryExtractor) {
 
 // handleTask 处理压缩任务
 func (a *Agent) handleTask(ctx context.Context, req subagent.TaskRequest) subagent.TaskResponse {
+	ctx = subagent.ContextFromTaskRequest(ctx, req)
 	a.sessionID = req.SessionID
 	a.userID = req.UserID
 	payload, _ := subagent.ExtractPayload(req)

@@ -889,6 +889,10 @@ BEGIN
 END $$;
 `
 
+const pgDefaultPermissionRulesJSON = `[{"tool_name":"read_file","action":"allow"},{"tool_name":"write_file","action":"allow"},{"tool_name":"edit","action":"allow"},{"tool_name":"multiedit","action":"allow"},{"tool_name":"multi_edit","action":"allow"},{"tool_name":"apply_patch","action":"allow"},{"tool_name":"glob","action":"allow"},{"tool_name":"grep","action":"allow"},{"tool_name":"ls","action":"allow"},{"tool_name":"websearch","action":"allow"},{"tool_name":"webfetch","action":"allow"},{"tool_name":"web_search","action":"allow"},{"tool_name":"web_fetch","action":"allow"},{"tool_name":"browser_interact","action":"allow"},{"tool_name":"skill","action":"allow"},{"tool_name":"skill_search","action":"allow"},{"tool_name":"task","action":"allow"},{"tool_name":"question","action":"allow"},{"tool_name":"batch","action":"allow"},{"tool_name":"todo_write","action":"allow"},{"tool_name":"enter_plan_mode","action":"allow"},{"tool_name":"exit_plan_mode","action":"allow"},{"tool_name":"finish_plan","action":"allow"},{"tool_name":"create_handoff_summary","action":"allow"},{"tool_name":"promote_todos_to_taskboard","action":"allow"},{"tool_name":"spawn_agent","action":"allow"},{"tool_name":"parallel_dispatch","action":"allow"},{"tool_name":"bash","action":"ask"},{"tool_name":"shell","action":"ask"},{"tool_name":"exec","action":"ask"},{"tool_name":"run_command","action":"ask"},{"tool_name":"create_tool","action":"ask"},{"tool_name":"remove_tool","action":"ask"},{"tool_name":"send_im_message","action":"allow"},{"tool_name":"feishu_api","pattern":"create_approval","action":"ask"},{"tool_name":"feishu_api","pattern":"create_bitable_record","action":"ask"},{"tool_name":"feishu_api","pattern":"create_task","action":"ask"},{"tool_name":"feishu_api","pattern":"complete_task","action":"ask"},{"tool_name":"feishu_api","pattern":"update_bitable_record","action":"ask"},{"tool_name":"feishu_api","pattern":"write_sheet","action":"ask"},{"tool_name":"feishu_api","action":"allow"},{"tool_name":"memory","pattern":"delete","action":"ask"},{"tool_name":"memory","action":"allow"},{"tool_name":"taskboard","pattern":"delete","action":"ask"},{"tool_name":"taskboard","action":"allow"},{"tool_name":"wenyan__preview_article","action":"allow"},{"tool_name":"wenyan__*","action":"ask"}]`
+
+const pgLegacyPermissionRulesJSON = `[{"tool_name":"read_file","action":"allow"},{"tool_name":"glob","action":"allow"},{"tool_name":"grep","action":"allow"},{"tool_name":"ls","action":"allow"},{"tool_name":"websearch","action":"allow"},{"tool_name":"webfetch","action":"allow"},{"tool_name":"browser_interact","action":"allow"},{"tool_name":"memory","action":"allow"},{"tool_name":"skill","action":"allow"},{"tool_name":"task","action":"allow"},{"tool_name":"question","action":"allow"},{"tool_name":"batch","action":"allow"},{"tool_name":"write_file","action":"ask"},{"tool_name":"edit","action":"ask"},{"tool_name":"bash","action":"ask"},{"tool_name":"multiedit","action":"ask"},{"tool_name":"apply_patch","action":"ask"},{"tool_name":"taskboard","action":"ask"},{"tool_name":"create_tool","action":"ask"},{"tool_name":"remove_tool","action":"ask"},{"tool_name":"spawn_agent","action":"ask"},{"tool_name":"parallel_dispatch","action":"ask"},{"tool_name":"send_im_message","action":"ask"},{"tool_name":"feishu_api","action":"ask"}]`
+
 // pgSeedDefaultConfigs 种子默认运行时配置到 configs KV 表（幂等，不覆盖已有值）
 const pgSeedDefaultConfigs = `
 INSERT INTO configs (key, value) VALUES
@@ -899,7 +903,7 @@ INSERT INTO configs (key, value) VALUES
   ('hitl.websocket_enabled',         'false'),
   ('hitl.websocket_insecure_origin', 'false'),
   ('hitl.websocket_max_conn_per_ip', '5'),
-  ('hitl.permission_rules',          '[{"tool_name":"read_file","action":"allow"},{"tool_name":"glob","action":"allow"},{"tool_name":"grep","action":"allow"},{"tool_name":"ls","action":"allow"},{"tool_name":"websearch","action":"allow"},{"tool_name":"webfetch","action":"allow"},{"tool_name":"browser_interact","action":"allow"},{"tool_name":"memory","action":"allow"},{"tool_name":"skill","action":"allow"},{"tool_name":"task","action":"allow"},{"tool_name":"question","action":"allow"},{"tool_name":"batch","action":"allow"},{"tool_name":"write_file","action":"ask"},{"tool_name":"edit","action":"ask"},{"tool_name":"bash","action":"ask"},{"tool_name":"multiedit","action":"ask"},{"tool_name":"apply_patch","action":"ask"},{"tool_name":"taskboard","action":"ask"},{"tool_name":"create_tool","action":"ask"},{"tool_name":"remove_tool","action":"ask"},{"tool_name":"spawn_agent","action":"ask"},{"tool_name":"parallel_dispatch","action":"ask"},{"tool_name":"send_im_message","action":"ask"},{"tool_name":"feishu_api","action":"ask"}]'),
+  ('hitl.permission_rules',          '` + pgDefaultPermissionRulesJSON + `'),
   -- Agent
   ('agent.timeout',               '10m'),
   ('agent.max_concurrent_agents', '10'),
@@ -958,6 +962,13 @@ INSERT INTO configs (key, value) VALUES
   ('lsp.health_interval',         '30s'),
   ('lsp.languages',               '{"go":{"command":"gopls","args":["serve"],"extensions":[".go"]},"python":{"command":"pyright-langserver","args":["--stdio"],"extensions":[".py"]},"typescript":{"command":"typescript-language-server","args":["--stdio"],"extensions":[".ts",".tsx",".js",".jsx"]}}')
 ON CONFLICT (key) DO NOTHING;
+`
+
+const pgFixDefaultPermissionRules = `
+UPDATE configs
+SET value = '` + pgDefaultPermissionRulesJSON + `'
+WHERE key = 'hitl.permission_rules'
+  AND value = '` + pgLegacyPermissionRulesJSON + `';
 `
 
 // pgAddAPIFormat 为已有数据库的 llm_providers 表添加 api_format 列
@@ -1386,6 +1397,9 @@ func pgMigrate(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) erro
 	// 种子默认运行时配置
 	if _, err := pool.Exec(ctx, pgSeedDefaultConfigs); err != nil {
 		return errs.Wrap(errs.CodeStoreError, "PostgreSQL 默认配置种子失败", err)
+	}
+	if _, err := pool.Exec(ctx, pgFixDefaultPermissionRules); err != nil {
+		logger.Warn("hitl.permission_rules 默认值迁移失败（不影响功能，可手动在 Web UI 更新规则）", zap.Error(err))
 	}
 
 	// 迁移 security.exec_rules：将旧的 glob 格式 pattern 替换为正则格式

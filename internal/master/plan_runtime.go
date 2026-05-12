@@ -2,6 +2,7 @@ package master
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -130,6 +131,20 @@ func (m *Master) evaluatePlanToolGate(ctx context.Context, session *SessionState
 }
 
 func (m *Master) CheckNestedToolAllowed(ctx context.Context, toolName string) error {
+	return m.CheckNestedToolInputAllowed(ctx, toolName, nil)
+}
+
+func (m *Master) CheckNestedToolInputAllowed(ctx context.Context, toolName string, input json.RawMessage) error {
+	return m.checkNestedToolInputAllowed(ctx, toolName, input, true)
+}
+
+// CheckNestedToolInputRouteAllowed 只检查 plan mode 与 RouteDecision 边界，不做权限审批。
+// ToolBridge.CallTool 已有 PermissionManager 检查；注入此 gate 可避免子 Agent 路径重复触发 HITL。
+func (m *Master) CheckNestedToolInputRouteAllowed(ctx context.Context, toolName string, input json.RawMessage) error {
+	return m.checkNestedToolInputAllowed(ctx, toolName, input, false)
+}
+
+func (m *Master) checkNestedToolInputAllowed(ctx context.Context, toolName string, input json.RawMessage, includePermission bool) error {
 	if m == nil {
 		return nil
 	}
@@ -140,6 +155,21 @@ func (m *Master) CheckNestedToolAllowed(ctx context.Context, toolName string) er
 	}
 	if decision := m.evaluatePlanToolGate(ctx, session, toolName); !decision.Allowed {
 		return fmt.Errorf("plan mode gate denied: %s", decision.Reason)
+	}
+	if session != nil && session.HasAllowedToolsDecision() && !session.IsAllowedTool(toolName) {
+		return fmt.Errorf("route decision denied nested tool %q; allowed tools are %q", toolName, strings.Join(session.AllowedToolsSnapshot(), "|"))
+	}
+	if session != nil && len(input) > 0 {
+		if allowedInputs := session.AllowedToolInputsSnapshot()[toolName]; len(allowedInputs) > 0 {
+			if reason, _, denied := routeInputDenyReason(toolName, input, allowedInputs); denied {
+				return fmt.Errorf("route decision denied nested tool: %s", reason)
+			}
+		}
+	}
+	if includePermission && m.permMgr != nil && m.hitlBroker != nil && m.hitlBroker.Enabled() && len(input) > 0 && !toolctx.ShouldSkipPermission(ctx) {
+		if err := m.permMgr.CheckPermission(ctx, toolName, input); err != nil {
+			return fmt.Errorf("nested tool permission denied: %w", err)
+		}
 	}
 	return nil
 }

@@ -32,6 +32,9 @@ func TestModelVisibleTools_DefaultsHideExtensionsAfterDiscoveryUntilRouted(t *te
 	if !hasTool(initial, "read_file") || !hasTool(initial, "tool_search") || !hasTool(initial, "skill") {
 		t.Fatal("default core and quality-leverage tools should remain model-visible")
 	}
+	if allowed, ok := session.AllowedToolInput("skill", "name"); !ok || allowed != routeEmptyInputValue {
+		t.Fatalf("default-visible skill should be constrained to list mode, got %q/%v", allowed, ok)
+	}
 
 	session.RecordDiscoveredTools([]string{"custom_ext", "acme__publish"})
 	afterDiscovery := modelVisibleToolsForSession(session, catalog)
@@ -43,6 +46,113 @@ func TestModelVisibleTools_DefaultsHideExtensionsAfterDiscoveryUntilRouted(t *te
 	}
 	if !session.IsToolDiscovered("custom_ext") || !session.IsToolDiscovered("acme__publish") {
 		t.Fatal("tool_search discovery state should still be recorded for audit")
+	}
+}
+
+func TestModelVisibleTools_DefaultVisibleSetDoesNotExposeExecutionEntrypoints(t *testing.T) {
+	session := &SessionState{ID: "s-default-entrypoints"}
+	catalog := []mcphost.ToolDefinition{
+		{Name: "tool_search", Core: true},
+		{Name: "skill"},
+		{Name: "batch"},
+		{Name: "task"},
+		{Name: "spawn_agent", Core: true},
+		{Name: "parallel_dispatch"},
+		{Name: "memory"},
+	}
+
+	visible := modelVisibleToolsForSession(session, catalog)
+
+	for _, name := range []string{"batch", "task", "spawn_agent", "parallel_dispatch"} {
+		if hasTool(visible, name) {
+			t.Fatalf("execution entrypoint %q must not be default-visible for read/answer turns", name)
+		}
+	}
+	for _, name := range []string{"tool_search", "skill", "memory"} {
+		if !hasTool(visible, name) {
+			t.Fatalf("%q should remain default-visible", name)
+		}
+	}
+}
+
+func TestToolVisibility_RuntimeAllowedToolsAreRouteDecisionBounded(t *testing.T) {
+	session := &SessionState{ID: "s-runtime-allowed"}
+	catalog := []mcphost.ToolDefinition{
+		{Name: "read_file", Core: true},
+		{Name: "write_file", Core: true},
+		{Name: "bash", Core: true},
+		{Name: "tool_search", Core: true},
+		{Name: "memory"},
+	}
+
+	modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntent(
+		session,
+		catalog,
+		nil,
+		"读取项目状态",
+		config.DefaultToolRecallConfig(),
+		router.IntentFrame{Kind: router.IntentRead},
+	)
+
+	for _, name := range []string{"read_file", "tool_search", "memory"} {
+		if !session.IsAllowedTool(name) {
+			t.Fatalf("%q should be runtime-allowed for read/default visible turn, allowed=%v", name, session.AllowedToolsSnapshot())
+		}
+	}
+	for _, name := range []string{"write_file", "bash"} {
+		if session.IsAllowedTool(name) {
+			t.Fatalf("%q must not be runtime-allowed for read turn, allowed=%v", name, session.AllowedToolsSnapshot())
+		}
+	}
+}
+
+func TestModelVisibleTools_DiscoveredReadOnlyToolEntersNextTurnCandidates(t *testing.T) {
+	session := &SessionState{ID: "s-discovered-read"}
+	session.RecordDiscoveredTools([]string{"websearch"})
+	catalog := []mcphost.ToolDefinition{
+		{Name: "tool_search", Core: true},
+		{Name: "websearch", Description: "网络搜索工具"},
+	}
+
+	visible, obs := modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntent(
+		session,
+		catalog,
+		nil,
+		"继续",
+		config.DefaultToolRecallConfig(),
+		router.IntentFrame{Kind: router.IntentAnswer},
+	)
+
+	if !hasTool(visible, "websearch") {
+		t.Fatalf("tool_search-discovered read-only tool should enter next-turn candidates, visible=%v", toolNamesForTest(visible))
+	}
+	if !obs.RecalledToolNames["websearch"] {
+		t.Fatalf("discovered tool should be marked as recalled for audit: %#v", obs.RecalledToolNames)
+	}
+}
+
+func TestModelVisibleTools_DiscoveredUnknownToolStillRequiresRouteAuthorization(t *testing.T) {
+	session := &SessionState{ID: "s-discovered-unknown"}
+	session.RecordDiscoveredTools([]string{"custom_ext"})
+	catalog := []mcphost.ToolDefinition{
+		{Name: "tool_search", Core: true},
+		{Name: "custom_ext", Description: "自定义扩展工具"},
+	}
+
+	visible, obs := modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntent(
+		session,
+		catalog,
+		nil,
+		"继续",
+		config.DefaultToolRecallConfig(),
+		router.IntentFrame{Kind: router.IntentAnswer},
+	)
+
+	if hasTool(visible, "custom_ext") {
+		t.Fatalf("discovered unknown/open-world tool must not become callable without route authorization, visible=%v", toolNamesForTest(visible))
+	}
+	if entry := obs.Entries["custom_ext"]; entry.TaskCallable || entry.PrimaryBlockReason == "" {
+		t.Fatalf("unknown discovered tool should be blocked by RouteDecision: %#v", entry)
 	}
 }
 
@@ -69,6 +179,9 @@ func TestModelVisibleTools_PlanModeUsesExecutionGate(t *testing.T) {
 	for _, name := range []string{"read_file", "grep", "question", "todo_write", "exit_plan_mode"} {
 		if !hasTool(visible, name) {
 			t.Fatalf("plan mode should keep %q visible", name)
+		}
+		if !session.IsAllowedTool(name) {
+			t.Fatalf("plan mode should runtime-allow visible plan tool %q, allowed=%v", name, session.AllowedToolsSnapshot())
 		}
 	}
 	for _, name := range []string{"write_file", "bash", "taskboard", "send_im_message"} {
@@ -102,9 +215,9 @@ func TestModelVisibleTools_PerTurnRecallAddsHiddenToolsWithoutDiscovery(t *testi
 		t.Fatal("hidden IM tool should not be baseline-visible before discovery")
 	}
 
-	recalled := modelVisibleToolsForSessionWithRecall(session, catalog, "发送给飞书用户:郭松", config.DefaultToolRecallConfig())
+	recalled := visibleToolsForIntent(session, catalog, "发送给飞书用户:郭松", config.DefaultToolRecallConfig(), externalSendIntentForVisibilityTest())
 	if !hasTool(recalled, "send_im_message") {
-		t.Fatal("natural-language per-turn recall should add matching hidden IM tool")
+		t.Fatal("structured external-send per-turn recall should add matching hidden IM tool")
 	}
 	if session.IsToolDiscovered("send_im_message") {
 		t.Fatal("per-turn recall should not persist hidden tool into session discovery state")
@@ -136,7 +249,7 @@ func TestReflectionBlockRouteDecisionHidesRecalledTool(t *testing.T) {
 		},
 	}
 
-	visible, obs := modelVisibleToolsForSessionWithRecallObservation(session, catalog, "发送给飞书用户:郭松", config.DefaultToolRecallConfig())
+	visible, obs := modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntent(session, catalog, nil, "发送给飞书用户:郭松", config.DefaultToolRecallConfig(), externalSendIntentForVisibilityTest())
 
 	if hasTool(visible, "send_im_message") {
 		t.Fatal("reflection block should hide recalled tool from model-visible set")
@@ -191,7 +304,10 @@ func TestModelVisibleTools_CreateSkillRoutesThroughSkillCreatorNotMCPBuilder(t *
 		{Name: "mcp-builder", Description: "Build MCP servers"},
 	}
 
-	visible, obs := modelVisibleToolsForSessionWithRecallObservationAndSkills(session, catalog, skillMetas, "创建一个跟我打招呼的技能", config.DefaultToolRecallConfig())
+	visible, obs := modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntent(session, catalog, skillMetas, "创建一个跟我打招呼的技能", config.DefaultToolRecallConfig(), router.IntentFrame{
+		Kind:              router.IntentCreateSkill,
+		AllowsSideEffects: true,
+	})
 
 	if hasTool(visible, "mcp-builder") {
 		t.Fatal("create-skill intent must not expose mcp-builder as a callable tool")
@@ -221,7 +337,11 @@ func TestModelVisibleTools_CreateMCPServerRoutesMCPBuilderAsSkillWorkflow(t *tes
 		{Name: "mcp-builder", Description: "Build MCP servers"},
 	}
 
-	visible, obs := modelVisibleToolsForSessionWithRecallObservationAndSkills(session, catalog, skillMetas, "创建 MCP server 接入 GitHub API", config.DefaultToolRecallConfig())
+	visible, obs := modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntent(session, catalog, skillMetas, "创建 MCP server 接入 GitHub API", config.DefaultToolRecallConfig(), router.IntentFrame{
+		Kind:              router.IntentManageTool,
+		AllowsSideEffects: true,
+		RequiresExternal:  true,
+	})
 
 	if hasTool(visible, "mcp-builder") {
 		t.Fatal("mcp-builder should not be exposed as a direct tool; it is invoked through skill")
@@ -257,7 +377,7 @@ func TestModelVisibleTools_PerTurnRecallRespectsPlanModeGate(t *testing.T) {
 		},
 	}
 
-	visible := modelVisibleToolsForSessionWithRecall(session, catalog, "发送给飞书用户:郭松", config.DefaultToolRecallConfig())
+	visible := visibleToolsForIntent(session, catalog, "发送给飞书用户:郭松", config.DefaultToolRecallConfig(), externalSendIntentForVisibilityTest())
 	if hasTool(visible, "send_im_message") {
 		t.Fatal("per-turn recall must still respect plan mode execution gate")
 	}
@@ -269,26 +389,18 @@ func TestModelVisibleToolsFromPreparedMessages_UsesLatestUserMessage(t *testing.
 		{Name: "read_file", Core: true},
 		{Name: "tool_search", Core: true},
 		{
-			Name:        "send_im_message",
-			Description: "发送消息到 IM 平台（钉钉/飞书/企业微信/个人微信）",
-			InputSchema: []byte(`{
-				"type": "object",
-				"properties": {
-					"platform": {"type": "string", "enum": ["dingtalk", "feishu", "wecom"]},
-					"chat_id": {"type": "string"},
-					"content": {"type": "string"}
-				}
-			}`),
+			Name:        "websearch",
+			Description: "网络搜索工具，用于查询天气和公开网页信息",
 		},
 	}
 	messages := []llm.MessageWithTools{
-		{Role: "user", Content: llm.NewTextContent("先别发")},
+		{Role: "user", Content: llm.NewTextContent("先别查")},
 		{Role: "assistant", Content: llm.NewTextContent("好的")},
-		{Role: "user", Content: llm.NewTextContent("发送给飞书用户:郭松")},
+		{Role: "user", Content: llm.NewTextContent("搜索今天的天气")},
 	}
 
 	visible := modelVisibleToolsForPreparedMessages(session, catalog, messages)
-	if !hasTool(visible, "send_im_message") {
+	if !hasTool(visible, "websearch") {
 		t.Fatal("prepared messages should use the latest user query for per-turn recall")
 	}
 }
@@ -328,7 +440,7 @@ func TestModelVisibleTools_FeishuDomainRecallPrefersFeishuAPIOverGenericIM(t *te
 		},
 	}
 
-	visible := modelVisibleToolsForSessionWithRecall(session, catalog, "发送给飞书用户:郭松", config.DefaultToolRecallConfig())
+	visible := visibleToolsForIntent(session, catalog, "发送给飞书用户:郭松", config.DefaultToolRecallConfig(), externalSendIntentForVisibilityTest())
 	if !hasTool(visible, "feishu_api") {
 		t.Fatal("feishu domain recall should include feishu_api")
 	}
@@ -357,19 +469,19 @@ func TestModelVisibleTools_ToolRecallModes(t *testing.T) {
 
 	off := config.DefaultToolRecallConfig()
 	off.Mode = "off"
-	if hasTool(modelVisibleToolsForSessionWithRecall(session, catalog, "发送给飞书用户:郭松", off), "send_im_message") {
+	if hasTool(visibleToolsForIntent(session, catalog, "发送给飞书用户:郭松", off, externalSendIntentForVisibilityTest()), "send_im_message") {
 		t.Fatal("off mode should not inject recalled tools")
 	}
 
 	observe := config.DefaultToolRecallConfig()
 	observe.Mode = "observe"
-	if hasTool(modelVisibleToolsForSessionWithRecall(session, catalog, "发送给飞书用户:郭松", observe), "send_im_message") {
+	if hasTool(visibleToolsForIntent(session, catalog, "发送给飞书用户:郭松", observe, externalSendIntentForVisibilityTest()), "send_im_message") {
 		t.Fatal("observe mode should recall without changing visible tools")
 	}
 
 	inject := config.DefaultToolRecallConfig()
 	inject.Mode = "inject"
-	if !hasTool(modelVisibleToolsForSessionWithRecall(session, catalog, "发送给飞书用户:郭松", inject), "send_im_message") {
+	if !hasTool(visibleToolsForIntent(session, catalog, "发送给飞书用户:郭松", inject, externalSendIntentForVisibilityTest()), "send_im_message") {
 		t.Fatal("inject mode should add recalled tools")
 	}
 }
@@ -388,7 +500,7 @@ func TestToolRecallObservation_LogCandidatesAndPreview(t *testing.T) {
 
 	query := strings.Repeat("发送给飞书用户郭松", 10)
 	cfg := config.DefaultToolRecallConfig()
-	visible, obs := modelVisibleToolsForSessionWithRecallObservation(session, catalog, query, cfg)
+	visible, obs := modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntent(session, catalog, nil, query, cfg, externalSendIntentForVisibilityTest())
 	if !hasTool(visible, "send_im_message") {
 		t.Fatal("inject mode should expose recalled tool")
 	}
@@ -409,7 +521,7 @@ func TestToolRecallObservation_LogCandidatesAndPreview(t *testing.T) {
 	}
 
 	cfg.LogCandidates = false
-	_, privateObs := modelVisibleToolsForSessionWithRecallObservation(session, catalog, query, cfg)
+	_, privateObs := modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntent(session, catalog, nil, query, cfg, externalSendIntentForVisibilityTest())
 	if len(privateObs.CandidateNames) != 0 || len(privateObs.CandidateScores) != 0 {
 		t.Fatalf("log_candidates=false should hide details, got names=%v scores=%v", privateObs.CandidateNames, privateObs.CandidateScores)
 	}
@@ -434,12 +546,320 @@ func TestToolRecallObservation_PlanGateBlockedCandidate(t *testing.T) {
 		},
 	}
 
-	visible, obs := modelVisibleToolsForSessionWithRecallObservation(session, catalog, "发送给飞书用户郭松", config.DefaultToolRecallConfig())
+	visible, obs := modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntent(session, catalog, nil, "发送给飞书用户郭松", config.DefaultToolRecallConfig(), externalSendIntentForVisibilityTest())
 	if hasTool(visible, "send_im_message") {
 		t.Fatal("plan mode should block recalled side-effect tool")
 	}
 	if !obs.BlockedByPlanGate {
 		t.Fatalf("blocked_by_plan_gate = false, want true: %#v", obs)
+	}
+}
+
+func TestToolRecallObservation_EntriesForExternalSend(t *testing.T) {
+	session := &SessionState{ID: "s-admit"}
+	catalog := []mcphost.ToolDefinition{
+		{Name: "tool_search", Core: true},
+		{
+			Name:        "feishu_api",
+			Description: "飞书应用 API 工具。search_contacts send_message",
+			InputSchema: []byte(`{"type":"object","properties":{"action":{"type":"string","enum":["search_contacts","send_message"]}}}`),
+		},
+	}
+
+	_, obs := modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntent(
+		session,
+		catalog,
+		nil,
+		"发送给飞书用户郭松",
+		config.DefaultToolRecallConfig(),
+		externalSendIntentForVisibilityTest(),
+	)
+	entry, ok := obs.Entries["feishu_api"]
+	if !ok {
+		t.Fatalf("missing feishu_api entry in observation: %#v", obs.Entries)
+	}
+	if !entry.SurvivedPolicy {
+		t.Fatalf("feishu_api came from filtered catalog and should mark SurvivedPolicy: %#v", entry)
+	}
+	if !entry.VisibleToModel {
+		t.Fatalf("feishu_api should be visible after per-turn recall: %#v", entry)
+	}
+	if !entry.ExecutableByRuntime {
+		t.Fatalf("feishu_api should pass runtime plan gate outside plan mode: %#v", entry)
+	}
+	if !entry.TaskCallable {
+		t.Fatalf("feishu_api should be task-callable for external send: %#v", entry)
+	}
+	if entry.DiscoveryOnly {
+		t.Fatalf("feishu_api should not be discovery-only: %#v", entry)
+	}
+	if entry.MayRequireApproval {
+		t.Fatalf("normal feishu send/read actions should not be advertised as blanket approval-required: %#v", entry)
+	}
+	if !strings.Contains(entry.AllowedInputs["action"], "send_message") || strings.Contains(entry.AllowedInputs["action"], "create_task") {
+		t.Fatalf("external-send admission should constrain feishu_api actions, got %#v", entry.AllowedInputs)
+	}
+	if len(entry.DangerousActions) == 0 {
+		t.Fatalf("feishu_api should still advertise dangerous action-level exceptions: %#v", entry)
+	}
+	if entry.PrimaryBlockReason != "" {
+		t.Fatalf("unexpected block reason: %#v", entry)
+	}
+}
+
+func TestToolRecallObservation_FeishuReadBlocksExternalMixedTool(t *testing.T) {
+	session := &SessionState{ID: "s-feishu-read"}
+	catalog := []mcphost.ToolDefinition{
+		{Name: "tool_search", Core: true},
+		{
+			Name:        "feishu_api",
+			Description: "飞书应用 API 工具。get_doc_content read_sheet send_message create_task",
+			InputSchema: []byte(`{"type":"object","properties":{"action":{"type":"string","enum":["get_doc_content","read_sheet","send_message","create_task"]}}}`),
+		},
+	}
+
+	visible, obs := modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntent(
+		session,
+		catalog,
+		nil,
+		"读取飞书文档内容",
+		config.DefaultToolRecallConfig(),
+		router.IntentFrame{Kind: router.IntentRead},
+	)
+
+	if hasTool(visible, "feishu_api") {
+		t.Fatalf("ordinary read intent must not expose external mixed feishu_api, visible=%v", toolNamesForTest(visible))
+	}
+	entry := obs.Entries["feishu_api"]
+	if entry.TaskCallable {
+		t.Fatalf("feishu_api must not be task-callable for ordinary read intent: %#v", entry)
+	}
+	if entry.PrimaryBlockReason != "side effect not allowed by intent" {
+		t.Fatalf("block reason = %q, want side effect not allowed by intent", entry.PrimaryBlockReason)
+	}
+	if len(entry.AllowedInputs) != 0 {
+		t.Fatalf("blocked feishu_api must not advertise read actions in admission entry: %#v", entry)
+	}
+}
+
+func TestToolRecallObservation_FeishuExternalReadAllowsOnlyReadActions(t *testing.T) {
+	session := &SessionState{ID: "s-feishu-external-read"}
+	catalog := []mcphost.ToolDefinition{
+		{Name: "tool_search", Core: true},
+		{
+			Name:        "feishu_api",
+			Description: "飞书应用 API 工具。get_doc_content read_sheet send_message create_task",
+			InputSchema: []byte(`{"type":"object","properties":{"action":{"type":"string","enum":["get_doc_content","read_sheet","send_message","create_task"]}}}`),
+		},
+	}
+
+	visible, obs := modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntent(
+		session,
+		catalog,
+		nil,
+		"读取飞书文档内容",
+		config.DefaultToolRecallConfig(),
+		router.IntentFrame{Kind: router.IntentExternalRead, RequiresExternal: true},
+	)
+
+	if !hasTool(visible, "feishu_api") {
+		t.Fatalf("external-read intent should expose mixed feishu_api for read-only actions, visible=%v", toolNamesForTest(visible))
+	}
+	entry := obs.Entries["feishu_api"]
+	if !entry.TaskCallable {
+		t.Fatalf("feishu_api should be task-callable for external-read intent: %#v", entry)
+	}
+	if entry.MayRequireApproval {
+		t.Fatalf("feishu_api read admission should not be blanket approval-required: %#v", entry)
+	}
+	allowedActions := entry.AllowedInputs["action"]
+	if !strings.Contains(allowedActions, "get_doc_content") || !strings.Contains(allowedActions, "read_sheet") {
+		t.Fatalf("read admission should include read actions, got %q", allowedActions)
+	}
+	if strings.Contains(allowedActions, "send_message") || strings.Contains(allowedActions, "create_task") {
+		t.Fatalf("read admission must not allow write/send actions, got %q", allowedActions)
+	}
+}
+
+func TestToolRecallObservation_EntriesForToolSearchDiscoveryOnly(t *testing.T) {
+	session := &SessionState{ID: "s-admit"}
+	catalog := []mcphost.ToolDefinition{{Name: "tool_search", Core: true}}
+
+	_, obs := modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntent(
+		session,
+		catalog,
+		nil,
+		"发送给飞书用户郭松",
+		config.DefaultToolRecallConfig(),
+		externalSendIntentForVisibilityTest(),
+	)
+	entry, ok := obs.Entries["tool_search"]
+	if !ok {
+		t.Fatalf("missing tool_search entry: %#v", obs.Entries)
+	}
+	if !entry.VisibleToModel || !entry.ExecutableByRuntime {
+		t.Fatalf("tool_search should be visible and executable: %#v", entry)
+	}
+	if entry.TaskCallable {
+		t.Fatalf("tool_search must not be task-callable: %#v", entry)
+	}
+	if !entry.DiscoveryOnly {
+		t.Fatalf("tool_search should be discovery-only: %#v", entry)
+	}
+	if entry.MayRequireApproval {
+		t.Fatalf("tool_search should not require approval: %#v", entry)
+	}
+	if entry.PrimaryBlockReason != "discovery_only" {
+		t.Fatalf("block reason = %q, want discovery_only", entry.PrimaryBlockReason)
+	}
+}
+
+func TestToolRecallObservation_VisibleBeforeCountNoDoubleCount(t *testing.T) {
+	session := &SessionState{ID: "s-no-double"}
+	catalog := []mcphost.ToolDefinition{
+		{Name: "tool_search", Core: true},
+		{Name: "websearch", Core: true},
+	}
+
+	_, obs := modelVisibleToolsForSessionWithRecallObservationAndSkills(
+		session,
+		catalog,
+		nil,
+		"today's weather",
+		config.DefaultToolRecallConfig(),
+	)
+	if obs.VisibleBeforeCount != 2 {
+		t.Fatalf("VisibleBeforeCount = %d, want 2", obs.VisibleBeforeCount)
+	}
+}
+
+func TestScreenshotScenario_SendWeatherToNamedPersonGetsSearchAndFeishuTools(t *testing.T) {
+	session := &SessionState{ID: "s-screenshot"}
+	catalog := []mcphost.ToolDefinition{
+		{Name: "websearch", Core: true, Description: "网络搜索"},
+		{Name: "webfetch", Core: true, Description: "网页获取"},
+		{Name: "tool_search", Core: true, Description: "搜索工具"},
+		{
+			Name:        "feishu_api",
+			Description: "飞书应用 API 工具。访问飞书文档、通讯录、消息、审批、任务、电子表格、多维表格和资源。",
+			InputSchema: []byte(`{
+				"type": "object",
+				"properties": {
+					"action": {
+						"type": "string",
+						"enum": ["search_contacts", "send_message", "search_docs", "get_doc_content"]
+					},
+					"query": {"type": "string"},
+					"chat_id": {"type": "string"},
+					"content": {"type": "string"}
+				}
+			}`),
+		},
+	}
+
+	query := "给郭松发一下今天的天气信息"
+	visible, obs := modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntent(session, catalog, nil, query, config.DefaultToolRecallConfig(), externalSendIntentForVisibilityTest())
+	if !hasTool(visible, "feishu_api") {
+		t.Fatalf("feishu_api should be model-visible, visible=%v", toolNamesForTest(visible))
+	}
+	if !hasTool(visible, "websearch") {
+		t.Fatalf("websearch should remain visible for weather lookup, visible=%v", toolNamesForTest(visible))
+	}
+	if entry := obs.Entries["feishu_api"]; !entry.VisibleToModel || !entry.TaskCallable {
+		t.Fatalf("feishu_api admission entry should be visible and callable: %#v", entry)
+	}
+}
+
+func TestScreenshotScenario_FeishuNotBlockedByGenericSendTool(t *testing.T) {
+	session := &SessionState{ID: "s-screenshot-mixed-send"}
+	catalog := []mcphost.ToolDefinition{
+		{Name: "websearch", Core: true, Description: "网络搜索"},
+		{Name: "tool_search", Core: true, Description: "搜索工具"},
+		{
+			Name:        "send_im_message",
+			Description: "发送消息到 IM 平台（钉钉/飞书/企业微信/个人微信）",
+			InputSchema: []byte(`{"type":"object","properties":{"platform":{"type":"string","enum":["feishu"]},"chat_id":{"type":"string"},"content":{"type":"string"}}}`),
+		},
+		{
+			Name:        "feishu_api",
+			Description: "飞书应用 API 工具。访问飞书文档、通讯录、消息、审批、任务、电子表格、多维表格和资源。",
+			InputSchema: []byte(`{
+				"type": "object",
+				"properties": {
+					"action": {
+						"type": "string",
+						"enum": ["search_contacts", "send_message"]
+					},
+					"query": {"type": "string"},
+					"chat_id": {"type": "string"},
+					"content": {"type": "string"}
+				}
+			}`),
+		},
+	}
+
+	visible, obs := modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntent(
+		session,
+		catalog,
+		nil,
+		"发送给飞书用户郭松",
+		config.DefaultToolRecallConfig(),
+		externalSendIntentForVisibilityTest(),
+	)
+	if !hasTool(visible, "feishu_api") {
+		t.Fatalf("feishu_api must remain visible even when generic send tool is available; visible=%v", toolNamesForTest(visible))
+	}
+	if entry := obs.Entries["feishu_api"]; !entry.VisibleToModel || !entry.TaskCallable {
+		t.Fatalf("feishu_api entry should be visible and task-callable: %#v", entry)
+	}
+}
+
+func TestToolVisibility_ContinuationExposesFeishuOnlyWithPendingExternalSend(t *testing.T) {
+	catalog := []mcphost.ToolDefinition{
+		{Name: "tool_search", Core: true},
+		{
+			Name:        "feishu_api",
+			Description: "飞书应用 API 工具。search_contacts send_message",
+			InputSchema: []byte(`{"type":"object","properties":{"action":{"type":"string","enum":["search_contacts","send_message"]}}}`),
+		},
+	}
+
+	noPending := &SessionState{ID: "s-no-pending"}
+	noPendingIntent := resolveTurnIntent(noPending, "现在能不能发", router.IntentFrame{Kind: router.IntentAnswer})
+	noPendingVisible := visibleToolsForIntent(noPending, catalog, "现在能不能发", config.DefaultToolRecallConfig(), noPendingIntent)
+	if hasTool(noPendingVisible, "feishu_api") {
+		t.Fatalf("short continuation without pending external-send must not expose feishu_api: %v", toolNamesForTest(noPendingVisible))
+	}
+
+	pending := &SessionState{ID: "s-pending"}
+	pending.RememberPendingExternalSendIntent(externalSendIntentForVisibilityTest())
+	pendingIntent := resolveTurnIntent(pending, "现在能不能发", router.IntentFrame{Kind: router.IntentAnswer})
+	pendingVisible := visibleToolsForIntent(pending, catalog, "现在能不能发", config.DefaultToolRecallConfig(), pendingIntent)
+	if !hasTool(pendingVisible, "feishu_api") {
+		t.Fatalf("short continuation with pending external-send should expose feishu_api: %v", toolNamesForTest(pendingVisible))
+	}
+}
+
+func TestToolVisibilityWrapperDoesNotRecoverSideEffectIntentFromText(t *testing.T) {
+	session := &SessionState{ID: "s-wrapper-side-effect"}
+	catalog := []mcphost.ToolDefinition{
+		{Name: "tool_search", Core: true},
+		{
+			Name:        "send_im_message",
+			Description: "发送消息到 IM 平台（钉钉/飞书/企业微信/个人微信）",
+			InputSchema: []byte(`{"type":"object","properties":{"platform":{"type":"string","enum":["feishu"]},"content":{"type":"string"}}}`),
+		},
+	}
+
+	visible, obs := modelVisibleToolsForSessionWithRecallObservation(session, catalog, "发送给飞书用户郭松", config.DefaultToolRecallConfig())
+	if hasTool(visible, "send_im_message") {
+		t.Fatalf("legacy wrapper must not recover side-effect intent from text; visible=%v", toolNamesForTest(visible))
+	}
+	if obs.RouteDecision.Intent.Kind == router.IntentExternalWrite || obs.RouteDecision.Intent.AllowsSideEffects {
+		t.Fatalf("legacy wrapper route intent recovered side-effect intent: %+v", obs.RouteDecision.Intent)
+	}
+	if entry := obs.Entries["send_im_message"]; entry.TaskCallable {
+		t.Fatalf("legacy wrapper should not mark send tool task-callable: %#v", entry)
 	}
 }
 
@@ -472,6 +892,76 @@ func TestRecordToolDiscoveryFromToolSearchOnlyOnSuccess(t *testing.T) {
 	}
 }
 
+func TestToolVisibility_DefaultVisibleMixedToolsGetReadOnlyRuntimeConstraints(t *testing.T) {
+	session := &SessionState{ID: "s-mixed-defaults"}
+	catalog := []mcphost.ToolDefinition{
+		{
+			Name:        "memory",
+			Description: "管理持久化记忆 save search update delete list",
+			InputSchema: []byte(`{"type":"object","properties":{"operation":{"type":"string","enum":["save","search","update","delete","list"]}}}`),
+		},
+		{Name: "tool_search", Core: true},
+		{Name: "browser_interact", Core: true},
+	}
+
+	_, obs := modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntent(
+		session,
+		catalog,
+		nil,
+		"读取页面并搜索记忆",
+		config.DefaultToolRecallConfig(),
+		router.IntentFrame{Kind: router.IntentRead},
+	)
+
+	allowed := session.AllowedToolInputsSnapshot()
+	memoryOps := allowed["memory"]["operation"]
+	if !strings.Contains(memoryOps, "search") || strings.Contains(memoryOps, "save") || strings.Contains(memoryOps, "delete") {
+		t.Fatalf("default-visible memory should be constrained to read operations, got %#v", allowed["memory"])
+	}
+	browserActions := allowed["browser_interact"]["commands[].action"]
+	if !strings.Contains(browserActions, "snapshot") || strings.Contains(browserActions, "click") || strings.Contains(browserActions, "eval") {
+		t.Fatalf("default-visible browser_interact should be constrained to read actions, got %#v", allowed["browser_interact"])
+	}
+	if obs.Entries["memory"].AllowedInputs["operation"] != memoryOps {
+		t.Fatalf("admission entry and runtime constraints diverged: entry=%#v runtime=%#v", obs.Entries["memory"].AllowedInputs, allowed["memory"])
+	}
+}
+
+func TestToolVisibility_LocalWriteIntentWidensMemoryOperationConstraints(t *testing.T) {
+	session := &SessionState{ID: "s-mixed-local-write"}
+	catalog := []mcphost.ToolDefinition{
+		{
+			Name:        "memory",
+			Description: "管理持久化记忆 save search update delete list",
+			InputSchema: []byte(`{"type":"object","properties":{"operation":{"type":"string","enum":["save","search","update","delete","list"]}}}`),
+		},
+		{Name: "tool_search", Core: true},
+	}
+
+	visible, obs := modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntent(
+		session,
+		catalog,
+		nil,
+		"保存这条偏好到记忆",
+		config.DefaultToolRecallConfig(),
+		router.IntentFrame{Kind: router.IntentWriteLocal, AllowsSideEffects: true},
+	)
+
+	if !hasTool(visible, "memory") {
+		t.Fatalf("memory should remain visible for local write intent: %v", toolNamesForTest(visible))
+	}
+	memoryOps := session.AllowedToolInputsSnapshot()["memory"]["operation"]
+	if !strings.Contains(memoryOps, "save") || !strings.Contains(memoryOps, "update") {
+		t.Fatalf("local write intent should allow memory save/update, got %q", memoryOps)
+	}
+	if strings.Contains(memoryOps, "delete") {
+		t.Fatalf("local write intent must not allow memory delete, got %q", memoryOps)
+	}
+	if obs.Entries["memory"].AllowedInputs["operation"] != memoryOps {
+		t.Fatalf("admission entry and runtime constraints diverged: entry=%#v runtime=%#v", obs.Entries["memory"].AllowedInputs, memoryOps)
+	}
+}
+
 func hasTool(tools []mcphost.ToolDefinition, name string) bool {
 	for _, tool := range tools {
 		if tool.Name == name {
@@ -479,4 +969,21 @@ func hasTool(tools []mcphost.ToolDefinition, name string) bool {
 		}
 	}
 	return false
+}
+
+func externalSendIntentForVisibilityTest() router.IntentFrame {
+	return router.IntentFrame{Kind: router.IntentExternalWrite, AllowsSideEffects: true, RequiresExternal: true}
+}
+
+func visibleToolsForIntent(session *SessionState, catalog []mcphost.ToolDefinition, query string, recallCfg config.ToolRecallConfig, intent router.IntentFrame) []mcphost.ToolDefinition {
+	visible, _ := modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntent(session, catalog, nil, query, recallCfg, intent)
+	return visible
+}
+
+func toolNamesForTest(tools []mcphost.ToolDefinition) []string {
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		names = append(names, tool.Name)
+	}
+	return names
 }

@@ -1,7 +1,10 @@
 package skills
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -10,6 +13,7 @@ import (
 
 	"github.com/chef-guo/agents-hive/internal/errs"
 	"github.com/chef-guo/agents-hive/internal/plugin"
+	"github.com/chef-guo/agents-hive/internal/router"
 	"github.com/chef-guo/agents-hive/internal/security"
 	"github.com/chef-guo/agents-hive/internal/store"
 	"go.uber.org/zap"
@@ -63,6 +67,8 @@ type grantEntry struct {
 	key    grantKey
 	action PermissionAction
 }
+
+const permissionInputGrantPrefix = "__input_sha256__:"
 
 // llmClassifier LLM 分类器接口（在 skills 包中以接口引用，避免 import cycle）
 type llmClassifier interface {
@@ -194,16 +200,19 @@ func (m *PermissionManager) GetRules() []PermissionRule {
 // CheckPermission 检查工具执行权限
 func (m *PermissionManager) CheckPermission(ctx context.Context, toolName string, input json.RawMessage) error {
 	inputValue := extractInputValue(toolName, input)
+	inputGrantPattern := permissionInputGrantPattern(input)
 
 	// 内置放行：skill 空 name 仅列出技能，属于只读操作，无需审批
 	if toolName == "skill" && inputValue == "" {
 		return nil
 	}
 
-	// 1. 检查 session grants（最高优先级）
-	if action, matched := m.checkGrants(toolName, inputValue); matched {
+	// 1. 检查精确 session grants 和显式 deny。粗粒度 allow 不能覆盖后续更具体的 ask/deny 规则，
+	// 否则一次 remembered allow 会把 memory.delete / feishu_api.create_approval 这类危险 action 放穿。
+	if action, pattern, matched := m.checkGrantsDetailed(toolName, inputValue, inputGrantPattern); matched && (pattern != "" || action == PermissionDeny) {
 		m.logger.Debug("session grant 匹配",
 			zap.String("tool", toolName),
+			zap.String("pattern", pattern),
 			zap.String("action", string(action)),
 		)
 		if action == PermissionDeny {
@@ -213,9 +222,10 @@ func (m *PermissionManager) CheckPermission(ctx context.Context, toolName string
 	}
 
 	// 2. 检查配置文件规则
-	if action, matched := m.matchRules(toolName, inputValue); matched {
+	if action, rulePattern, matched := m.matchRulesDetailed(toolName, inputValue); matched {
 		m.logger.Debug("配置规则匹配",
 			zap.String("tool", toolName),
+			zap.String("pattern", rulePattern),
 			zap.String("action", string(action)),
 		)
 		if action == PermissionAllow {
@@ -224,7 +234,20 @@ func (m *PermissionManager) CheckPermission(ctx context.Context, toolName string
 		if action == PermissionDeny {
 			return errs.New(errs.CodePermissionDenied, fmt.Sprintf("工具 %q 被规则拒绝", toolName))
 		}
+		if grantAction, grantPattern, grantMatched := m.checkGrantsDetailed(toolName, inputValue, inputGrantPattern); grantMatched {
+			if grantAction == PermissionDeny {
+				return errs.New(errs.CodePermissionDenied, fmt.Sprintf("工具 %q 被拒绝", toolName))
+			}
+			if grantAction == PermissionAllow && (grantPattern != "" || rulePattern == "") {
+				return nil
+			}
+		}
 		// action == PermissionAsk, 继续到第 3 步
+	} else if action, _, matched := m.checkGrantsDetailed(toolName, inputValue, inputGrantPattern); matched {
+		if action == PermissionDeny {
+			return errs.New(errs.CodePermissionDenied, fmt.Sprintf("工具 %q 被拒绝", toolName))
+		}
+		return nil
 	}
 
 	// 3. 插件 PermissionAsk hook：在提示用户前，给插件机会自动处理权限决策
@@ -249,6 +272,13 @@ func (m *PermissionManager) CheckPermission(ctx context.Context, toolName string
 				zap.String("reason", hookOut.Reason),
 			)
 			if hookOut.Decision == "allow" {
+				if !canPluginAutoAllowPermission(toolName, input) {
+					m.logger.Warn("插件自动批准被安全边界忽略，将继续走默认权限流程",
+						zap.String("tool", toolName),
+						zap.String("reason", hookOut.Reason),
+					)
+					goto prompt
+				}
 				return nil
 			}
 			return errs.New(errs.CodePermissionDenied, fmt.Sprintf("插件拒绝工具 %q: %s", toolName, hookOut.Reason))
@@ -274,6 +304,7 @@ func (m *PermissionManager) CheckPermission(ctx context.Context, toolName string
 	}
 
 	// 4. 默认行为：提示用户
+prompt:
 	if m.promptFn == nil {
 		return errs.New(errs.CodePermissionDenied, fmt.Sprintf("工具 %q 需要人工审批，但 HITL 未开启。请在配置中启用 hitl.enabled 后重试", toolName))
 	}
@@ -298,13 +329,13 @@ func (m *PermissionManager) CheckPermission(ctx context.Context, toolName string
 
 	if !resp.Granted {
 		if resp.Remember {
-			m.GrantSession(toolName, "", PermissionDeny)
+			m.GrantSession(toolName, rememberPermissionPattern(toolName, inputValue, inputGrantPattern, input), PermissionDeny)
 		}
 		return errs.New(errs.CodePermissionDenied, fmt.Sprintf("用户拒绝工具 %q", toolName))
 	}
 
 	if resp.Remember {
-		m.GrantSession(toolName, "", PermissionAllow)
+		m.GrantSession(toolName, rememberPermissionPattern(toolName, inputValue, inputGrantPattern, input), PermissionAllow)
 	}
 
 	return nil
@@ -312,7 +343,16 @@ func (m *PermissionManager) CheckPermission(ctx context.Context, toolName string
 
 // checkGrants 检查 session grants，返回匹配的动作和是否匹配。
 // 更具体的 grant（有 pattern 的）优先于无 pattern 的 grant。
-func (m *PermissionManager) checkGrants(toolName, inputValue string) (PermissionAction, bool) {
+func (m *PermissionManager) checkGrants(toolName, inputValue string, extraPatterns ...string) (PermissionAction, bool) {
+	pattern := ""
+	if len(extraPatterns) > 0 {
+		pattern = extraPatterns[0]
+	}
+	action, _, matched := m.checkGrantsDetailed(toolName, inputValue, pattern)
+	return action, matched
+}
+
+func (m *PermissionManager) checkGrantsDetailed(toolName, inputValue, inputGrantPattern string) (PermissionAction, string, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -329,33 +369,41 @@ func (m *PermissionManager) checkGrants(toolName, inputValue string) (Permission
 			hasFallback = true
 			continue
 		}
+		if inputGrantPattern != "" && entry.key.pattern == inputGrantPattern {
+			return entry.action, entry.key.pattern, true
+		}
 		// 有模式的 grant 优先匹配
 		if inputValue != "" && matchGlob(entry.key.pattern, inputValue) {
-			return entry.action, true
+			return entry.action, entry.key.pattern, true
 		}
 	}
 	if hasFallback {
-		return fallbackAction, true
+		return fallbackAction, "", true
 	}
-	return "", false
+	return "", "", false
 }
 
 // matchRules 按顺序评估配置文件规则，返回第一个匹配的动作
 func (m *PermissionManager) matchRules(toolName, inputValue string) (PermissionAction, bool) {
+	action, _, matched := m.matchRulesDetailed(toolName, inputValue)
+	return action, matched
+}
+
+func (m *PermissionManager) matchRulesDetailed(toolName, inputValue string) (PermissionAction, string, bool) {
 	for _, rule := range m.rules {
 		if !matchGlob(rule.ToolName, toolName) {
 			continue
 		}
 		// 无 Pattern 的规则匹配所有参数
 		if rule.Pattern == "" {
-			return rule.Action, true
+			return rule.Action, "", true
 		}
 		// 有 Pattern 的规则需要参数匹配
 		if inputValue != "" && matchGlob(rule.Pattern, inputValue) {
-			return rule.Action, true
+			return rule.Action, rule.Pattern, true
 		}
 	}
-	return "", false
+	return "", "", false
 }
 
 // Grant 授予工具权限（向后兼容，等同于 GrantSession(toolName, "", action)）
@@ -652,4 +700,46 @@ func extractInputValue(toolName string, input json.RawMessage) string {
 		}
 	}
 	return ""
+}
+
+func permissionInputGrantPattern(input json.RawMessage) string {
+	normalized := bytes.TrimSpace(input)
+	if len(normalized) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(normalized)
+	return permissionInputGrantPrefix + hex.EncodeToString(sum[:])
+}
+
+func rememberPermissionPattern(toolName, inputValue, inputGrantPattern string, input json.RawMessage) string {
+	toolName = strings.TrimSpace(strings.ToLower(toolName))
+	if inputGrantPattern != "" {
+		if router.StructuredDangerousOperation(toolName, input) {
+			return inputGrantPattern
+		}
+		if profile, ok := router.BuiltinToolProfile(toolName); !ok || router.ProfileHasSideEffect(profile) {
+			return inputGrantPattern
+		}
+	}
+	if strings.TrimSpace(inputValue) != "" {
+		return inputValue
+	}
+	return inputGrantPattern
+}
+
+func canPluginAutoAllowPermission(toolName string, input json.RawMessage) bool {
+	toolName = strings.TrimSpace(strings.ToLower(toolName))
+	if toolName == "" {
+		return false
+	}
+	if router.IsShellCommandTool(toolName) {
+		return false
+	}
+	if router.StructuredDangerousOperation(toolName, input) {
+		return false
+	}
+	if profile, ok := router.BuiltinToolProfile(toolName); ok {
+		return !router.ProfileHasSideEffect(profile)
+	}
+	return false
 }

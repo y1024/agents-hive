@@ -84,8 +84,14 @@ func loadPrompt(promptLoader any, key, defaultVal string) string {
 // makeExploreHandler 构建探索任务处理函数（New 和 NewWithResolver 共用）
 func makeExploreHandler(loop *subagent.AgentLoop, _ *skills.Registry, promptLoader any, logger *zap.Logger) subagent.TaskHandler {
 	return func(ctx context.Context, req subagent.TaskRequest) subagent.TaskResponse {
-		if loop != nil && req.UserID != "" {
-			loop.SetUserID(req.UserID)
+		ctx = subagent.ContextFromTaskRequest(ctx, req)
+		if loop != nil {
+			if req.SessionID != "" {
+				loop.SetSessionID(req.SessionID)
+			}
+			if req.UserID != "" {
+				loop.SetUserID(req.UserID)
+			}
 		}
 		payload, skillContext := subagent.ExtractPayload(req)
 

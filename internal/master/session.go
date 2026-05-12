@@ -70,8 +70,14 @@ type SessionState struct {
 	pendingIMContext       *imctx.IMMessageContext      `json:"-"`
 	pendingMemoryInjection memory.InjectionResult       `json:"-"`
 	discoveredTools        map[string]bool              `json:"-"`
+	allowedTools           map[string]bool              `json:"-"`
+	allowedToolsSet        bool                         `json:"-"`
 	allowedToolInputs      map[string]map[string]string `json:"-"`
 	reflectionBlocks       []router.ReflectionBlock     `json:"-"`
+	// pendingExternalSendIntent 记录跨回合未完成的外部发送意图。
+	// 例如第一轮已要求“给郭松发天气”，第二轮“现在能不能发”必须继承发送工具可见性。
+	pendingExternalSendIntent router.IntentFrame `json:"-"`
+	pendingExternalSendActive bool               `json:"-"`
 
 	// 终止态：用于阻止已取消任务的陈旧写回。
 	terminated         bool      `json:"-"`
@@ -296,6 +302,67 @@ func (s *SessionState) DiscoveredTools() []string {
 	return out
 }
 
+func (s *SessionState) SetAllowedTools(tools []string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.allowedToolsSet = true
+	if len(tools) == 0 {
+		s.allowedTools = nil
+		return
+	}
+	allowed := make(map[string]bool, len(tools))
+	for _, name := range tools {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		allowed[name] = true
+	}
+	if len(allowed) == 0 {
+		s.allowedTools = nil
+		return
+	}
+	s.allowedTools = allowed
+}
+
+func (s *SessionState) IsAllowedTool(toolName string) bool {
+	if s == nil || strings.TrimSpace(toolName) == "" {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.allowedToolsSet {
+		return true
+	}
+	return s.allowedTools[strings.TrimSpace(toolName)]
+}
+
+func (s *SessionState) HasAllowedToolsDecision() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.allowedToolsSet
+}
+
+func (s *SessionState) AllowedToolsSnapshot() []string {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]string, 0, len(s.allowedTools))
+	for name := range s.allowedTools {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func (s *SessionState) SetAllowedToolInputs(inputs map[string]map[string]string) {
 	if s == nil {
 		return
@@ -370,6 +437,38 @@ func (s *SessionState) ClearReflectionBlocks() {
 	}
 	s.mu.Lock()
 	s.reflectionBlocks = nil
+	s.mu.Unlock()
+}
+
+func (s *SessionState) RememberPendingExternalSendIntent(intent router.IntentFrame) {
+	if s == nil || intent.Kind != router.IntentExternalWrite || !intent.AllowsSideEffects || !intent.RequiresExternal {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pendingExternalSendIntent = intent
+	s.pendingExternalSendActive = true
+}
+
+func (s *SessionState) PendingExternalSendIntent() (router.IntentFrame, bool) {
+	if s == nil {
+		return router.IntentFrame{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.pendingExternalSendActive {
+		return router.IntentFrame{}, false
+	}
+	return s.pendingExternalSendIntent, true
+}
+
+func (s *SessionState) ClearPendingExternalSendIntent() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.pendingExternalSendIntent = router.IntentFrame{}
+	s.pendingExternalSendActive = false
 	s.mu.Unlock()
 }
 

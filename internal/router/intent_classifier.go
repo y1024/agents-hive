@@ -247,28 +247,9 @@ func RuleClassifyIntent(message string) IntentFrame {
 		intent.Confidence = 0.75
 		return intent
 	}
-	if isCreateSkillIntent(q) {
-		intent.Kind = IntentCreateSkill
-		intent.Subject = "skill"
-		intent.AllowsSideEffects = true
-		intent.Confidence = 0.85
-		return intent
-	}
-	if isManageToolIntent(q) {
-		intent.Kind = IntentManageTool
-		intent.Subject = "tool"
-		intent.RequiresExternal = strings.Contains(q, "api") || strings.Contains(q, "github") || strings.Contains(q, "外部")
-		intent.AllowsSideEffects = true
-		intent.Confidence = 0.8
-		return intent
-	}
-	if hasAny(q, "发送", "send ", "通知", "发给") {
-		intent.Kind = IntentExternalWrite
-		intent.AllowsSideEffects = true
-		intent.RequiresExternal = true
-		intent.Confidence = 0.75
-		return intent
-	}
+	// Side-effect intent is owned by the structured classifier. Rule fallback
+	// stays conservative and must not keyword-guess external writes, skill
+	// mutation, or tool management from natural language.
 	if hasAny(q, "读取", "查询", "搜索", "查看", "read ", "search ", "list ") {
 		intent.Kind = IntentRead
 		intent.AllowsSideEffects = false
@@ -293,19 +274,6 @@ func normalizeClassifiedIntent(intent IntentFrame) IntentFrame {
 		intent.Confidence = 1
 	}
 	return intent
-}
-
-func isCreateSkillIntent(q string) bool {
-	hasSkill := hasAny(q, "skill", "技能")
-	hasCreate := hasAny(q, "创建", "新建", "生成", "写一个", "做一个", "create", "build", "make")
-	return hasSkill && hasCreate
-}
-
-func isManageToolIntent(q string) bool {
-	hasMCP := hasAny(q, "mcp server", "mcp服务器", "mcp 服务", "mcp tool", "mcp工具")
-	hasTool := hasAny(q, "工具", "tool")
-	hasBuild := hasAny(q, "创建", "新建", "封装", "接入", "调试", "注册", "create", "build", "register", "integrate")
-	return hasBuild && (hasMCP || (hasTool && hasAny(q, "api", "server", "服务器", "transport")))
 }
 
 func hasAny(s string, terms ...string) bool {

@@ -292,6 +292,12 @@ func TestRecordReflection_TriggersMapToLowCardinalityEvents(t *testing.T) {
 			status:      agentquality.StatusFail,
 			failureType: agentquality.FailureModel,
 		},
+		{
+			name:        "intent fulfillment",
+			input:       reflectionNoteInput{Trigger: "intent_fulfillment", Severity: "warn", Detail: "missing=send_attempt"},
+			status:      agentquality.StatusPass,
+			failureType: agentquality.FailureModel,
+		},
 	}
 
 	for _, tt := range tests {

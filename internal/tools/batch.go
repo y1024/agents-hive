@@ -17,6 +17,12 @@ type NestedToolGate interface {
 	CheckNestedToolAllowed(ctx context.Context, toolName string) error
 }
 
+// NestedToolInputGate 是 batch 执行子工具前的输入级 gate。
+// 旧接口只传 toolName，无法检查 action/operation 是否绕过当前 RouteDecision。
+type NestedToolInputGate interface {
+	CheckNestedToolInputAllowed(ctx context.Context, toolName string, input json.RawMessage) error
+}
+
 // batchInput 定义批量操作的输入结构
 type batchInput struct {
 	Operations []batchOperation `json:"operations"`
@@ -250,7 +256,12 @@ func executeOperation(ctx context.Context, host *mcphost.Host, logger *zap.Logge
 	}
 
 	if gate != nil {
-		if err := gate.CheckNestedToolAllowed(ctx, op.Tool); err != nil {
+		if inputGate, ok := gate.(NestedToolInputGate); ok {
+			err = inputGate.CheckNestedToolInputAllowed(ctx, op.Tool, op.Input)
+		} else {
+			err = gate.CheckNestedToolAllowed(ctx, op.Tool)
+		}
+		if err != nil {
 			result.Success = false
 			result.Error = err.Error()
 			logger.Warn("批量操作失败：执行层 gate 拒绝",

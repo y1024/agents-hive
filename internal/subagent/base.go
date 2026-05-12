@@ -9,8 +9,10 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/chef-guo/agents-hive/internal/auth"
 	"github.com/chef-guo/agents-hive/internal/errs"
 	"github.com/chef-guo/agents-hive/internal/skills"
+	"github.com/chef-guo/agents-hive/internal/toolctx"
 )
 
 // AgentStatus 表示 sub-agent 的当前状态
@@ -56,6 +58,8 @@ type TaskRequest struct {
 	TraceID       string          `json:"trace_id,omitempty"`        // 当前 child agent trace
 	ParentSpanID  string          `json:"parent_span_id,omitempty"`  // 发起 delegation 的 tool span
 	ParentTraceID string          `json:"parent_trace_id,omitempty"` // 发起 delegation 的 parent trace
+	TurnID        string          `json:"turn_id,omitempty"`         // 当前 master task/turn 的稳定 ID
+	ToolCallID    string          `json:"tool_call_id,omitempty"`    // 发起 delegation 的 LLM tool call ID
 	Payload       json.RawMessage `json:"payload"`
 }
 
@@ -207,7 +211,8 @@ func (a *BaseAgent) Run(ctx context.Context) {
 		select {
 		case env := <-a.mailbox.Request:
 			a.logger.Debug("正在处理任务", zap.String("task_id", env.Req.ID), zap.String("type", env.Req.Type))
-			resp := a.handler(ctx, env.Req)
+			reqCtx := ContextFromTaskRequest(ctx, env.Req)
+			resp := a.handler(reqCtx, env.Req)
 			resp.AgentID = a.card.ID
 			resp.RequestID = env.Req.ID
 			// 通过 per-request reply channel 回传响应，避免并发调用时响应被错误方读走
@@ -248,6 +253,36 @@ func (a *BaseAgent) Run(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// ContextFromTaskRequest 将 TaskRequest 中的 request-scoped 字段恢复到 context。
+// BaseAgent.Run 在每个请求处理前调用；固定 agent 的 handleTask 也会复用，
+// 保证测试或直接调用 handler 时与真实 mailbox 路径一致。
+func ContextFromTaskRequest(ctx context.Context, req TaskRequest) context.Context {
+	if req.SessionID != "" {
+		ctx = toolctx.WithSessionID(ctx, req.SessionID)
+	}
+	if req.UserID != "" && auth.UserIDFrom(ctx) == "" {
+		ctx = auth.WithUser(ctx, &auth.User{ID: req.UserID, Role: "user", Status: "active"})
+	}
+
+	parent := toolctx.GetToolContext(ctx)
+	next := *parent
+	if req.TraceID != "" {
+		next.TraceID = req.TraceID
+	}
+	if req.ParentSpanID != "" {
+		next.ParentSpanID = req.ParentSpanID
+	}
+	if req.TurnID != "" {
+		next.TurnID = req.TurnID
+	} else if next.TurnID == "" && req.TraceID != "" {
+		next.TurnID = req.TraceID
+	}
+	if req.ToolCallID != "" {
+		next.ToolCallID = req.ToolCallID
+	}
+	return toolctx.WithToolContext(ctx, &next)
 }
 
 func (a *BaseAgent) healthStatus() HealthStatus {

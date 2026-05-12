@@ -28,7 +28,6 @@ on:
       - 'internal/store/**'
       - 'internal/master/**'
       - 'scripts/check_specdriven_coverage.sh'
-      - 'scripts/sprint_gate.sh'
       - 'Makefile'
       - '.github/workflows/test-specdriven.yml'
       - 'go.mod'

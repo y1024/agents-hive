@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/chef-guo/agents-hive/internal/auth"
+	"github.com/chef-guo/agents-hive/internal/errs"
 	"github.com/chef-guo/agents-hive/internal/mcphost"
 	"github.com/chef-guo/agents-hive/internal/sandbox"
 	"github.com/chef-guo/agents-hive/internal/skills"
@@ -60,6 +62,103 @@ func sandboxToSkillsAdapter() skills.SandboxExecutor {
 		return nil
 	}
 	return &sandboxToSkillsExecutor{inner: globalExecutor}
+}
+
+type approvalGuardedShellExecutor struct {
+	ctx   context.Context
+	inner skills.ShellExecutor
+}
+
+func newApprovalGuardedShellExecutor(ctx context.Context, inner skills.ShellExecutor) skills.ShellExecutor {
+	if inner == nil {
+		return nil
+	}
+	return &approvalGuardedShellExecutor{ctx: ctx, inner: inner}
+}
+
+func (e *approvalGuardedShellExecutor) Execute(command string) (string, string, error) {
+	if globalSafeExec != nil {
+		decision := matchSkillShellPolicy(command)
+		switch decision.policy {
+		case "deny":
+			return "", "", errs.New(errs.CodeExecDenied, "permission denied: 命令被安全策略拒绝: "+decision.command)
+		case "ask":
+			if globalApprovalBridge == nil {
+				return "", "", errs.New(errs.CodePermissionDenied, "permission denied: 命令需要审批但审批系统未初始化: "+decision.command)
+			}
+			details := map[string]string{
+				"command": decision.command,
+				"source":  "skill",
+			}
+			if decision.command != command {
+				details["execution_command"] = command
+			}
+			approved, err := globalApprovalBridge.RequestApproval(e.ctx, "bash",
+				"执行技能中的 shell 命令需要审批",
+				details,
+			)
+			if err != nil {
+				return "", "", errs.Wrap(errs.CodeExecApprovalTimeout, "技能命令审批请求失败", err)
+			}
+			if !approved {
+				return "", "", errs.New(errs.CodePermissionDenied, "permission denied: 命令审批被拒绝: "+decision.command)
+			}
+		}
+	}
+	return e.inner.Execute(command)
+}
+
+type skillShellPolicyDecision struct {
+	policy  string
+	command string
+}
+
+func matchSkillShellPolicy(command string) skillShellPolicyDecision {
+	decision := skillShellPolicyDecision{policy: "allow", command: command}
+	for _, candidate := range skillShellPolicyCandidates(command) {
+		policy := globalSafeExec.MatchPolicy(candidate)
+		if policy == "deny" {
+			return skillShellPolicyDecision{policy: "deny", command: candidate}
+		}
+		if policy == "ask" && (decision.policy != "ask" || candidate != command) {
+			decision = skillShellPolicyDecision{policy: "ask", command: candidate}
+		}
+	}
+	return decision
+}
+
+func skillShellPolicyCandidates(command string) []string {
+	candidates := []string{command}
+	if unwrapped, ok := unwrapSkillDirectoryPrefix(command); ok && unwrapped != command {
+		candidates = append(candidates, unwrapped)
+	}
+	return candidates
+}
+
+func unwrapSkillDirectoryPrefix(command string) (string, bool) {
+	if !strings.HasPrefix(command, "cd \"") {
+		return "", false
+	}
+	inEscape := false
+	for i := len("cd \""); i < len(command); i++ {
+		ch := command[i]
+		if inEscape {
+			inEscape = false
+			continue
+		}
+		if ch == '\\' {
+			inEscape = true
+			continue
+		}
+		if ch == '"' && strings.HasPrefix(command[i+1:], " && ") {
+			rest := strings.TrimSpace(command[i+len(" && ")+1:])
+			if rest == "" {
+				return "", false
+			}
+			return rest, true
+		}
+	}
+	return "", false
 }
 
 // skillInput 是 skill 工具的输入参数
@@ -146,6 +245,7 @@ func registerSkillWithSelfHeal(host *mcphost.Host, logger *zap.Logger, skillReg 
 				Timeout:  600 * time.Second,
 				Executor: sandboxToSkillsAdapter(),
 			}
+			guardedExecutor := newApprovalGuardedShellExecutor(ctx, executor)
 
 			// 检查是否为 context=fork 类型（需要隔离的 sub-agent 执行）
 			var s *skills.Skill
@@ -165,16 +265,16 @@ func registerSkillWithSelfHeal(host *mcphost.Host, logger *zap.Logger, skillReg 
 				if forkHandler == nil {
 					return errorResult(fmt.Sprintf("技能 %q 需要 fork 执行但 ForkHandler 未配置", params.Name)), nil
 				}
-				result, err := forkHandler.ExecuteForked(ctx, s, rctx, executor)
+				result, err := forkHandler.ExecuteForked(ctx, s, rctx, guardedExecutor)
 				if err != nil {
 					return errorResult(fmt.Sprintf("fork 执行技能 %q 失败: %v", params.Name, err)), nil
 				}
 				return textResult(result), nil
 			}
 
-			hookRunner := skills.NewHookRunner(executor, logger)
+			hookRunner := skills.NewHookRunner(guardedExecutor, logger)
 
-			result, err := skillReg.InvokeFull(ctx, params.Name, rctx, executor, nil, hookRunner)
+			result, err := skillReg.InvokeFull(ctx, params.Name, rctx, guardedExecutor, nil, hookRunner)
 			if err != nil {
 				return errorResult(fmt.Sprintf("调用技能 %q 失败: %v", params.Name, err)), nil
 			}

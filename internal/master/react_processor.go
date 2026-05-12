@@ -25,6 +25,7 @@ import (
 	"github.com/chef-guo/agents-hive/internal/memory"
 	"github.com/chef-guo/agents-hive/internal/observability"
 	"github.com/chef-guo/agents-hive/internal/plugin"
+	"github.com/chef-guo/agents-hive/internal/router"
 	"github.com/chef-guo/agents-hive/internal/sessiontodo"
 	"github.com/chef-guo/agents-hive/internal/skills"
 	"github.com/chef-guo/agents-hive/internal/toolctx"
@@ -294,6 +295,12 @@ func (m *Master) runReActLoop(
 	// P0-A C2：required+0-tool-call 兜底计数器。
 	// 跨迭代累计：本任务内允许 1 次追责重试，第 2 次仍 required+0 就结构化失败。
 	var requiredBreachCount int
+	var intentFulfillmentRetryCount int
+	var turnIntentQuery string
+	var turnIntent router.IntentFrame
+	var turnIntentResult router.IntentClassificationResult
+	var turnContract IntentContract
+	var hasTurnContract bool
 	imRefsRead := false
 
 	for i := 0; ; i++ {
@@ -356,6 +363,17 @@ func (m *Master) runReActLoop(
 		preparedMessages := m.prepareMessagesWithCompression(ctx, session, msgsCopy)
 		// 移除孤立的 tool result（压缩可能导致 assistant tool_call 被截断而 tool result 保留）
 		preparedMessages = removeOrphanedToolResults(preparedMessages, m.logger)
+		latestQuery := extractLatestUserQuery(preparedMessages)
+		if latestQuery != turnIntentQuery {
+			turnIntentQuery = latestQuery
+			turnIntentResult = router.NewIntentClassifier(
+				router.WithIntentLLMClassifier(m.intentLLMClassifier(sessionLLM)),
+				router.WithIntentClassifierTimeout(intentClassifierTimeout),
+			).Classify(ctx, session.ID, latestQuery)
+			turnIntent = resolveTurnIntent(session, latestQuery, turnIntentResult.Intent)
+			turnContract, hasTurnContract = NewIntentContract(turnIntent)
+			intentFulfillmentRetryCount = 0
+		}
 		pendingAttachments, _, _ := session.GetPendingData()
 		memoryInjection := session.ConsumeQualityMemoryInjection()
 		m.emitQualityEvent(sessionTraceID, sessionSpanID, session.ID, agentquality.Event{
@@ -387,7 +405,7 @@ func (m *Master) runReActLoop(
 			},
 		})
 
-		modelVisibleTools, toolRecallObs := modelVisibleToolsForSessionWithRecallObservationAndSkills(session, availableTools, m.skillMetasForModel(userID), extractLatestUserQuery(preparedMessages), m.config.ToolRecall)
+		modelVisibleTools, toolRecallObs := modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntent(session, availableTools, m.skillMetasForModel(userID), latestQuery, m.config.ToolRecall, turnIntent)
 		m.logger.Info("发起 LLM 调用",
 			zap.String("session_id", session.ID),
 			zap.String("model", sessionLLM.Model()),
@@ -411,19 +429,43 @@ func (m *Master) runReActLoop(
 		// 但 IM 上下文里若已有文档引用，必须强制 required，否则模型会绕过工具直接口头分析。
 		var toolChoice string
 		refs := refsForToolChoice(imCtx, imRefsRead)
-		if m.config.QualityGuards.ToolChoiceForce || len(refs) > 0 {
-			latestQuery := extractLatestUserQuery(preparedMessages)
+		if shouldEvaluateToolChoiceForTurn(latestQuery, refs, m.config.QualityGuards, turnIntent) {
 			// H3：注入真实 skillsIndex —— 让 "X 是什么 / 怎么用" 且 X 已知时回落到 auto，
 			// 避免对自家 skill 的闲聊式介绍也强制 required。nil 时 detectToolChoice
 			// 退化为保守立场（只要命中 whatIs 模式就 required）。
-			toolChoice = detectToolChoiceWithContext(latestQuery, m.buildSkillsIndex(userID), refs)
+			skillsIndex := m.buildSkillsIndex(userID)
+			toolChoice = detectToolChoiceWithIntent(latestQuery, skillsIndex, refs, turnIntent)
 			m.logger.Info("[quality-guards] P0-A tool_choice 决策",
 				zap.String("session_id", session.ID),
 				zap.Int("iteration", i+1),
 				zap.String("query_preview", truncateForLog(latestQuery, 80)),
 				zap.String("tool_choice", toolChoice),
 				zap.Int("im_refs_count", len(refs)),
+				zap.String("intent_kind", string(turnIntent.Kind)),
+				zap.String("intent_source", turnIntentResult.Source),
+				zap.Bool("intent_degraded", turnIntentResult.Degraded),
 			)
+			trigger := toolChoiceRequiredTrigger(latestQuery, skillsIndex, refs, turnIntent)
+			if turnIntent.Kind != "" {
+				m.enqueueMetric(observability.Metric{
+					Name:   "route_intent_kind_total",
+					Value:  1,
+					Labels: map[string]any{"kind": string(turnIntent.Kind)},
+				})
+			}
+			if toolChoice == ToolChoiceRequired {
+				m.enqueueMetric(observability.Metric{
+					Name:   "tool_choice_required_total",
+					Value:  1,
+					Labels: map[string]any{"trigger": trigger},
+				})
+				if trigger == "external_send" && !hasRequiredIntentCallableTool(modelVisibleTools, turnIntent) {
+					m.enqueueMetric(observability.Metric{
+						Name:  "tool_choice_required_but_no_tool_total",
+						Value: 1,
+					})
+				}
+			}
 		}
 
 		llmReq := llm.ChatWithToolsRequest{
@@ -432,7 +474,7 @@ func (m *Master) runReActLoop(
 			Tools:           modelVisibleTools,
 			Temperature:     temperature,
 			MaxTokens:       maxTokens,
-			ReasoningEffort: m.resolveModelReasoningEffort(reasoningEffort, extractLatestUserQuery(preparedMessages), sessionLLM.Model()),
+			ReasoningEffort: m.resolveModelReasoningEffort(reasoningEffort, latestQuery, sessionLLM.Model()),
 			ToolChoice:      toolChoice,
 		}
 		agentState := &AgentState{
@@ -799,6 +841,49 @@ func (m *Master) runReActLoop(
 			return errs.Wrap(errs.CodePlanExecFailed, "post validation failed", err)
 		}
 
+		var fulfillmentDecision intentFulfillmentGateDecision
+		if hasTurnContract {
+			contractEval := turnContract.Evaluate(preparedMessages, *resp)
+			fulfillmentDecision = (IntentFulfillmentGate{}).Decide(intentFulfillmentGateInput{
+				Evaluation: contractEval,
+				Response:   *resp,
+				RetryCount: intentFulfillmentRetryCount,
+			})
+			switch fulfillmentDecision.Action {
+			case IntentFulfillmentPass:
+				session.ClearPendingExternalSendIntent()
+			case IntentFulfillmentSuppressAndRetry:
+				session.RememberPendingExternalSendIntent(turnIntent)
+				m.emitQualityEvent(sessionTraceID, sessionSpanID, session.ID, agentquality.Event{
+					Name:        agentquality.EventAgentTurn,
+					Route:       routeFromSession(session),
+					FailureType: agentquality.FailureModel,
+					RetryReason: "intent_fulfillment",
+					FinalStatus: agentquality.StatusFail,
+					Attributes: map[string]any{
+						"reason": fulfillmentDecision.Reason,
+					},
+				})
+				m.logger.Warn("[quality-guards] Intent fulfillment 阻断未完成用户意图的回复",
+					zap.String("session_id", session.ID),
+					zap.Int("iteration", i+1),
+					zap.String("reason", fulfillmentDecision.Reason),
+					zap.Int("dropped_content_len", len(resp.Content)),
+				)
+				m.recordReflection(sessionTraceID, sessionSpanID, session, fulfillmentDecision.Reflection)
+				intentFulfillmentRetryCount++
+				continue
+			case IntentFulfillmentPause:
+				session.RememberPendingExternalSendIntent(turnIntent)
+			case IntentFulfillmentFail:
+				session.ClearPendingExternalSendIntent()
+				if !fulfillmentDecision.AllowAssistant {
+					m.recordReflection(sessionTraceID, sessionSpanID, session, fulfillmentDecision.Reflection)
+					return errs.New(errs.CodePlanExecFailed, "intent fulfillment failed after retry")
+				}
+			}
+		}
+
 		// ---- 以下路径仅在 guard pass 时执行 ----
 
 		// 插件 ChatMessageAfter hook（pass 后才触发，避免把坏 content 泄给插件）
@@ -907,7 +992,14 @@ func (m *Master) runReActLoop(
 			m.recordLongArtifactEvaluation(ctx, session.ID, sessionTraceID, sessionSpanID, resp.Content)
 			if !session.IsTerminated() {
 				decision := CompletionDecision{Status: TaskStatusCompleted, Completed: true}
-				if guard := m.planRuntimeGuard(); guard != nil {
+				if fulfillmentDecision.TaskStatus == TaskStatusPaused || fulfillmentDecision.TaskStatus == TaskStatusFailed {
+					decision = CompletionDecision{
+						Status:    fulfillmentDecision.TaskStatus,
+						Completed: fulfillmentDecision.TaskStatus == TaskStatusCompleted,
+					}
+				}
+				if (fulfillmentDecision.TaskStatus == "" || fulfillmentDecision.TaskStatus == TaskStatusCompleted) && m.planRuntimeGuard() != nil {
+					guard := m.planRuntimeGuard()
 					var guardErr error
 					decision, guardErr = guard.DecideTurnCompletion(ctx, session, resp.Content, sessionTraceID, sessionSpanID, sessionTraceID)
 					if guardErr != nil {
@@ -1225,6 +1317,8 @@ var terminalErrorPatterns = []string{
 	"invalid credentials",
 	"account suspended",
 	"工具策略拒绝",
+	"routedecision 拒绝",
+	"route decision denied",
 	"不在当前 profile 的允许列表中",
 	"不存在。可用工具",
 }
@@ -1280,17 +1374,246 @@ func canonicalFingerprint(toolName string, args json.RawMessage) string {
 }
 
 func toolInputName(args json.RawMessage) (string, bool) {
-	var in struct {
-		Name string `json:"name"`
-	}
-	if err := json.Unmarshal(args, &in); err != nil {
+	return toolInputString(args, "name")
+}
+
+func toolInputString(args json.RawMessage, key string) (string, bool) {
+	key = strings.TrimSpace(key)
+	if key == "" {
 		return "", false
 	}
-	name := strings.TrimSpace(in.Name)
-	if name == "" {
+	var payload map[string]any
+	if err := json.Unmarshal(args, &payload); err != nil {
 		return "", false
 	}
-	return name, true
+	value, ok := payload[key].(string)
+	if !ok {
+		if key == "name" {
+			if _, exists := payload[key]; !exists {
+				return "", true
+			}
+		}
+		return "", false
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", false
+	}
+	return value, true
+}
+
+func toolInputStrings(args json.RawMessage, key string) ([]string, bool) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return nil, false
+	}
+	if strings.HasSuffix(key, "[].action") {
+		arrayKey := strings.TrimSuffix(key, "[].action")
+		return toolInputArrayStringField(args, arrayKey, "action")
+	}
+	if value, ok := toolInputString(args, key); ok {
+		return []string{value}, true
+	}
+	return nil, false
+}
+
+func toolInputArrayStringField(args json.RawMessage, arrayKey, field string) ([]string, bool) {
+	arrayKey = strings.TrimSpace(arrayKey)
+	field = strings.TrimSpace(field)
+	if arrayKey == "" || field == "" {
+		return nil, false
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(args, &payload); err != nil {
+		return nil, false
+	}
+	raw, ok := payload[arrayKey]
+	if !ok {
+		return nil, false
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(raw, &items); err != nil || len(items) == 0 {
+		return nil, false
+	}
+	values := make([]string, 0, len(items))
+	for _, item := range items {
+		value, ok := item[field].(string)
+		if !ok {
+			return nil, false
+		}
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return nil, false
+		}
+		values = append(values, value)
+	}
+	return values, true
+}
+
+func routeInputDenyReason(toolName string, args json.RawMessage, allowed map[string]string) (string, map[string]string, bool) {
+	actuals := make(map[string]string, len(allowed))
+	for key, allowedValues := range allowed {
+		key = strings.TrimSpace(key)
+		allowedValues = strings.TrimSpace(allowedValues)
+		if key == "" || allowedValues == "" {
+			continue
+		}
+		actualValues, ok := toolInputStrings(args, key)
+		actual := strings.Join(actualValues, "|")
+		actuals[key] = actual
+		if !ok || !matchesAllowedToolInputValues(actualValues, allowedValues) {
+			reason := fmt.Sprintf("route decision denied %s %s %q; allowed %s is %q", toolName, key, actual, key, allowedValues)
+			return reason, actuals, true
+		}
+	}
+	return "", actuals, false
+}
+
+func textToolResult(content string, isError bool) *mcphost.ToolResult {
+	encoded, _ := json.Marshal(content)
+	return &mcphost.ToolResult{Content: encoded, IsError: isError}
+}
+
+func (m *Master) enforceToolExecutionGate(ctx context.Context, session *SessionState, sessionID, toolCallID, toolName string, args json.RawMessage, sessionTraceID, sessionSpanID string) (toolResult, bool) {
+	if m.masterFilter != nil && !m.masterFilter.IsAllowed(toolName) {
+		content := fmt.Sprintf("[工具策略拒绝: %q 不在当前 profile 的允许列表中]", toolName)
+		m.logger.Info("工具被策略过滤拒绝", zap.String("tool", toolName))
+		m.emitToolCallEvent(sessionID, ToolCallEvent{
+			ToolCallID: toolCallID,
+			ToolName:   toolName,
+			TurnID:     sessionTraceID,
+			Status:     "error",
+			Error:      fmt.Sprintf("tool %q is not allowed by tool policy", toolName),
+			SessionID:  sessionID,
+		})
+		m.logToolCall(ctx, sessionID, llm.ToolCall{ID: toolCallID, Name: toolName, Arguments: args}, string(args), content, true, 0)
+		return toolResult{Content: content, IsError: true, Terminal: true}, false
+	}
+
+	if session != nil && session.HasAllowedToolsDecision() && !session.IsAllowedTool(toolName) {
+		allowedTools := session.AllowedToolsSnapshot()
+		reason := fmt.Sprintf("route decision denied tool %q; allowed tools are %q", toolName, strings.Join(allowedTools, "|"))
+		content := "[RouteDecision 拒绝: " + reason + "]"
+		m.logger.Info("工具被 RouteDecision 拒绝",
+			zap.String("tool", toolName),
+			zap.Strings("allowed_tools", allowedTools),
+		)
+		m.emitToolCallEvent(sessionID, ToolCallEvent{
+			ToolCallID: toolCallID,
+			ToolName:   toolName,
+			TurnID:     sessionTraceID,
+			Status:     "error",
+			Error:      reason,
+			SessionID:  sessionID,
+		})
+		m.emitQualityEvent(sessionTraceID, sessionSpanID, sessionID, agentquality.Event{
+			Name:        agentquality.EventToolDecision,
+			Route:       routeFromSession(session),
+			FailureType: agentquality.FailurePermission,
+			FinalStatus: agentquality.StatusBlocked,
+			ToolDecision: agentquality.ToolDecision{
+				Actual:   toolName,
+				Decision: agentquality.DecisionRejected,
+				ArgsHash: hashToolArgs(args),
+			},
+			Attributes: map[string]any{
+				"reason":        reason,
+				"allowed_tools": allowedTools,
+			},
+		})
+		m.logToolCall(ctx, sessionID, llm.ToolCall{ID: toolCallID, Name: toolName, Arguments: args}, string(args), content, true, 0)
+		return toolResult{Content: content, IsError: true, Terminal: true}, false
+	}
+
+	if session != nil {
+		if allowedInputs := session.AllowedToolInputsSnapshot()[toolName]; len(allowedInputs) > 0 {
+			if reason, actuals, denied := routeInputDenyReason(toolName, args, allowedInputs); denied {
+				content := "[RouteDecision 拒绝: " + reason + "]"
+				m.logger.Info("工具输入被 RouteDecision 拒绝",
+					zap.String("tool", toolName),
+					zap.Any("actual_inputs", actuals),
+					zap.Any("allowed_inputs", allowedInputs),
+				)
+				m.emitToolCallEvent(sessionID, ToolCallEvent{
+					ToolCallID: toolCallID,
+					ToolName:   toolName,
+					TurnID:     sessionTraceID,
+					Status:     "error",
+					Error:      reason,
+					SessionID:  sessionID,
+				})
+				m.emitQualityEvent(sessionTraceID, sessionSpanID, sessionID, agentquality.Event{
+					Name:        agentquality.EventToolDecision,
+					Route:       routeFromSession(session),
+					FailureType: agentquality.FailurePermission,
+					FinalStatus: agentquality.StatusBlocked,
+					ToolDecision: agentquality.ToolDecision{
+						Actual:   toolName,
+						Decision: agentquality.DecisionRejected,
+						ArgsHash: hashToolArgs(args),
+					},
+					Attributes: map[string]any{
+						"reason":         reason,
+						"allowed_inputs": allowedInputs,
+						"actual_inputs":  actuals,
+					},
+				})
+				m.logToolCall(ctx, sessionID, llm.ToolCall{ID: toolCallID, Name: toolName, Arguments: args}, string(args), content, true, 0)
+				return toolResult{Content: content, IsError: true, Terminal: true}, false
+			}
+		}
+	}
+
+	if m.permMgr != nil && m.hitlBroker != nil && m.hitlBroker.Enabled() && !toolctx.ShouldSkipPermission(ctx) {
+		ctxWithSession := toolctx.WithSessionID(ctx, sessionID)
+		if err := m.permMgr.CheckPermission(ctxWithSession, toolName, args); err != nil {
+			content := fmt.Sprintf("[权限拒绝: %v]", err)
+			m.logger.Info("工具执行被拒绝",
+				zap.String("tool", toolName),
+				zap.Error(err))
+			m.emitToolCallEvent(sessionID, ToolCallEvent{
+				ToolCallID: toolCallID,
+				ToolName:   toolName,
+				TurnID:     sessionTraceID,
+				Status:     "error",
+				Error:      err.Error(),
+				SessionID:  sessionID,
+			})
+			m.logToolCall(ctx, sessionID, llm.ToolCall{ID: toolCallID, Name: toolName, Arguments: args}, "", content, true, 0)
+			return toolResult{Content: content, IsError: true, Terminal: true}, false
+		}
+	}
+	return toolResult{}, true
+}
+
+func matchesAllowedToolInputValue(actual, allowedValues string) bool {
+	return matchesAllowedToolInputValues([]string{actual}, allowedValues)
+}
+
+func matchesAllowedToolInputValues(actuals []string, allowedValues string) bool {
+	if len(actuals) == 0 {
+		return false
+	}
+	for _, actual := range actuals {
+		if !matchesSingleAllowedToolInputValue(actual, allowedValues) {
+			return false
+		}
+	}
+	return true
+}
+
+func matchesSingleAllowedToolInputValue(actual, allowedValues string) bool {
+	actual = strings.TrimSpace(actual)
+	for _, allowed := range strings.Split(allowedValues, "|") {
+		allowed = strings.TrimSpace(allowed)
+		if allowed == routeEmptyInputValue && actual == "" {
+			return true
+		}
+		if actual == allowed {
+			return true
+		}
+	}
+	return false
 }
 
 // executeTool 执行单个工具调用，返回结果
@@ -1376,78 +1699,8 @@ func (m *Master) executeTool(ctx context.Context, session *SessionState, userID 
 	})
 
 	// 工具策略过滤检查：确保 LLM 不会调用被 profile/deny 排除的工具
-	if m.masterFilter != nil && !m.masterFilter.IsAllowed(toolCall.Name) {
-		m.logger.Info("工具被策略过滤拒绝",
-			zap.String("tool", toolCall.Name))
-		m.emitToolCallEvent(sessionID, ToolCallEvent{
-			ToolCallID: toolCall.ID,
-			ToolName:   toolCall.Name,
-			TurnID:     sessionTraceID,
-			Status:     "error",
-			Error:      fmt.Sprintf("tool %q is not allowed by tool policy", toolCall.Name),
-			SessionID:  sessionID,
-		})
-		m.logToolCall(ctx, sessionID, toolCall, "", fmt.Sprintf("[工具策略拒绝: %q 不在当前 profile 的允许列表中]", toolCall.Name), true, 0)
-		return toolResult{Content: fmt.Sprintf("[工具策略拒绝: %q 不在当前 profile 的允许列表中]", toolCall.Name), IsError: true, Terminal: true}
-	}
-
-	if allowed, ok := session.AllowedToolInput(toolCall.Name, "name"); ok {
-		actual, hasName := toolInputName(args)
-		if !hasName || actual != allowed {
-			reason := fmt.Sprintf("route decision denied %s name %q; allowed name is %q", toolCall.Name, actual, allowed)
-			m.logger.Info("工具输入被 RouteDecision 拒绝",
-				zap.String("tool", toolCall.Name),
-				zap.String("actual_name", actual),
-				zap.String("allowed_name", allowed),
-			)
-			m.emitToolCallEvent(sessionID, ToolCallEvent{
-				ToolCallID: toolCall.ID,
-				ToolName:   toolCall.Name,
-				TurnID:     sessionTraceID,
-				Status:     "error",
-				Error:      reason,
-				SessionID:  sessionID,
-			})
-			m.emitQualityEvent(sessionTraceID, sessionSpanID, sessionID, agentquality.Event{
-				Name:        agentquality.EventToolDecision,
-				Route:       routeFromSession(session),
-				FailureType: agentquality.FailurePermission,
-				FinalStatus: agentquality.StatusBlocked,
-				ToolDecision: agentquality.ToolDecision{
-					Actual:   toolCall.Name,
-					Decision: agentquality.DecisionRejected,
-					ArgsHash: hashToolArgs(args),
-				},
-				Attributes: map[string]any{
-					"reason":       reason,
-					"allowed_name": allowed,
-					"actual_name":  actual,
-				},
-			})
-			m.logToolCall(ctx, sessionID, toolCall, string(args), "[RouteDecision 拒绝: "+reason+"]", true, 0)
-			return toolResult{Content: "[RouteDecision 拒绝: " + reason + "]", IsError: true, Terminal: true}
-		}
-	}
-
-	// 权限检查：仅在 HITL 启用且配置了 permMgr 时进行，否则直接执行
-	// 如果 context 中标记了 SkipPermission（同任务内已审批过的 tool+args 组合），跳过权限检查
-	if m.permMgr != nil && m.hitlBroker != nil && m.hitlBroker.Enabled() && !toolctx.ShouldSkipPermission(ctx) {
-		ctxWithSession := toolctx.WithSessionID(ctx, sessionID)
-		if err := m.permMgr.CheckPermission(ctxWithSession, toolCall.Name, args); err != nil {
-			m.logger.Info("工具执行被拒绝",
-				zap.String("tool", toolCall.Name),
-				zap.Error(err))
-			m.emitToolCallEvent(sessionID, ToolCallEvent{
-				ToolCallID: toolCall.ID,
-				ToolName:   toolCall.Name,
-				TurnID:     sessionTraceID,
-				Status:     "error",
-				Error:      err.Error(),
-				SessionID:  sessionID,
-			})
-			m.logToolCall(ctx, sessionID, toolCall, "", fmt.Sprintf("[权限拒绝: %v]", err), true, 0)
-			return toolResult{Content: fmt.Sprintf("[权限拒绝: %v]", err), IsError: true, Terminal: true}
-		}
+	if tr, ok := m.enforceToolExecutionGate(ctx, session, sessionID, toolCall.ID, toolCall.Name, args, sessionTraceID, sessionSpanID); !ok {
+		return tr
 	}
 
 	start := time.Now()
@@ -1480,8 +1733,16 @@ func (m *Master) executeTool(ctx context.Context, session *SessionState, userID 
 		if runCall == nil {
 			return nil, fmt.Errorf("middleware passed nil tool call")
 		}
+		if tr, ok := m.enforceToolExecutionGate(runCtx, session, sessionID, toolCall.ID, runCall.Name, runCall.Arguments, sessionTraceID, sessionSpanID); !ok {
+			return &ToolResult{Result: textToolResult(tr.Content, true)}, nil
+		}
 		if m.toolBridge != nil {
-			result, execErr := m.toolBridge.ExecuteDirect(runCtx, runCall.Name, runCall.Arguments)
+			result, execErr := m.toolBridge.ExecuteDirect(runCtx, runCall.Name, runCall.Arguments, skills.WithDirectExecutionGate(func(gateCtx context.Context, gateToolName string, gateInput json.RawMessage) error {
+				if tr, ok := m.enforceToolExecutionGate(gateCtx, session, sessionID, toolCall.ID, gateToolName, gateInput, sessionTraceID, sessionSpanID); !ok {
+					return errs.New(errs.CodePermissionDenied, tr.Content)
+				}
+				return nil
+			}))
 			return &ToolResult{Result: result}, execErr
 		}
 		if m.mcpHost != nil {

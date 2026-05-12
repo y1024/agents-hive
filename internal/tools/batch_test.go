@@ -205,6 +205,28 @@ func (g *testNestedToolGate) CheckNestedToolAllowed(ctx context.Context, toolNam
 	return nil
 }
 
+type testNestedToolInputGate struct {
+	denyTool string
+	denyText string
+	called   int
+}
+
+func (g *testNestedToolInputGate) CheckNestedToolAllowed(ctx context.Context, toolName string) error {
+	g.called++
+	if toolName == g.denyTool {
+		return fmt.Errorf("legacy gate denied %s", toolName)
+	}
+	return nil
+}
+
+func (g *testNestedToolInputGate) CheckNestedToolInputAllowed(ctx context.Context, toolName string, input json.RawMessage) error {
+	g.called++
+	if toolName == g.denyTool && strings.Contains(string(input), g.denyText) {
+		return fmt.Errorf("route decision denied nested tool %s", toolName)
+	}
+	return nil
+}
+
 func TestBatchNestedToolGateRejectsBeforeExecution(t *testing.T) {
 	logger := zap.NewNop()
 	host := mcphost.NewHost(logger)
@@ -257,6 +279,61 @@ func TestBatchNestedToolGateRejectsBeforeExecution(t *testing.T) {
 	}
 	if !strings.Contains(output.Results[0].Error, "plan mode gate denied") {
 		t.Fatalf("错误消息未包含 gate 原因: %q", output.Results[0].Error)
+	}
+}
+
+func TestBatchNestedToolInputGateRejectsBeforeExecution(t *testing.T) {
+	logger := zap.NewNop()
+	host := mcphost.NewHost(logger)
+
+	executed := false
+	host.RegisterTool(
+		mcphost.ToolDefinition{
+			Name:        "memory",
+			Description: "测试 memory 工具",
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+		},
+		func(ctx context.Context, input json.RawMessage) (*mcphost.ToolResult, error) {
+			executed = true
+			return textResult("不应该执行"), nil
+		},
+	)
+
+	gate := &testNestedToolInputGate{denyTool: "memory", denyText: `"operation":"delete"`}
+	registerBatch(host, logger, gate)
+
+	inputJSON, err := json.Marshal(batchInput{
+		Operations: []batchOperation{
+			{Tool: "memory", Input: json.RawMessage(`{"operation":"delete","id":1}`)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("序列化输入失败: %v", err)
+	}
+
+	result, err := host.ExecuteTool(context.Background(), "batch", inputJSON)
+	if err != nil {
+		t.Fatalf("ExecuteTool 失败: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("期望 batch 返回错误")
+	}
+	if executed {
+		t.Fatal("input gate 拒绝后不应执行子工具")
+	}
+	if gate.called != 1 {
+		t.Fatalf("期望 input gate 调用 1 次，实际 %d", gate.called)
+	}
+
+	var output batchOutput
+	if err := json.Unmarshal(result.Content, &output); err != nil {
+		t.Fatalf("解析输出失败: %v", err)
+	}
+	if output.Failed != 1 || output.Results[0].Success {
+		t.Fatalf("期望 1 个失败结果: %+v", output)
+	}
+	if !strings.Contains(output.Results[0].Error, "route decision denied nested tool") {
+		t.Fatalf("错误消息未包含 input gate 原因: %q", output.Results[0].Error)
 	}
 }
 

@@ -3,6 +3,7 @@ package explore
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/chef-guo/agents-hive/internal/mcphost"
 	"github.com/chef-guo/agents-hive/internal/skills"
 	"github.com/chef-guo/agents-hive/internal/subagent"
+	"github.com/chef-guo/agents-hive/internal/toolctx"
 )
 
 // TestExploreAgentCreation 测试 Explore Agent 的创建
@@ -234,6 +236,24 @@ func (m *mockLLMClient) ChatWithToolsStream(ctx context.Context, req llm.ChatWit
 	return m.ChatWithTools(ctx, req)
 }
 
+type toolCallingLLMClient struct{}
+
+func (m *toolCallingLLMClient) ChatWithTools(ctx context.Context, req llm.ChatWithToolsRequest) (*llm.ChatWithToolsResponse, error) {
+	return &llm.ChatWithToolsResponse{Content: `{"summary":"done","structure":{"root_path":"/"},"key_files":[],"patterns":[],"insights":[]}`}, nil
+}
+
+func (m *toolCallingLLMClient) ChatWithToolsStream(ctx context.Context, req llm.ChatWithToolsRequest, onChunk llm.StreamCallback) (*llm.ChatWithToolsResponse, error) {
+	if len(req.Messages) <= 1 {
+		return &llm.ChatWithToolsResponse{
+			ToolCalls: []llm.ToolCall{
+				{ID: "tc1", Name: "read_file", Arguments: json.RawMessage(`{"path":"README.md"}`)},
+			},
+			FinishReason: "tool_calls",
+		}, nil
+	}
+	return m.ChatWithTools(ctx, req)
+}
+
 type mockToolBridge struct{}
 
 func (m *mockToolBridge) CallTool(ctx context.Context, filter *skills.ToolFilter, perm *skills.PermissionManager, toolName string, input json.RawMessage) (*mcphost.ToolResult, error) {
@@ -354,4 +374,40 @@ func TestToolFilterIntegration(t *testing.T) {
 	assert.True(t, toolNames["bash"])
 	assert.False(t, toolNames["write_file"])
 	assert.False(t, toolNames["edit"])
+}
+
+func TestExploreAgentInjectsTaskSessionIDIntoToolGate(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+	host := mcphost.NewHost(logger)
+	host.RegisterTool(
+		mcphost.ToolDefinition{Name: "read_file", Description: "读取文件"},
+		func(context.Context, json.RawMessage) (*mcphost.ToolResult, error) {
+			return &mcphost.ToolResult{Content: json.RawMessage(`"ok"`)}, nil
+		},
+	)
+	bridge := skills.NewToolBridge(host, logger)
+	var gateSessionID string
+	bridge.SetExecutionGate(func(ctx context.Context, toolName string, input json.RawMessage) error {
+		gateSessionID = toolctx.GetSessionID(ctx)
+		if gateSessionID == "" {
+			return errors.New("missing session id")
+		}
+		return nil
+	})
+
+	loop := subagent.NewAgentLoopWithLLMClient("explore", &toolCallingLLMClient{}, bridge, nil, logger)
+	loop.SetMaxTurns(5)
+	handler := makeExploreHandler(loop, nil, nil, logger)
+
+	resp := handler(context.Background(), subagent.TaskRequest{
+		ID:        "explore-session-gate",
+		Type:      "explore",
+		SessionID: "sess-explore-gate",
+		Payload: mustMarshal(t, ExploreRequest{
+			Target: "/test/project",
+		}),
+	})
+
+	require.Equal(t, "completed", resp.Status, resp.Error)
+	assert.Equal(t, "sess-explore-gate", gateSessionID)
 }

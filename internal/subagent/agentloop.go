@@ -12,6 +12,7 @@ import (
 	"github.com/chef-guo/agents-hive/internal/errs"
 	"github.com/chef-guo/agents-hive/internal/llm"
 	"github.com/chef-guo/agents-hive/internal/mcphost"
+	"github.com/chef-guo/agents-hive/internal/observability"
 	"github.com/chef-guo/agents-hive/internal/skills"
 	"github.com/chef-guo/agents-hive/internal/toolctx"
 )
@@ -71,23 +72,37 @@ type AgentCallbacks struct {
 
 // AgentLoop 运行迭代的 LLM → tool-call → LLM 循环
 type AgentLoop struct {
-	llmClient   LLMClient
-	llmResolver LLMClientResolver // 动态获取 LLM client（优先于 llmClient）
-	toolBridge  ToolBridge
-	permMgr     *skills.PermissionManager
-	logger      *zap.Logger
-	maxTurns    int                  // 默认 50
-	agentID     string               // SubAgent ID（用于 ToolContext）
-	sessionID   string               // 关联的会话 ID（可选，用于权限审批上下文）
-	callerType      toolctx.CallerType   // 调用者类型（默认 CallerSubAgent，固定 Agent 设为 CallerFixedAgent）
-	progressFn      ProgressCallback     // 进度回调（可选）
-	streamFn        StreamCallback       // 流式内容回调（可选）
-	llmCompleteFn   LLMCompleteCallback  // LLM 调用完成回调（可选，用于成本追踪）
-	userID          string               // 用户 ID（用于成本追踪，从 session.UserID 获取）
+	llmClient     LLMClient
+	llmResolver   LLMClientResolver // 动态获取 LLM client（优先于 llmClient）
+	toolBridge    ToolBridge
+	permMgr       *skills.PermissionManager
+	logger        *zap.Logger
+	maxTurns      int                 // 默认 50
+	agentID       string              // SubAgent ID（用于 ToolContext）
+	sessionID     string              // 关联的会话 ID（可选，用于权限审批上下文）
+	callerType    toolctx.CallerType  // 调用者类型（默认 CallerSubAgent，固定 Agent 设为 CallerFixedAgent）
+	progressFn    ProgressCallback    // 进度回调（可选）
+	streamFn      StreamCallback      // 流式内容回调（可选）
+	llmCompleteFn LLMCompleteCallback // LLM 调用完成回调（可选，用于成本追踪）
+	userID        string              // 用户 ID（用于成本追踪，从 session.UserID 获取）
 }
 
 // NewAgentLoop 创建新的 AgentLoop
 func NewAgentLoop(agentID string, client *llm.Client, bridge *skills.ToolBridge, perm *skills.PermissionManager, logger *zap.Logger) *AgentLoop {
+	var llmClient LLMClient
+	if client != nil {
+		llmClient = client
+	}
+	var toolBridge ToolBridge
+	if bridge != nil {
+		toolBridge = bridge
+	}
+	return NewAgentLoopWithLLMClient(agentID, llmClient, toolBridge, perm, logger)
+}
+
+// NewAgentLoopWithLLMClient 使用已抽象的 LLMClient / ToolBridge 创建 AgentLoop。
+// 它主要用于固定 Agent 和测试注入，不要求调用方持有具体 *llm.Client。
+func NewAgentLoopWithLLMClient(agentID string, client LLMClient, bridge ToolBridge, perm *skills.PermissionManager, logger *zap.Logger) *AgentLoop {
 	return &AgentLoop{
 		llmClient:  client,
 		toolBridge: bridge,
@@ -102,9 +117,13 @@ func NewAgentLoop(agentID string, client *llm.Client, bridge *skills.ToolBridge,
 // NewAgentLoopWithResolver 创建使用动态 LLM 路由的 AgentLoop。
 // resolver 在每次 LLM 调用前被调用，获取当前最优的 client。
 func NewAgentLoopWithResolver(agentID string, resolver LLMClientResolver, bridge *skills.ToolBridge, perm *skills.PermissionManager, logger *zap.Logger) *AgentLoop {
+	var toolBridge ToolBridge
+	if bridge != nil {
+		toolBridge = bridge
+	}
 	return &AgentLoop{
 		llmResolver: resolver,
-		toolBridge:  bridge,
+		toolBridge:  toolBridge,
 		permMgr:     perm,
 		logger:      logger,
 		maxTurns:    50,
@@ -288,12 +307,8 @@ func (a *AgentLoop) Run(ctx context.Context, systemPrompt string, messages []llm
 				toolTimeout = 60 * time.Minute
 			}
 			toolCtx, toolCancel := context.WithTimeout(ctx, toolTimeout)
-			// 注入 ToolContext，标记调用者类型，供工具层做权限/审计判断
-			toolCtx = toolctx.WithToolContext(toolCtx, &toolctx.ToolContext{
-				CallerType: a.callerType,
-				CallerName: a.agentID,
-				Depth:      turn,
-			})
+			nextToolCtx := inheritedToolContextForCall(ctx, a.callerType, a.agentID, turn, tc.ID)
+			toolCtx = toolctx.WithToolContext(toolCtx, &nextToolCtx)
 			// 注入 sessionID，供权限审批时关联到正确的会话
 			// 优先从传入的 ctx 取（并发安全），其次从实例字段取（向后兼容）
 			if sid := toolctx.GetSessionID(ctx); sid != "" {
@@ -378,4 +393,24 @@ func (a *AgentLoop) Run(ctx context.Context, systemPrompt string, messages []llm
 // SetMaxTurns 设置最大迭代轮次
 func (a *AgentLoop) SetMaxTurns(maxTurns int) {
 	a.maxTurns = maxTurns
+}
+
+func inheritedToolContextForCall(ctx context.Context, callerType toolctx.CallerType, callerName string, depth int, toolCallID string) toolctx.ToolContext {
+	parent := toolctx.GetToolContext(ctx)
+	next := *parent
+	next.CallerType = callerType
+	next.CallerName = callerName
+	next.Depth = depth
+	if next.TraceID == "" {
+		next.TraceID = callerName
+	}
+	if parent.SpanID != "" {
+		next.ParentSpanID = parent.SpanID
+	}
+	next.SpanID = observability.NewSpanID()
+	if next.TurnID == "" {
+		next.TurnID = next.TraceID
+	}
+	next.ToolCallID = toolCallID
+	return next
 }

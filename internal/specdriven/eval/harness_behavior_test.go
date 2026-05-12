@@ -746,7 +746,7 @@ func (s *stubLogger) Logf(format string, args ...any) {
 // ok=true / required-fail / optional-fail（+ WARN log）——without 靠 t.Run 失败
 // 传递来触发（否则 parent test 会被 subtest 失败染红）。Sprint 2.4 蓝军 R1 产物：
 // 把 RunFixtures 主循环里的 switch 抽出后，这三条分支终于能在"test 全绿"前提下
-// 被真实覆盖；per-function coverage 从 73.1% 提升到 ≥85%（sprint_gate.sh assertion 7）。
+// 被真实覆盖；per-function coverage 从 73.1% 提升到 ≥85%。
 func TestSummary_RecordCaseResult(t *testing.T) {
 	mkRequired := func() LoadedCase {
 		return LoadedCase{Path: "testdata/mock_required.json", Case: Case{Name: "mock_required", Required: true}}

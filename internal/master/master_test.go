@@ -132,6 +132,8 @@ func TestExecuteTask_PropagatesTraceContextToTaskRequest(t *testing.T) {
 		CallerName: "master",
 		TraceID:    "trace-parent",
 		SpanID:     "span-tool",
+		TurnID:     "turn-parent",
+		ToolCallID: "call-parent",
 	})
 	_, err := master.ExecuteTask(ctx, "research", "调查", nil)
 	require.NoError(t, err)
@@ -140,6 +142,8 @@ func TestExecuteTask_PropagatesTraceContextToTaskRequest(t *testing.T) {
 	assert.Equal(t, "trace-parent", got.ParentTraceID)
 	assert.Equal(t, "span-tool", got.ParentSpanID)
 	assert.Equal(t, "trace-parent:research", got.TraceID)
+	assert.Equal(t, "turn-parent", got.TurnID)
+	assert.Equal(t, "call-parent", got.ToolCallID)
 }
 
 func TestObservabilityTraceLimit(t *testing.T) {

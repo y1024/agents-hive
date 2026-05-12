@@ -188,9 +188,21 @@ func TestBuildToolPrompt_UsesToolSearchForDeferredDiscovery(t *testing.T) {
 	})
 
 	assert.Contains(t, prompt, "tool_search")
-	assert.Contains(t, prompt, "按需发现")
+	assert.Contains(t, prompt, "查看工具目录")
 	assert.NotContains(t, prompt, "直接调用任何已注册的工具")
 	assert.NotContains(t, prompt, "**custom_ext**")
+}
+
+func TestBuildToolPrompt_ToolSearchDoesNotPromiseAuthorization(t *testing.T) {
+	m, _ := newTestMaster(t)
+	prompt := m.buildToolPrompt([]mcphost.ToolDefinition{
+		{Name: "tool_search", Description: "搜索工具", Core: true},
+	})
+
+	assert.Contains(t, prompt, "tool_search")
+	assert.Contains(t, prompt, "只用于发现工具")
+	assert.Contains(t, prompt, "不会授权执行")
+	assert.NotContains(t, prompt, "发现后的工具会在后续轮次进入可调用列表")
 }
 
 func systemPromptContentFromEmbedded(planRuntimeEnabled bool) string {

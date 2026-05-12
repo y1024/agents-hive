@@ -13,15 +13,13 @@ import (
 )
 
 const (
-	wechatRendererThrottle     = 2 * time.Second
 	wechatRendererFinalTimeout = 3 * time.Second
 )
 
 type wechatRendererState struct {
-	lastContent     string
-	lastFullContent string
-	lastSentAt      time.Time
-	renderedInputs  map[string]bool
+	lastAssistantContent string
+	lastSentContent      string
+	renderedInputs       map[string]bool
 }
 
 func (p *Plugin) RenderEventStream(ctx context.Context, scope channel.SessionScope, eventCh <-chan master.BroadcastMessage) error {
@@ -39,7 +37,7 @@ func (p *Plugin) RenderEventStream(ctx context.Context, scope channel.SessionSco
 				continue
 			}
 			if err := p.renderWechatEvent(ctx, scope, state, ev); err != nil {
-				return channel.WrapRendererErr(err, state.lastFullContent)
+				return channel.WrapRendererErr(err, state.lastSentContent)
 			}
 		}
 	}
@@ -51,17 +49,20 @@ func (p *Plugin) renderWechatEvent(ctx context.Context, scope channel.SessionSco
 		return p.sendRendererText(ctx, scope, state, "收到，正在处理...")
 	case master.EventTypeMessage:
 		text, partial, role, hasToolCalls := extractWechatMessagePayload(ev.Payload)
-		if role != "" && role != "assistant" {
-			return nil
-		}
 		if text == "" {
 			return nil
 		}
-		state.lastContent = text
+		if role == "tool" {
+			return p.sendRendererText(ctx, scope, state, formatWechatToolMessage(ev.Payload, text))
+		}
+		if role != "" && role != "assistant" {
+			return nil
+		}
+		state.lastAssistantContent = text
 		if hasToolCalls {
 			partial = true
 		}
-		if partial && !state.lastSentAt.IsZero() && time.Since(state.lastSentAt) < wechatRendererThrottle {
+		if partial {
 			return nil
 		}
 		return p.sendRendererText(ctx, scope, state, text)
@@ -87,6 +88,12 @@ func (p *Plugin) renderWechatEvent(ctx context.Context, scope channel.SessionSco
 			return nil
 		}
 		return p.sendRendererText(ctx, scope, state, "处理失败："+text)
+	case master.EventTypeAgentStatus:
+		text := formatWechatAgentStatus(ev.Payload)
+		if text == "" {
+			return nil
+		}
+		return p.sendRendererText(ctx, scope, state, text)
 	default:
 		return nil
 	}
@@ -94,7 +101,7 @@ func (p *Plugin) renderWechatEvent(ctx context.Context, scope channel.SessionSco
 
 func (p *Plugin) sendRendererText(ctx context.Context, scope channel.SessionScope, state *wechatRendererState, text string) error {
 	text = strings.TrimSpace(text)
-	if text == "" || text == state.lastFullContent {
+	if text == "" || text == state.lastSentContent {
 		return nil
 	}
 	if scope.OwnerUserID == "" || scope.TenantKey == "" || scope.ChatID == "" {
@@ -110,20 +117,26 @@ func (p *Plugin) sendRendererText(ctx context.Context, scope channel.SessionScop
 		ReplyToken:  scope.ReplyToken,
 	}
 	if err := p.Send(ctx, msg); err != nil {
+		if p.logger != nil {
+			p.logger.Warn("wechatbot renderer 发送失败",
+				zap.String("session_id", scope.SessionID),
+				zap.String("chat_id", scope.ChatID),
+				zap.Int("content_len", len([]rune(text))),
+				zap.Error(err))
+		}
 		return err
 	}
-	state.lastFullContent = text
-	state.lastSentAt = time.Now()
+	state.lastSentContent = text
 	return nil
 }
 
 func (p *Plugin) finalRendererFlush(scope channel.SessionScope, state *wechatRendererState) {
-	if state == nil || strings.TrimSpace(state.lastContent) == "" || state.lastContent == state.lastFullContent {
+	if state == nil || strings.TrimSpace(state.lastAssistantContent) == "" || state.lastAssistantContent == state.lastSentContent {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), wechatRendererFinalTimeout)
 	defer cancel()
-	if err := p.sendRendererText(ctx, scope, state, state.lastContent); err != nil && p.logger != nil {
+	if err := p.sendRendererText(ctx, scope, state, state.lastAssistantContent); err != nil && p.logger != nil {
 		p.logger.Warn("wechatbot renderer 最终 flush 失败",
 			zap.String("session_id", scope.SessionID),
 			zap.Error(err))
@@ -166,6 +179,50 @@ func formatWechatInputRequest(req *master.InputRequest) string {
 		}
 	}
 	return strings.TrimSpace(sb.String())
+}
+
+func formatWechatAgentStatus(payload any) string {
+	var status, msg, errText string
+	switch v := payload.(type) {
+	case map[string]any:
+		status, _ = v["status"].(string)
+		msg, _ = v["message"].(string)
+		errText, _ = v["error"].(string)
+	}
+	switch status {
+	case "completed":
+		return "完成。"
+	case "error":
+		if errText != "" {
+			return "任务失败：" + errText
+		}
+		return "任务失败。"
+	case "paused":
+		if msg != "" {
+			return "已暂停：" + msg
+		}
+		return "已暂停。"
+	default:
+		return ""
+	}
+}
+
+func formatWechatToolMessage(payload any, text string) string {
+	toolName := ""
+	isErr := false
+	switch v := payload.(type) {
+	case map[string]any:
+		toolName, _ = v["tool_name"].(string)
+		isErr, _ = v["is_error"].(bool)
+	}
+	prefix := "执行结果"
+	if toolName != "" {
+		prefix += "：" + toolName
+	}
+	if isErr {
+		prefix = strings.Replace(prefix, "执行结果", "执行失败", 1)
+	}
+	return prefix + "\n" + strings.TrimSpace(text)
 }
 
 type wechatToolCallPayload struct {

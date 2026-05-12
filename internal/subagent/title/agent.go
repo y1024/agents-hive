@@ -19,9 +19,9 @@ type Agent struct {
 	llm           *llm.Client
 	llmResolver   subagent.LLMClientResolver // 动态获取 LLM client（优先于静态 llm）
 	llmCompleteFn subagent.LLMCompleteCallback
-	promptLoader  any            // PromptLoader（可选，用于 prompt 外部化）
-	sessionID     string        // 当前任务的会话 ID（由 handleTask 从 TaskRequest 中提取）
-	userID        string        // 用户 ID（由 handleTask 从 TaskRequest 中提取）
+	promptLoader  any    // PromptLoader（可选，用于 prompt 外部化）
+	sessionID     string // 当前任务的会话 ID（由 handleTask 从 TaskRequest 中提取）
+	userID        string // 用户 ID（由 handleTask 从 TaskRequest 中提取）
 }
 
 // SetPromptLoader 设置 Prompt 外部化加载器（可选，nil 时使用硬编码默认值）
@@ -102,6 +102,7 @@ type SummaryRequest struct {
 
 // handleTask 处理标题/摘要生成任务
 func (a *Agent) handleTask(ctx context.Context, req subagent.TaskRequest) subagent.TaskResponse {
+	ctx = subagent.ContextFromTaskRequest(ctx, req)
 	a.sessionID = req.SessionID
 	a.userID = req.UserID
 	payload, _ := subagent.ExtractPayload(req)

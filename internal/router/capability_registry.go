@@ -31,8 +31,7 @@ type BuiltinToolRule struct {
 	Capabilities []Capability
 }
 
-// ToolActionRiskRule declares action/operation values that require approval even
-// when the tool itself has benign read/list operations.
+// ToolActionRiskRule 声明单个 action/operation 中需要审批的危险动作。
 type ToolActionRiskRule struct {
 	ToolName string
 	Actions  []string
@@ -74,8 +73,8 @@ var knownSkillWorkflowDomains = map[string]string{
 var builtinToolRules = map[string]BuiltinToolRule{
 	"apply_patch":                {Domain: "filesystem", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true},
 	"bash":                       {Domain: "filesystem", Invocation: InvocationDirectTool, Risk: RiskRuntimeExec, SideEffect: true, Capabilities: []Capability{CapabilityRuntimeExec}},
-	"batch":                      {Domain: "agent", Invocation: InvocationDirectTool, Risk: RiskReadOnly, ReadOnly: true},
-	"browser_interact":           {Domain: "web", Invocation: InvocationDirectTool, Risk: RiskReadOnly, ReadOnly: true},
+	"batch":                      {Domain: "agent", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true},
+	"browser_interact":           {Domain: "web", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true},
 	"create_handoff_summary":     {Domain: "agent", Invocation: InvocationDirectTool, Risk: RiskReadOnly, ReadOnly: true},
 	"create_tool":                {Domain: "tools", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true, Capabilities: []Capability{CapabilityMetaToolRegister}},
 	"edit":                       {Domain: "filesystem", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true},
@@ -84,22 +83,24 @@ var builtinToolRules = map[string]BuiltinToolRule{
 	"feishu_api":                 {Domain: "messaging", Invocation: InvocationDirectTool, Risk: RiskExternalWrite, SideEffect: true, Capabilities: []Capability{CapabilityExternalSend}},
 	"finish_plan":                {Domain: "planning", Invocation: InvocationDirectTool, Risk: RiskReadOnly, ReadOnly: true},
 	"generate_image":             {Domain: "media", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true},
+	"generate_video":             {Domain: "media", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true},
 	"glob":                       {Domain: "filesystem", Invocation: InvocationDirectTool, Risk: RiskReadOnly, ReadOnly: true},
 	"grep":                       {Domain: "filesystem", Invocation: InvocationDirectTool, Risk: RiskReadOnly, ReadOnly: true},
 	"ls":                         {Domain: "filesystem", Invocation: InvocationDirectTool, Risk: RiskReadOnly, ReadOnly: true},
-	"memory":                     {Domain: "agent", Invocation: InvocationDirectTool, Risk: RiskReadOnly, ReadOnly: true},
+	"memory":                     {Domain: "agent", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true},
 	"multi_edit":                 {Domain: "filesystem", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true},
 	"multiedit":                  {Domain: "filesystem", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true},
-	"parallel_dispatch":          {Domain: "agent", Invocation: InvocationDirectTool, Risk: RiskReadOnly, ReadOnly: true},
+	"parallel_dispatch":          {Domain: "agent", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true},
 	"promote_todos_to_taskboard": {Domain: "taskboard", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true},
 	"question":                   {Domain: "agent", Invocation: InvocationDirectTool, Risk: RiskReadOnly, ReadOnly: true},
 	"read_file":                  {Domain: "filesystem", Invocation: InvocationDirectTool, Risk: RiskReadOnly, ReadOnly: true},
 	"remove_tool":                {Domain: "tools", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true, Capabilities: []Capability{CapabilityMetaToolRegister}},
 	"send_im_message":            {Domain: "messaging", Invocation: InvocationDirectTool, Risk: RiskExternalWrite, SideEffect: true, Capabilities: []Capability{CapabilityExternalSend}},
 	"skill":                      {Domain: "skills", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true},
+	"skill_install":              {Domain: "skills", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true, Capabilities: []Capability{CapabilityMetaSkillCreate}},
 	"skill_search":               {Domain: "skills", Invocation: InvocationDirectTool, Risk: RiskReadOnly, ReadOnly: true},
-	"spawn_agent":                {Domain: "agent", Invocation: InvocationDirectTool, Risk: RiskReadOnly, ReadOnly: true},
-	"task":                       {Domain: "agent", Invocation: InvocationDirectTool, Risk: RiskReadOnly, ReadOnly: true},
+	"spawn_agent":                {Domain: "agent", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true},
+	"task":                       {Domain: "agent", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true},
 	"taskboard":                  {Domain: "taskboard", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true},
 	"text_to_speech":             {Domain: "media", Invocation: InvocationDirectTool, Risk: RiskReadOnly, ReadOnly: true},
 	"tool_search":                {Domain: "discovery", Invocation: InvocationDiscoveryOnly, Risk: RiskReadOnly, ReadOnly: true},
@@ -120,9 +121,6 @@ var shellCommandTools = map[string]bool{
 
 var structuredDangerousActions = map[string]map[string]bool{
 	"feishu_api": {
-		"send_message":          true,
-		"send_image":            true,
-		"send_file":             true,
 		"create_approval":       true,
 		"create_bitable_record": true,
 		"update_bitable_record": true,
@@ -135,12 +133,54 @@ var structuredDangerousActions = map[string]map[string]bool{
 }
 
 var structuredDangerousTools = map[string]bool{
-	"create_tool":     true,
-	"remove_tool":     true,
-	"send_im_message": true,
+	"create_tool": true,
+	"remove_tool": true,
 }
 
-var mixedReadWriteTools = map[string]bool{}
+type mixedActionRule struct {
+	Field               string
+	ReadOnlyActions     []string
+	LocalWriteActions   []string
+	ExternalSendActions []string
+}
+
+var mixedActionRules = map[string]mixedActionRule{
+	"feishu_api": {
+		Field: "action",
+		ReadOnlyActions: []string{
+			"search_docs", "get_doc_content", "wiki_get_node", "wiki_list_nodes",
+			"search_contacts", "get_user_info",
+			"get_calendar_events",
+			"get_chat_info", "get_chat_admins", "list_chat_members",
+			"list_approvals", "get_approval",
+			"list_bitable_tables", "list_bitable_records",
+			"list_tasks",
+			"read_sheet",
+			"download_message_resource",
+		},
+		ExternalSendActions: []string{
+			"search_contacts", "get_user_info",
+			"get_chat_info", "get_chat_admins", "list_chat_members",
+			"upload_image", "upload_file",
+			"send_message", "send_image", "send_file",
+		},
+	},
+	"memory": {
+		Field:             "operation",
+		ReadOnlyActions:   []string{"search", "list"},
+		LocalWriteActions: []string{"save", "update"},
+	},
+	"taskboard": {
+		Field:             "operation",
+		ReadOnlyActions:   []string{"get", "list"},
+		LocalWriteActions: []string{"create", "update"},
+	},
+	"browser_interact": {
+		Field:             "commands[].action",
+		ReadOnlyActions:   []string{"navigate", "snapshot", "wait", "screenshot"},
+		LocalWriteActions: []string{"click", "fill", "eval", "close"},
+	},
+}
 
 var systemDelegationAgents = map[string]bool{
 	"codereview":  true,
@@ -151,14 +191,11 @@ var systemDelegationAgents = map[string]bool{
 
 var hostToolSets = map[HostToolSet]map[string]bool{
 	HostToolSetDefaultVisible: {
-		"batch":             true,
-		"ls":                true,
-		"memory":            true,
-		"parallel_dispatch": true,
-		"question":          true,
-		"skill":             true,
-		"task":              true,
-		"tool_search":       true,
+		"ls":          true,
+		"memory":      true,
+		"question":    true,
+		"skill":       true,
+		"tool_search": true,
 	},
 	HostToolSetPlanControl: {
 		"todo_write":                 true,
@@ -296,7 +333,83 @@ func IsShellCommandTool(name string) bool {
 // IsMixedReadWriteTool reports whether a tool exposes both read operations and
 // write operations behind an action/operation field.
 func IsMixedReadWriteTool(name string) bool {
-	return mixedReadWriteTools[strings.TrimSpace(strings.ToLower(name))]
+	_, ok := mixedActionRuleForTool(name)
+	return ok
+}
+
+// MixedActionField 返回混合读写工具的动作字段路径。
+func MixedActionField(name string) string {
+	rule, ok := mixedActionRuleForTool(name)
+	if !ok {
+		return ""
+	}
+	return rule.Field
+}
+
+// MixedReadOnlyActions 返回混合工具在只读意图下可用的动作。
+func MixedReadOnlyActions(name string) []string {
+	rule, ok := mixedActionRuleForTool(name)
+	if !ok {
+		return nil
+	}
+	return cloneStrings(rule.ReadOnlyActions)
+}
+
+// MixedLocalWriteActions 返回混合工具的非危险本地写动作。
+func MixedLocalWriteActions(name string) []string {
+	rule, ok := mixedActionRuleForTool(name)
+	if !ok {
+		return nil
+	}
+	return cloneStrings(rule.LocalWriteActions)
+}
+
+// ExternalSendActions 返回外部发送意图下可用的检索和发送动作。
+func ExternalSendActions(name string) []string {
+	rule, ok := mixedActionRuleForTool(name)
+	if !ok {
+		return nil
+	}
+	return cloneStrings(rule.ExternalSendActions)
+}
+
+// MixedAllowedToolInputsForIntent 返回混合工具在当前意图下的输入约束。
+func MixedAllowedToolInputsForIntent(intent IntentFrame, toolName string) map[string]string {
+	rule, ok := mixedActionRuleForTool(toolName)
+	if !ok || strings.TrimSpace(rule.Field) == "" {
+		return nil
+	}
+	var actions []string
+	switch intent.Kind {
+	case IntentRead, IntentAnswer, IntentPlan:
+		if len(rule.ExternalSendActions) > 0 {
+			return nil
+		}
+		actions = rule.ReadOnlyActions
+	case IntentExternalRead:
+		actions = rule.ReadOnlyActions
+	case IntentWriteLocal:
+		if !intent.AllowsSideEffects {
+			actions = rule.ReadOnlyActions
+			break
+		}
+		actions = append(cloneStrings(rule.ReadOnlyActions), rule.LocalWriteActions...)
+	case IntentExternalWrite:
+		if !intent.AllowsSideEffects {
+			return nil
+		}
+		actions = rule.ExternalSendActions
+	}
+	if len(actions) == 0 {
+		return nil
+	}
+	return map[string]string{rule.Field: strings.Join(uniqueSortedStrings(actions), "|")}
+}
+
+// MixedReadOnlyToolInputs returns the safe read/list constraints for default
+// visible mixed tools before a side-effect route decision grants wider access.
+func MixedReadOnlyToolInputs(toolName string) map[string]string {
+	return MixedAllowedToolInputsForIntent(IntentFrame{Kind: IntentRead}, toolName)
 }
 
 // StructuredDangerousOperation reports whether a structured tool input requires
@@ -314,6 +427,46 @@ func StructuredDangerousOperation(toolName string, input json.RawMessage) bool {
 	return actions["*"] || actions[action]
 }
 
+// StructuredDangerousAction reports whether a concrete action/operation value
+// is dangerous for a mixed structured tool.
+func StructuredDangerousAction(toolName, action string) bool {
+	toolName = strings.TrimSpace(strings.ToLower(toolName))
+	action = strings.TrimSpace(strings.ToLower(action))
+	if toolName == "" || action == "" {
+		return false
+	}
+	actions := structuredDangerousActions[toolName]
+	return actions["*"] || actions[action]
+}
+
+// StructuredDangerousActions returns the dangerous action names for a tool.
+func StructuredDangerousActions(toolName string) []string {
+	toolName = strings.TrimSpace(strings.ToLower(toolName))
+	actions := structuredDangerousActions[toolName]
+	if len(actions) == 0 || actions["*"] {
+		return nil
+	}
+	names := make([]string, 0, len(actions))
+	for action := range actions {
+		names = append(names, action)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// ProfileRequiresApproval reports whether a tool generally requires approval
+// before considering action-level constraints. Mixed read/write tools can have
+// safe read/send actions, so their dangerous actions are exposed separately.
+func ProfileRequiresApproval(profile ToolProfile) bool {
+	if structuredDangerousTools[strings.TrimSpace(strings.ToLower(profile.Name))] {
+		return true
+	}
+	if IsMixedReadWriteTool(profile.Name) {
+		return false
+	}
+	return ProfileHasSideEffect(profile)
+}
+
 // ToolActionProfile specializes a mixed read/write tool profile using a
 // structured action/operation value when available.
 func ToolActionProfile(profile ToolProfile, input json.RawMessage) ToolProfile {
@@ -327,9 +480,24 @@ func ToolActionProfile(profile ToolProfile, input json.RawMessage) ToolProfile {
 	if action == "" {
 		return profile
 	}
-	profile.Risk = RiskReadOnly
-	profile.ReadOnly = true
-	profile.SideEffect = false
+	if containsActionString(MixedReadOnlyActions(profile.Name), action) {
+		profile.Risk = RiskReadOnly
+		profile.ReadOnly = true
+		profile.SideEffect = false
+		return profile
+	}
+	if containsActionString(MixedLocalWriteActions(profile.Name), action) {
+		profile.Risk = RiskLocalWrite
+		profile.ReadOnly = false
+		profile.SideEffect = true
+		return profile
+	}
+	if containsActionString(ExternalSendActions(profile.Name), action) {
+		profile.Risk = RiskExternalWrite
+		profile.ReadOnly = false
+		profile.SideEffect = true
+		return profile
+	}
 	return profile
 }
 
@@ -423,6 +591,47 @@ func structuredAction(input json.RawMessage) string {
 	return ""
 }
 
+func mixedActionRuleForTool(name string) (mixedActionRule, bool) {
+	rule, ok := mixedActionRules[strings.TrimSpace(strings.ToLower(name))]
+	return mixedActionRule{
+		Field:               rule.Field,
+		ReadOnlyActions:     cloneStrings(rule.ReadOnlyActions),
+		LocalWriteActions:   cloneStrings(rule.LocalWriteActions),
+		ExternalSendActions: cloneStrings(rule.ExternalSendActions),
+	}, ok
+}
+
+func containsActionString(values []string, want string) bool {
+	want = strings.TrimSpace(strings.ToLower(want))
+	if want == "" {
+		return false
+	}
+	for _, value := range values {
+		if strings.TrimSpace(strings.ToLower(value)) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func uniqueSortedStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func cloneCapabilities(in []Capability) []Capability {
 	if len(in) == 0 {
 		return nil
@@ -435,6 +644,13 @@ func cloneIntentKinds(in []IntentKind) []IntentKind {
 		return nil
 	}
 	return append([]IntentKind(nil), in...)
+}
+
+func cloneStrings(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	return append([]string(nil), in...)
 }
 
 func cloneStringSliceMap(in map[string][]string) map[string][]string {

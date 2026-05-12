@@ -368,6 +368,135 @@ func TestWechatRendererSendsInputRequestAndFinalMessage(t *testing.T) {
 	}
 }
 
+func TestWechatRendererStreamsToolOutputAndTerminalStatus(t *testing.T) {
+	st := store.NewMemoryStore()
+	backend := &fakeBackend{runCh: make(chan struct{})}
+	reg := NewRegistry(Config{Enabled: true, CredRoot: t.TempDir()}, nil, st, zap.NewNop())
+	reg.SetBackendFactory(func(string, string, BackendOptions) Backend { return backend })
+	plugin := NewPlugin(reg, zap.NewNop())
+
+	if _, err := reg.Ensure(context.Background(), "owner-1", false); err != nil {
+		t.Fatalf("Ensure failed: %v", err)
+	}
+	defer reg.Stop()
+	select {
+	case <-backend.runCh:
+	case <-time.After(time.Second):
+		t.Fatal("backend Run was not started")
+	}
+
+	events := make(chan master.BroadcastMessage, 8)
+	events <- master.BroadcastMessage{
+		Type:      master.EventTypeToolCall,
+		SessionID: "im-wechatbot-owner-1-wx-peer",
+		Payload:   master.ToolCallEvent{ToolName: "bash", Status: "start"},
+	}
+	events <- master.BroadcastMessage{
+		Type:      master.EventTypeMessage,
+		SessionID: "im-wechatbot-owner-1-wx-peer",
+		Payload: map[string]any{
+			"role":      "tool",
+			"tool_name": "bash",
+			"content":   "北京 05/12（周二）白天：晴 31℃",
+		},
+	}
+	events <- master.BroadcastMessage{
+		Type:      master.EventTypeMessage,
+		SessionID: "im-wechatbot-owner-1-wx-peer",
+		Payload: map[string]any{
+			"role":      "tool",
+			"tool_name": "write_file",
+			"content":   `[1002] file "beijing_weather.sh" has not been read`,
+			"is_error":  true,
+		},
+	}
+	events <- master.BroadcastMessage{
+		Type:      master.EventTypeAgentStatus,
+		SessionID: "im-wechatbot-owner-1-wx-peer",
+		Payload:   map[string]any{"status": "error", "error": "loop detected"},
+	}
+	close(events)
+
+	err := plugin.RenderEventStream(context.Background(), channel.SessionScope{
+		SessionID:   "im-wechatbot-owner-1-wx-peer",
+		TenantKey:   "owner-1",
+		OwnerUserID: "owner-1",
+		ChatID:      "wx-peer",
+		ReplyToken:  "ctx-1",
+	}, events)
+	if err != nil {
+		t.Fatalf("RenderEventStream failed: %v", err)
+	}
+	joined := strings.Join(backend.replies, "\n---\n")
+	for _, want := range []string{"正在执行：bash", "执行结果：bash", "北京 05/12", "执行失败：write_file", "has not been read", "任务失败：loop detected"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("wechat replies missing %q:\n%s", want, joined)
+		}
+	}
+}
+
+func TestWechatRendererSuppressesAssistantPartialAndSendsFinalOnce(t *testing.T) {
+	st := store.NewMemoryStore()
+	backend := &fakeBackend{runCh: make(chan struct{})}
+	reg := NewRegistry(Config{Enabled: true, CredRoot: t.TempDir()}, nil, st, zap.NewNop())
+	reg.SetBackendFactory(func(string, string, BackendOptions) Backend { return backend })
+	plugin := NewPlugin(reg, zap.NewNop())
+
+	if _, err := reg.Ensure(context.Background(), "owner-1", false); err != nil {
+		t.Fatalf("Ensure failed: %v", err)
+	}
+	defer reg.Stop()
+	select {
+	case <-backend.runCh:
+	case <-time.After(time.Second):
+		t.Fatal("backend Run was not started")
+	}
+
+	events := make(chan master.BroadcastMessage, 5)
+	events <- master.BroadcastMessage{
+		Type:      master.EventTypeMessage,
+		SessionID: "im-wechatbot-owner-1-wx-peer",
+		Payload:   map[string]any{"content": "第一段", "partial": true, "role": "assistant"},
+	}
+	events <- master.BroadcastMessage{
+		Type:      master.EventTypeMessage,
+		SessionID: "im-wechatbot-owner-1-wx-peer",
+		Payload:   map[string]any{"content": "第一段第二段", "partial": true, "role": "assistant"},
+	}
+	events <- master.BroadcastMessage{
+		Type:      master.EventTypeMessage,
+		SessionID: "im-wechatbot-owner-1-wx-peer",
+		Payload:   map[string]any{"content": "工具输出", "role": "tool", "tool_name": "bash"},
+	}
+	events <- master.BroadcastMessage{
+		Type:      master.EventTypeMessage,
+		SessionID: "im-wechatbot-owner-1-wx-peer",
+		Payload:   map[string]any{"content": "第一段第二段最终", "partial": false, "role": "assistant"},
+	}
+	close(events)
+
+	err := plugin.RenderEventStream(context.Background(), channel.SessionScope{
+		SessionID:   "im-wechatbot-owner-1-wx-peer",
+		TenantKey:   "owner-1",
+		OwnerUserID: "owner-1",
+		ChatID:      "wx-peer",
+		ReplyToken:  "ctx-1",
+	}, events)
+	if err != nil {
+		t.Fatalf("RenderEventStream failed: %v", err)
+	}
+	joined := strings.Join(backend.replies, "\n---\n")
+	if strings.Contains(joined, "第一段\n") || strings.Contains(joined, "第一段第二段\n") {
+		t.Fatalf("assistant partial should not be sent: %q", joined)
+	}
+	if count := strings.Count(joined, "第一段第二段最终"); count != 1 {
+		t.Fatalf("final assistant reply count = %d, replies:\n%s", count, joined)
+	}
+	if !strings.Contains(joined, "执行结果：bash\n工具输出") {
+		t.Fatalf("tool output should still be sent: %q", joined)
+	}
+}
+
 func TestInstanceRegistersMessageHandlerOnce(t *testing.T) {
 	backend := &fakeBackend{runCh: make(chan struct{})}
 	inst := NewInstance(InstanceOptions{

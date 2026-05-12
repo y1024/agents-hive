@@ -409,7 +409,7 @@ func TestPermissionManager_MinimalFriction_TodoWriteDoesNotAsk(t *testing.T) {
 	assertNoPermissionBroadcast(t, ch, "todo_write")
 }
 
-func TestPermissionManager_StructuredDanger_SendIMMessageAsks(t *testing.T) {
+func TestPermissionManager_NormalSendIMMessageDoesNotAsk(t *testing.T) {
 	m, cancel := setupDefaultPermissionMaster(t)
 	defer cancel()
 	defer m.Stop()
@@ -417,24 +417,15 @@ func TestPermissionManager_StructuredDanger_SendIMMessageAsks(t *testing.T) {
 	subID, ch := m.SubscribeWSBroadcast()
 	defer m.UnsubscribeWSBroadcast(subID)
 
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- callCheckPermission(t, m, "im-user-send", "send_im_message", mustJSON(t, map[string]any{
-			"platform": "feishu",
-			"chat_id":  "oc_xxx",
-			"content":  "hello",
-		}))
-	}()
-
-	approveNextPermissionRequest(t, m, ch, "im-user-send", "send_im_message")
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Fatalf("send_im_message approve 后应放行: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("send_im_message 权限函数未在审批后返回")
+	err := callCheckPermission(t, m, "im-user-send", "send_im_message", mustJSON(t, map[string]any{
+		"platform": "feishu",
+		"chat_id":  "oc_xxx",
+		"content":  "hello",
+	}))
+	if err != nil {
+		t.Fatalf("send_im_message 普通发送应直接放行: %v", err)
 	}
+	assertNoPermissionBroadcast(t, ch, "send_im_message")
 }
 
 func TestPermissionManager_StructuredDanger_MemoryDeleteAsksButSearchAllows(t *testing.T) {
@@ -473,7 +464,7 @@ func TestPermissionManager_StructuredDanger_MemoryDeleteAsksButSearchAllows(t *t
 	}
 }
 
-func TestPermissionManager_StructuredDanger_FeishuReadAllowsButSendAsks(t *testing.T) {
+func TestPermissionManager_FeishuReadAndNormalSendAllowButDangerousActionsAsk(t *testing.T) {
 	m, cancel := setupDefaultPermissionMaster(t)
 	defer cancel()
 	defer m.Stop()
@@ -489,27 +480,37 @@ func TestPermissionManager_StructuredDanger_FeishuReadAllowsButSendAsks(t *testi
 	}
 	assertNoPermissionBroadcast(t, ch, "feishu_api.get_doc_content")
 
+	sendErr := callCheckPermission(t, m, "im-feishu-send", "feishu_api", mustJSON(t, map[string]any{
+		"action":  "send_message",
+		"chat_id": "oc_xxx",
+		"content": "hello",
+	}))
+	if sendErr != nil {
+		t.Fatalf("feishu_api.send_message 普通发送应直接放行: %v", sendErr)
+	}
+	assertNoPermissionBroadcast(t, ch, "feishu_api.send_message")
+
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- callCheckPermission(t, m, "im-feishu-send", "feishu_api", mustJSON(t, map[string]any{
-			"action":  "send_message",
-			"chat_id": "oc_xxx",
-			"content": "hello",
+		errCh <- callCheckPermission(t, m, "im-feishu-danger", "feishu_api", mustJSON(t, map[string]any{
+			"action":        "create_approval",
+			"approval_code": "approval_xxx",
+			"open_id":       "ou_xxx",
 		}))
 	}()
 
-	approveNextPermissionRequest(t, m, ch, "im-feishu-send", "feishu_api")
+	approveNextPermissionRequest(t, m, ch, "im-feishu-danger", "feishu_api")
 	select {
 	case err := <-errCh:
 		if err != nil {
-			t.Fatalf("feishu_api.send_message approve 后应放行: %v", err)
+			t.Fatalf("feishu_api.create_approval approve 后应放行: %v", err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("feishu_api.send_message 权限函数未在审批后返回")
+		t.Fatal("feishu_api.create_approval 权限函数未在审批后返回")
 	}
 }
 
-func TestPermissionManager_StructuredDanger_SendIMAsks(t *testing.T) {
+func TestPermissionManager_WechatbotSendIMDoesNotAsk(t *testing.T) {
 	m, cancel := setupDefaultPermissionMaster(t)
 	defer cancel()
 	defer m.Stop()
@@ -517,24 +518,15 @@ func TestPermissionManager_StructuredDanger_SendIMAsks(t *testing.T) {
 	subID, ch := m.SubscribeWSBroadcast()
 	defer m.UnsubscribeWSBroadcast(subID)
 
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- callCheckPermission(t, m, "im-wechatbot-send", "send_im_message", mustJSON(t, map[string]any{
-			"platform": "wechatbot",
-			"chat_id":  "wxid_xxx",
-			"content":  "hello",
-		}))
-	}()
-
-	approveNextPermissionRequest(t, m, ch, "im-wechatbot-send", "send_im_message")
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Fatalf("send_im_message approve 后应放行: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("send_im_message 权限函数未在审批后返回")
+	err := callCheckPermission(t, m, "im-wechatbot-send", "send_im_message", mustJSON(t, map[string]any{
+		"platform": "wechatbot",
+		"chat_id":  "wxid_xxx",
+		"content":  "hello",
+	}))
+	if err != nil {
+		t.Fatalf("send_im_message wechatbot 普通发送应直接放行: %v", err)
 	}
+	assertNoPermissionBroadcast(t, ch, "send_im_message")
 }
 
 func TestPermissionManager_NormalToolsDoNotAskInMinimalMode(t *testing.T) {

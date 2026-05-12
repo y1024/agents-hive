@@ -315,6 +315,159 @@ func TestRouteDecisionKeepsToolSearchDiscoveryOnly(t *testing.T) {
 	}
 }
 
+func TestBuildRouteDecisionMixedFeishuLocalIntentsBlockExternalMixedTool(t *testing.T) {
+	profile := InferToolProfile(mcphost.ToolDefinition{
+		Name:        "feishu_api",
+		Description: "飞书应用 API 工具。get_doc_content read_sheet send_message create_task",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["get_doc_content","read_sheet","send_message","create_task"]}}}`),
+	}, ProfileHint{})
+
+	for _, kind := range []IntentKind{IntentRead, IntentAnswer, IntentPlan} {
+		t.Run(string(kind), func(t *testing.T) {
+			decision := BuildRouteDecision(IntentFrame{Kind: kind}, []ToolProfile{profile})
+
+			if containsString(decision.AllowedTools, "feishu_api") {
+				t.Fatalf("feishu_api must not be callable for %s intent: %+v", kind, decision)
+			}
+			if len(decision.AllowedToolInputs["feishu_api"]) > 0 {
+				t.Fatalf("blocked feishu_api must not keep allowed inputs: %+v", decision.AllowedToolInputs)
+			}
+			if len(decision.BlockedTools) != 1 || decision.BlockedTools[0].Name != "feishu_api" {
+				t.Fatalf("BlockedTools = %+v, want feishu_api", decision.BlockedTools)
+			}
+			if decision.BlockedTools[0].Reason != "side effect not allowed by intent" {
+				t.Fatalf("blocked reason = %q, want side effect not allowed by intent", decision.BlockedTools[0].Reason)
+			}
+		})
+	}
+}
+
+func TestBuildRouteDecisionMixedFeishuExternalReadConstrainsActions(t *testing.T) {
+	profile := InferToolProfile(mcphost.ToolDefinition{
+		Name:        "feishu_api",
+		Description: "飞书应用 API 工具。get_doc_content read_sheet send_message create_task",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["get_doc_content","read_sheet","send_message","create_task"]}}}`),
+	}, ProfileHint{})
+
+	decision := BuildRouteDecision(IntentFrame{Kind: IntentExternalRead, RequiresExternal: true}, []ToolProfile{profile})
+
+	if !containsString(decision.AllowedTools, "feishu_api") {
+		t.Fatalf("feishu_api should be callable for external read intent: %+v", decision)
+	}
+	allowedActions := decision.AllowedToolInputs["feishu_api"]["action"]
+	if !strings.Contains(allowedActions, "get_doc_content") || !strings.Contains(allowedActions, "read_sheet") {
+		t.Fatalf("external-read actions missing from allowed inputs: %+v", decision.AllowedToolInputs)
+	}
+	if strings.Contains(allowedActions, "send_message") || strings.Contains(allowedActions, "create_task") {
+		t.Fatalf("send/write actions must not be allowed for external-read intent: %q", allowedActions)
+	}
+}
+
+func TestBuildRouteDecisionMixedFeishuExternalSendConstrainsActions(t *testing.T) {
+	profile := InferToolProfile(mcphost.ToolDefinition{
+		Name:        "feishu_api",
+		Description: "飞书应用 API 工具。search_contacts send_message create_task",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["search_contacts","send_message","create_task"]}}}`),
+	}, ProfileHint{})
+
+	decision := BuildRouteDecision(IntentFrame{Kind: IntentExternalWrite, RequiresExternal: true, AllowsSideEffects: true}, []ToolProfile{profile})
+
+	if !containsString(decision.AllowedTools, "feishu_api") {
+		t.Fatalf("feishu_api should be callable for external send intent: %+v", decision)
+	}
+	allowedActions := decision.AllowedToolInputs["feishu_api"]["action"]
+	if !strings.Contains(allowedActions, "search_contacts") || !strings.Contains(allowedActions, "send_message") {
+		t.Fatalf("external-send actions missing from allowed inputs: %+v", decision.AllowedToolInputs)
+	}
+	if strings.Contains(allowedActions, "create_task") {
+		t.Fatalf("non-send write actions must not be allowed for external send intent: %q", allowedActions)
+	}
+}
+
+func TestBuildRouteDecisionMixedOperationReadConstrainsMemoryAndTaskboard(t *testing.T) {
+	profiles := []ToolProfile{
+		InferToolProfile(mcphost.ToolDefinition{Name: "memory"}, ProfileHint{}),
+		InferToolProfile(mcphost.ToolDefinition{Name: "taskboard"}, ProfileHint{}),
+	}
+
+	decision := BuildRouteDecision(IntentFrame{Kind: IntentRead}, profiles)
+
+	memoryOps := decision.AllowedToolInputs["memory"]["operation"]
+	if !strings.Contains(memoryOps, "search") || !strings.Contains(memoryOps, "list") {
+		t.Fatalf("memory read operation set missing search/list: %#v", decision.AllowedToolInputs)
+	}
+	if strings.Contains(memoryOps, "save") || strings.Contains(memoryOps, "update") || strings.Contains(memoryOps, "delete") {
+		t.Fatalf("memory write/delete operations must not be allowed for read intent: %q", memoryOps)
+	}
+
+	taskboardOps := decision.AllowedToolInputs["taskboard"]["operation"]
+	if !strings.Contains(taskboardOps, "get") || !strings.Contains(taskboardOps, "list") {
+		t.Fatalf("taskboard read operation set missing get/list: %#v", decision.AllowedToolInputs)
+	}
+	if strings.Contains(taskboardOps, "create") || strings.Contains(taskboardOps, "update") || strings.Contains(taskboardOps, "delete") {
+		t.Fatalf("taskboard write/delete operations must not be allowed for read intent: %q", taskboardOps)
+	}
+}
+
+func TestBuildRouteDecisionMixedOperationLocalWriteConstrainsMemoryAndTaskboard(t *testing.T) {
+	profiles := []ToolProfile{
+		InferToolProfile(mcphost.ToolDefinition{Name: "memory"}, ProfileHint{}),
+		InferToolProfile(mcphost.ToolDefinition{Name: "taskboard"}, ProfileHint{}),
+	}
+
+	decision := BuildRouteDecision(IntentFrame{Kind: IntentWriteLocal, AllowsSideEffects: true}, profiles)
+
+	memoryOps := decision.AllowedToolInputs["memory"]["operation"]
+	if !strings.Contains(memoryOps, "save") || !strings.Contains(memoryOps, "update") {
+		t.Fatalf("memory local write actions missing save/update: %#v", decision.AllowedToolInputs)
+	}
+	if strings.Contains(memoryOps, "delete") {
+		t.Fatalf("memory.delete must not be granted as normal local write: %q", memoryOps)
+	}
+
+	taskboardOps := decision.AllowedToolInputs["taskboard"]["operation"]
+	if !strings.Contains(taskboardOps, "create") || !strings.Contains(taskboardOps, "update") {
+		t.Fatalf("taskboard local write actions missing create/update: %#v", decision.AllowedToolInputs)
+	}
+	if strings.Contains(taskboardOps, "delete") {
+		t.Fatalf("taskboard.delete must not be granted as normal local write: %q", taskboardOps)
+	}
+}
+
+func TestBuildRouteDecisionBrowserInteractReadConstrainsNestedCommandActions(t *testing.T) {
+	profile := InferToolProfile(mcphost.ToolDefinition{Name: "browser_interact", Core: true}, ProfileHint{})
+
+	decision := BuildRouteDecision(IntentFrame{Kind: IntentRead}, []ToolProfile{profile})
+
+	actions := decision.AllowedToolInputs["browser_interact"]["commands[].action"]
+	if !strings.Contains(actions, "navigate") || !strings.Contains(actions, "snapshot") {
+		t.Fatalf("browser read actions missing navigate/snapshot: %#v", decision.AllowedToolInputs)
+	}
+	if strings.Contains(actions, "click") || strings.Contains(actions, "fill") || strings.Contains(actions, "eval") {
+		t.Fatalf("browser interactive actions must not be allowed for read intent: %q", actions)
+	}
+}
+
+func TestBuildRouteDecisionReadBlocksExecutionEntrypoints(t *testing.T) {
+	profiles := []ToolProfile{
+		InferToolProfile(mcphost.ToolDefinition{Name: "batch"}, ProfileHint{}),
+		InferToolProfile(mcphost.ToolDefinition{Name: "task"}, ProfileHint{}),
+		InferToolProfile(mcphost.ToolDefinition{Name: "spawn_agent", Core: true}, ProfileHint{}),
+		InferToolProfile(mcphost.ToolDefinition{Name: "parallel_dispatch"}, ProfileHint{}),
+	}
+
+	decision := BuildRouteDecision(IntentFrame{Kind: IntentRead}, profiles)
+
+	for _, name := range []string{"batch", "task", "spawn_agent", "parallel_dispatch"} {
+		if containsString(decision.AllowedTools, name) {
+			t.Fatalf("%s must not be callable for read intent: %+v", name, decision.AllowedTools)
+		}
+	}
+	if decision.Mode == DecisionModeAllow {
+		t.Fatalf("read intent should not allow execution entrypoints: %+v", decision)
+	}
+}
+
 func TestReflectionBlockRouteDecisionBlocksMatchingMode(t *testing.T) {
 	decision := BuildRouteDecisionWithBlocks(
 		IntentFrame{Kind: IntentRead},
@@ -477,6 +630,9 @@ func TestBuiltinToolProfilesComeFromRegistry(t *testing.T) {
 		{name: "bash", wantDomain: "filesystem", wantInvoke: InvocationDirectTool, wantRisk: RiskRuntimeExec, wantCaps: []Capability{CapabilityRuntimeExec}},
 		{name: "create_tool", wantDomain: "tools", wantInvoke: InvocationDirectTool, wantRisk: RiskLocalWrite, wantCaps: []Capability{CapabilityMetaToolRegister}},
 		{name: "remove_tool", wantDomain: "tools", wantInvoke: InvocationDirectTool, wantRisk: RiskLocalWrite, wantCaps: []Capability{CapabilityMetaToolRegister}},
+		{name: "skill_install", wantDomain: "skills", wantInvoke: InvocationDirectTool, wantRisk: RiskLocalWrite, wantCaps: []Capability{CapabilityMetaSkillCreate}},
+		{name: "skill_search", wantDomain: "skills", wantInvoke: InvocationDirectTool, wantRisk: RiskReadOnly, wantReadOnly: true},
+		{name: "generate_video", wantDomain: "media", wantInvoke: InvocationDirectTool, wantRisk: RiskLocalWrite},
 		{name: "lsp_diagnostics", wantDomain: "lsp", wantInvoke: InvocationDirectTool, wantRisk: RiskReadOnly, wantReadOnly: true},
 	}
 	for _, tt := range tests {

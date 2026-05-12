@@ -472,6 +472,7 @@ func NewMaster(cfg Config, hitlCfg config.HITLConfig, registry *subagent.Registr
 
 	if bridge := skillReg.GetToolBridge(); bridge != nil {
 		m.toolBridge = bridge
+		bridge.SetExecutionGate(m.CheckNestedToolInputRouteAllowed)
 		logger.Debug("权限管理器已创建", zap.Int("rules", len(hitlCfg.PermissionRules)))
 	}
 
@@ -1433,6 +1434,8 @@ func (m *Master) ExecuteTask(ctx context.Context, agentID string, instruction st
 		TraceID:       tools.DeriveChildTraceID(tc.TraceID, agentID),
 		ParentSpanID:  tc.SpanID,
 		ParentTraceID: tc.TraceID,
+		TurnID:        tc.TurnIDOrTraceID(),
+		ToolCallID:    tc.ToolCallID,
 		Payload:       payloadJSON,
 	}
 

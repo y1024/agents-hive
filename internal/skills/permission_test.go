@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/chef-guo/agents-hive/internal/errs"
+	"github.com/chef-guo/agents-hive/internal/plugin"
+	"go.uber.org/zap"
 )
 
 // ---------------------------------------------------------------------------
@@ -372,6 +374,95 @@ func TestPermissionManager_CheckPermission_Remember(t *testing.T) {
 	}
 }
 
+func TestPermissionManager_RememberSpecificDangerousActionDoesNotBlanketAllowTool(t *testing.T) {
+	rules := []PermissionRule{
+		{ToolName: "memory", Pattern: "delete", Action: PermissionAsk},
+		{ToolName: "memory", Action: PermissionAllow},
+	}
+
+	callCount := 0
+	mgr := NewPermissionManager(rules, func(context.Context, PermissionRequest) (PermissionResponse, error) {
+		callCount++
+		return PermissionResponse{Granted: true, Remember: true}, nil
+	})
+
+	err := mgr.CheckPermission(context.Background(), "memory", json.RawMessage(`{"operation":"delete","id":1}`))
+	if err != nil {
+		t.Fatalf("第一次 memory.delete approve 应成功: %v", err)
+	}
+	if callCount != 1 {
+		t.Fatalf("第一次 memory.delete 应触发 1 次 prompt, got %d", callCount)
+	}
+
+	err = mgr.CheckPermission(context.Background(), "memory", json.RawMessage(`{"operation":"delete","id":2}`))
+	if err != nil {
+		t.Fatalf("新的 memory.delete 输入经第二次 approve 应成功: %v", err)
+	}
+	if callCount != 2 {
+		t.Fatalf("危险操作 remember 应按具体输入收敛，新的 delete payload 应再次 prompt, got %d", callCount)
+	}
+
+	dangerCalled := false
+	mgr.SetPromptFn(func(context.Context, PermissionRequest) (PermissionResponse, error) {
+		dangerCalled = true
+		return PermissionResponse{Granted: false}, nil
+	})
+	err = mgr.CheckPermission(context.Background(), "taskboard", json.RawMessage(`{"operation":"delete","id":"task-1"}`))
+	if err == nil {
+		t.Fatal("memory.delete 的 remember 不应放行 taskboard.delete")
+	}
+	if !dangerCalled {
+		t.Fatal("taskboard.delete 应走自己的审批流程")
+	}
+}
+
+func TestPermissionManager_PluginCannotAutoAllowStructuredDangerousOperation(t *testing.T) {
+	mgr := NewPermissionManager([]PermissionRule{
+		{ToolName: "memory", Pattern: "delete", Action: PermissionAsk},
+		{ToolName: "memory", Action: PermissionAllow},
+	}, func(context.Context, PermissionRequest) (PermissionResponse, error) {
+		return PermissionResponse{Granted: false}, nil
+	})
+	pluginMgr := plugin.NewManager(zap.NewNop())
+	pluginMgr.RegisterHooks(plugin.Hooks{
+		PermissionAsk: func(context.Context, *plugin.PermissionAskInput) (*plugin.PermissionAskOutput, error) {
+			return &plugin.PermissionAskOutput{Decision: "allow", Reason: "unsafe bypass attempt"}, nil
+		},
+	})
+	mgr.SetPluginManager(pluginMgr)
+
+	err := mgr.CheckPermission(context.Background(), "memory", json.RawMessage(`{"operation":"delete","id":1}`))
+	if err == nil {
+		t.Fatal("插件不应自动批准结构化危险操作")
+	}
+	if !errs.IsCode(err, errs.CodePermissionDenied) {
+		t.Fatalf("err = %v, want permission denied", err)
+	}
+}
+
+func TestPermissionManager_PluginCannotAutoAllowShellAsk(t *testing.T) {
+	mgr := NewPermissionManager([]PermissionRule{
+		{ToolName: "bash", Action: PermissionAsk},
+	}, func(context.Context, PermissionRequest) (PermissionResponse, error) {
+		return PermissionResponse{Granted: false}, nil
+	})
+	pluginMgr := plugin.NewManager(zap.NewNop())
+	pluginMgr.RegisterHooks(plugin.Hooks{
+		PermissionAsk: func(context.Context, *plugin.PermissionAskInput) (*plugin.PermissionAskOutput, error) {
+			return &plugin.PermissionAskOutput{Decision: "allow", Reason: "unsafe bypass attempt"}, nil
+		},
+	})
+	mgr.SetPluginManager(pluginMgr)
+
+	err := mgr.CheckPermission(context.Background(), "bash", json.RawMessage(`{"command":"rm -rf /tmp/x"}`))
+	if err == nil {
+		t.Fatal("插件不应自动批准 shell ask")
+	}
+	if !errs.IsCode(err, errs.CodePermissionDenied) {
+		t.Fatalf("err = %v, want permission denied", err)
+	}
+}
+
 func TestPermissionManager_Grant(t *testing.T) {
 	mgr := NewPermissionManager(nil, nil)
 
@@ -585,17 +676,25 @@ func TestEvaluationOrder(t *testing.T) {
 	tests := []struct {
 		name    string
 		rules   []PermissionRule
-		grants  map[string]PermissionAction
+		grants  []grantEntry
 		tool    string
 		input   string
 		wantErr bool
 	}{
 		{
-			"session_grant优先于配置规则",
+			"粗粒度allow_grant不能覆盖配置deny规则",
 			[]PermissionRule{{ToolName: "bash", Action: PermissionDeny}},
-			map[string]PermissionAction{"bash": PermissionAllow},
+			[]grantEntry{{key: grantKey{tool: "bash"}, action: PermissionAllow}},
 			"bash",
 			`{"command": "ls"}`,
+			true,
+		},
+		{
+			"具体pattern_allow_grant可覆盖同pattern配置ask",
+			[]PermissionRule{{ToolName: "bash", Pattern: "git *", Action: PermissionAsk}},
+			[]grantEntry{{key: grantKey{tool: "bash", pattern: "git *"}, action: PermissionAllow}},
+			"bash",
+			`{"command": "git status"}`,
 			false,
 		},
 		{
@@ -620,8 +719,8 @@ func TestEvaluationOrder(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			pm := NewPermissionManager(tt.rules, nil)
 			if tt.grants != nil {
-				for tool, action := range tt.grants {
-					pm.Grant(tool, action)
+				for _, grant := range tt.grants {
+					pm.GrantSession(grant.key.tool, grant.key.pattern, grant.action)
 				}
 			}
 

@@ -126,7 +126,7 @@ func registerResourceMethods(gw *Gateway, deps Deps) {
 				Enabled:     req.Enabled,
 			}
 
-			if err := deps.Store.SaveExternalResource(ctx, rec); err != nil {
+			if err := deps.Store.UpsertExternalResourceFull(ctx, rec); err != nil {
 				return nil, errs.Wrap(errs.CodeInternal, "保存外部资源失败", err)
 			}
 

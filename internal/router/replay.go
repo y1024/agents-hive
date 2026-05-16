@@ -7,6 +7,8 @@ import (
 	"io"
 	"sort"
 	"sync"
+
+	"github.com/chef-guo/agents-hive/internal/collections"
 )
 
 // ReplayStore 保存可按 trace_id 查询的本地决策 span。
@@ -118,7 +120,7 @@ func RouteDecisionSummaryFromSpan(span DecisionSpan) RouteDecisionSummary {
 		AllowedInputs:  cloneDecisionSpanInputs(span.AllowedInputs),
 		VisibleOnly:    append([]string(nil), span.VisibleOnly...),
 		BlockedTools:   append([]string(nil), span.Blocked...),
-		BlockedReasons: cloneStringMap(span.BlockedReasons),
+		BlockedReasons: collections.CloneNonEmptyStringMap(span.BlockedReasons),
 		Mode:           span.Mode,
 		Reason:         span.Reason,
 	}
@@ -134,16 +136,5 @@ func filterAndSortDecisionSpans(spans []DecisionSpan, traceID string) []Decision
 	sort.SliceStable(out, func(i, j int) bool {
 		return out[i].CreatedAt.Before(out[j].CreatedAt)
 	})
-	return out
-}
-
-func cloneStringMap(in map[string]string) map[string]string {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
 	return out
 }

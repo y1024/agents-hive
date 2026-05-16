@@ -15,6 +15,7 @@ import type {
   RemoteAgentConfig,
   RemoteAgentHealth,
   ExternalResource,
+  ExternalResourceSaveRequest,
   RPCResponse,
   ModelInfo,
   RuntimeConfig,
@@ -24,9 +25,15 @@ import type {
   UsageSummary,
   AdminProvidersResponse,
   AdminProvider,
+  AdminProviderCreateRequest,
+  AdminProviderUpdateRequest,
   PromptRecord,
   LLMProviderRecord,
+  LLMProviderCreateRequest,
+  LLMProviderUpdateRequest,
   LLMModelRecord,
+  LLMModelCreateRequest,
+  LLMModelUpdateRequest,
   AdminSkillItem,
   AdminSkillDetail,
   QualityCandidateStatus,
@@ -139,7 +146,8 @@ export interface NodeClient {
   listMCPTools(): Promise<MCPToolsListResponse>;
   // 外部资源管理
   listExternalResources(): Promise<ExternalResource[]>;
-  saveExternalResource(resource: Partial<ExternalResource> & { name: string }): Promise<{ status: string; name: string }>;
+  upsertExternalResource(resource: ExternalResourceSaveRequest): Promise<{ status: string; name: string }>;
+  saveExternalResource(resource: ExternalResourceSaveRequest): Promise<{ status: string; name: string }>;
   deleteExternalResource(name: string): Promise<{ status: string; name: string }>;
   // WebSocket URL
   getWebSocketUrl(): string;
@@ -165,8 +173,8 @@ export interface NodeClient {
   adminGetUsageByModel(): Promise<{ by_model: Record<string, { tokens: number; cost_usd: number }> }>;
   adminGetUsageQuality(): Promise<UsageQualityCost>;
   adminListProviders(): Promise<AdminProvider[]>;
-  adminCreateProvider(body: Partial<AdminProvider> & { name: string; provider_type: string }): Promise<void>;
-  adminUpdateProvider(name: string, body: Partial<AdminProvider>): Promise<void>;
+  adminCreateProvider(body: AdminProviderCreateRequest): Promise<void>;
+  adminUpdateProvider(name: string, body: AdminProviderUpdateRequest): Promise<void>;
   adminDeleteProvider(name: string): Promise<void>;
   adminListScheduledTasks(): Promise<ScheduledTask[]>;
   // Journal（回放剧场）
@@ -180,13 +188,13 @@ export interface NodeClient {
   adminDeletePrompt(key: string, language: string): Promise<void>;
   // LLM Provider 管理
   adminListLLMProviders(): Promise<{ providers: LLMProviderRecord[] }>;
-  adminCreateLLMProvider(body: Partial<LLMProviderRecord> & { name: string; provider_type: string }): Promise<void>;
-  adminUpdateLLMProvider(name: string, body: Partial<LLMProviderRecord>): Promise<void>;
+  adminCreateLLMProvider(body: LLMProviderCreateRequest): Promise<void>;
+  adminUpdateLLMProvider(name: string, body: LLMProviderUpdateRequest): Promise<void>;
   adminDeleteLLMProvider(name: string): Promise<void>;
   // LLM Model 管理
   adminListLLMModels(): Promise<{ models: LLMModelRecord[] }>;
-  adminCreateLLMModel(body: Partial<LLMModelRecord> & { name: string; model: string }): Promise<void>;
-  adminUpdateLLMModel(name: string, body: Partial<LLMModelRecord>): Promise<void>;
+  adminCreateLLMModel(body: LLMModelCreateRequest): Promise<void>;
+  adminUpdateLLMModel(name: string, body: LLMModelUpdateRequest): Promise<void>;
   adminDeleteLLMModel(name: string): Promise<void>;
   // Admin Skill 管理（overlay: FS + DB）
   adminListSkills(): Promise<{ items: AdminSkillItem[]; total: number }>;
@@ -415,8 +423,13 @@ export class LocalNodeClient implements NodeClient {
     return res.resources || [];
   }
 
-  saveExternalResource(resource: Partial<ExternalResource> & { name: string }): Promise<{ status: string; name: string }> {
+  upsertExternalResource(resource: ExternalResourceSaveRequest): Promise<{ status: string; name: string }> {
     return this.rpc<{ status: string; name: string }>('resources.save', resource);
+  }
+
+  /** @deprecated Use upsertExternalResource. */
+  saveExternalResource(resource: ExternalResourceSaveRequest): Promise<{ status: string; name: string }> {
+    return this.upsertExternalResource(resource);
   }
 
   deleteExternalResource(name: string): Promise<{ status: string; name: string }> {
@@ -512,11 +525,11 @@ export class LocalNodeClient implements NodeClient {
     return res.providers ?? [];
   }
 
-  adminCreateProvider(body: Partial<AdminProvider> & { name: string; provider_type: string }): Promise<void> {
+  adminCreateProvider(body: AdminProviderCreateRequest): Promise<void> {
     return this.client.post('/api/v1/admin/auth/providers', body);
   }
 
-  adminUpdateProvider(name: string, body: Partial<AdminProvider>): Promise<void> {
+  adminUpdateProvider(name: string, body: AdminProviderUpdateRequest): Promise<void> {
     return this.client.patch(`/api/v1/admin/auth/providers/${name}`, body);
   }
 
@@ -562,11 +575,11 @@ export class LocalNodeClient implements NodeClient {
     return this.client.get('/api/v1/admin/llm/providers');
   }
 
-  adminCreateLLMProvider(body: Partial<LLMProviderRecord> & { name: string; provider_type: string }): Promise<void> {
+  adminCreateLLMProvider(body: LLMProviderCreateRequest): Promise<void> {
     return this.client.post('/api/v1/admin/llm/providers', body);
   }
 
-  adminUpdateLLMProvider(name: string, body: Partial<LLMProviderRecord>): Promise<void> {
+  adminUpdateLLMProvider(name: string, body: LLMProviderUpdateRequest): Promise<void> {
     return this.client.patch(`/api/v1/admin/llm/providers/${encodeURIComponent(name)}`, body);
   }
 
@@ -578,11 +591,11 @@ export class LocalNodeClient implements NodeClient {
     return this.client.get('/api/v1/admin/llm/models');
   }
 
-  adminCreateLLMModel(body: Partial<LLMModelRecord> & { name: string; model: string }): Promise<void> {
+  adminCreateLLMModel(body: LLMModelCreateRequest): Promise<void> {
     return this.client.post('/api/v1/admin/llm/models', body);
   }
 
-  adminUpdateLLMModel(name: string, body: Partial<LLMModelRecord>): Promise<void> {
+  adminUpdateLLMModel(name: string, body: LLMModelUpdateRequest): Promise<void> {
     return this.client.patch(`/api/v1/admin/llm/models/${encodeURIComponent(name)}`, body);
   }
 

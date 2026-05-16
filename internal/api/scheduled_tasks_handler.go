@@ -23,7 +23,9 @@ import (
 const scheduledTaskQuotaPerUser = 100
 
 type scheduledTaskStore interface {
-	SaveScheduledTask(ctx context.Context, rec *store.ScheduledTask) error
+	CreateScheduledTask(ctx context.Context, rec *store.ScheduledTaskDefinition, nextRunAt *time.Time) error
+	UpdateScheduledTaskDefinition(ctx context.Context, rec *store.ScheduledTaskDefinition, nextRunAt *time.Time) error
+	SetScheduledTaskEnabled(ctx context.Context, id string, enabled bool, nextRunAt *time.Time) error
 	GetScheduledTask(ctx context.Context, id string) (*store.ScheduledTask, error)
 	DeleteScheduledTask(ctx context.Context, id string) error
 	ListScheduledTasksByUser(ctx context.Context, createdBy string) ([]*store.ScheduledTask, error)
@@ -92,7 +94,7 @@ func (s *Server) handleCreateScheduledTask(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error(), Code: errs.CodeBadRequest})
 		return
 	}
-	if err := taskStore.SaveScheduledTask(r.Context(), task); err != nil {
+	if err := taskStore.CreateScheduledTask(r.Context(), task.Definition(), task.NextRunAt); err != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: err.Error(), Code: errs.CodeInternal})
 		return
 	}
@@ -166,7 +168,7 @@ func (s *Server) handleUpdateScheduledTask(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error(), Code: errs.CodeBadRequest})
 		return
 	}
-	if err := taskStore.SaveScheduledTask(r.Context(), next); err != nil {
+	if err := taskStore.UpdateScheduledTaskDefinition(r.Context(), next.Definition(), next.NextRunAt); err != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: err.Error(), Code: errs.CodeInternal})
 		return
 	}
@@ -215,7 +217,7 @@ func (s *Server) handleToggleScheduledTask(w http.ResponseWriter, r *http.Reques
 		}
 		current.NextRunAt = &next
 	}
-	if err := taskStore.SaveScheduledTask(r.Context(), current); err != nil {
+	if err := taskStore.SetScheduledTaskEnabled(r.Context(), current.ID, current.Enabled, current.NextRunAt); err != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: err.Error(), Code: errs.CodeInternal})
 		return
 	}

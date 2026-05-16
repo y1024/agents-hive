@@ -427,6 +427,15 @@ func (m *MemoryStore) SaveLLMProvider(_ context.Context, rec *LLMProviderRecord)
 	m.llmProviders[rec.Name] = &cp
 	return nil
 }
+func (m *MemoryStore) CreateLLMProvider(ctx context.Context, rec *LLMProviderRecord) error {
+	return m.SaveLLMProvider(ctx, rec)
+}
+func (m *MemoryStore) UpdateLLMProvider(ctx context.Context, name string, rec *LLMProviderRecord) error {
+	if rec != nil && rec.Name == "" {
+		rec.Name = name
+	}
+	return m.SaveLLMProvider(ctx, rec)
+}
 func (m *MemoryStore) DeleteLLMProvider(_ context.Context, name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -480,6 +489,9 @@ func (m *MemoryStore) SaveLLMModel(_ context.Context, rec *LLMModelRecord) error
 	cp := *rec
 	m.llmModels[rec.Name] = &cp
 	return nil
+}
+func (m *MemoryStore) CreateLLMModel(ctx context.Context, rec *LLMModelRecord) error {
+	return m.SaveLLMModel(ctx, rec)
 }
 func (m *MemoryStore) UpdateLLMModel(_ context.Context, oldName string, rec *LLMModelRecord) error {
 	m.mu.Lock()
@@ -546,6 +558,9 @@ func (m *MemoryStore) GetChannelConfig(_ context.Context, _ string) (*ChannelCon
 	return nil, ErrNotFound
 }
 func (m *MemoryStore) SaveChannelConfig(_ context.Context, _ *ChannelConfigRecord) error { return nil }
+func (m *MemoryStore) UpsertChannelConfigFull(ctx context.Context, rec *ChannelConfigRecord) error {
+	return m.SaveChannelConfig(ctx, rec)
+}
 func (m *MemoryStore) ListChannelConfigs(_ context.Context) ([]*ChannelConfigRecord, error) {
 	return nil, nil
 }
@@ -624,6 +639,100 @@ func (m *MemoryStore) SaveScheduledTask(_ context.Context, rec *ScheduledTask) e
 	m.saveScheduledTaskLocked(rec)
 	return nil
 }
+
+func (m *MemoryStore) CreateScheduledTask(_ context.Context, rec *ScheduledTaskDefinition, nextRunAt *time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if rec == nil {
+		return errs.New(errs.CodeStoreWriteFailed, "定时任务定义不能为空")
+	}
+	if _, ok := m.tasks[rec.ID]; ok {
+		return errs.New(errs.CodeStoreWriteFailed, "定时任务已存在")
+	}
+	m.saveScheduledTaskLocked(scheduledTaskFromDefinition(rec, nextRunAt))
+	return nil
+}
+
+func (m *MemoryStore) UpdateScheduledTaskDefinition(_ context.Context, rec *ScheduledTaskDefinition, nextRunAt *time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if rec == nil {
+		return errs.New(errs.CodeStoreWriteFailed, "定时任务定义不能为空")
+	}
+	if _, ok := m.tasks[rec.ID]; !ok {
+		return ErrNotFound
+	}
+	m.saveScheduledTaskLocked(scheduledTaskFromDefinition(rec, nextRunAt))
+	return nil
+}
+
+func (m *MemoryStore) SetScheduledTaskEnabled(_ context.Context, id string, enabled bool, nextRunAt *time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec, ok := m.tasks[id]
+	if !ok {
+		return ErrNotFound
+	}
+	rec.Enabled = enabled
+	if nextRunAt != nil {
+		next := nextRunAt.UTC()
+		rec.NextRunAt = &next
+	} else {
+		rec.NextRunAt = nil
+	}
+	rec.UpdatedAt = time.Now().UTC()
+	m.schedules[id] = memoryScheduledTaskToPush(rec)
+	return nil
+}
+
+func (m *MemoryStore) UpdateScheduledTaskRuntimeState(_ context.Context, id string, state ScheduledTaskRuntimeState) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec, ok := m.tasks[id]
+	if !ok {
+		return ErrNotFound
+	}
+	rec.LastRunAt = cloneTimePtr(state.LastRunAt)
+	rec.NextRunAt = cloneTimePtr(state.NextRunAt)
+	rec.LastError = state.LastError
+	rec.ActiveRunID = state.ActiveRunID
+	rec.LeaseExpiresAt = cloneTimePtr(state.LeaseExpiresAt)
+	rec.UpdatedAt = time.Now().UTC()
+	m.schedules[id] = memoryScheduledTaskToPush(rec)
+	return nil
+}
+
+func scheduledTaskFromDefinition(def *ScheduledTaskDefinition, nextRunAt *time.Time) *ScheduledTask {
+	if def == nil {
+		return nil
+	}
+	return &ScheduledTask{
+		ID:           def.ID,
+		Name:         def.Name,
+		Description:  def.Description,
+		TargetType:   def.TargetType,
+		TargetConfig: def.TargetConfig,
+		Platform:     def.Platform,
+		Prompt:       def.Prompt,
+		CronExpr:     def.CronExpr,
+		IntervalSec:  def.IntervalSec,
+		Timezone:     def.Timezone,
+		Enabled:      def.Enabled,
+		CreatedBy:    def.CreatedBy,
+		NextRunAt:    cloneTimePtr(nextRunAt),
+		CreatedAt:    def.CreatedAt,
+		UpdatedAt:    def.UpdatedAt,
+	}
+}
+
+func cloneTimePtr(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	cp := t.UTC()
+	return &cp
+}
+
 func (m *MemoryStore) saveScheduledTaskLocked(rec *ScheduledTask) {
 	if m.tasks == nil {
 		m.tasks = make(map[string]*ScheduledTask)
@@ -983,7 +1092,10 @@ func (m *MemoryStore) GetMCPServer(_ context.Context, _ string) (*MCPServerRecor
 	return nil, ErrNotFound
 }
 func (m *MemoryStore) SaveMCPServer(_ context.Context, _ *MCPServerRecord) error { return nil }
-func (m *MemoryStore) DeleteMCPServer(_ context.Context, _ string) error         { return nil }
+func (m *MemoryStore) UpsertMCPServerFull(ctx context.Context, rec *MCPServerRecord) error {
+	return m.SaveMCPServer(ctx, rec)
+}
+func (m *MemoryStore) DeleteMCPServer(_ context.Context, _ string) error { return nil }
 func (m *MemoryStore) ListMCPServers(_ context.Context) ([]*MCPServerRecord, error) {
 	return nil, nil
 }
@@ -992,6 +1104,15 @@ func (m *MemoryStore) GetExternalResource(_ context.Context, _ string) (*Externa
 }
 func (m *MemoryStore) SaveExternalResource(_ context.Context, _ *ExternalResourceRecord) error {
 	return nil
+}
+func (m *MemoryStore) CreateExternalResource(ctx context.Context, rec *ExternalResourceRecord) error {
+	return m.SaveExternalResource(ctx, rec)
+}
+func (m *MemoryStore) UpdateExternalResource(ctx context.Context, _ string, rec *ExternalResourceRecord) error {
+	return m.SaveExternalResource(ctx, rec)
+}
+func (m *MemoryStore) UpsertExternalResourceFull(ctx context.Context, rec *ExternalResourceRecord) error {
+	return m.SaveExternalResource(ctx, rec)
 }
 func (m *MemoryStore) DeleteExternalResource(_ context.Context, _ string) error { return nil }
 func (m *MemoryStore) ListExternalResources(_ context.Context) ([]*ExternalResourceRecord, error) {

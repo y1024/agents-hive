@@ -36,6 +36,7 @@ on:
       - 'scripts/ci/check_pii_safe_sender.sh'
       - 'scripts/ci/check_no_fail_open.sh'
       - 'scripts/ci/check_webhook_handler_nil_err.sh'
+      - 'scripts/check_write_contract_boundaries.sh'
       - '.github/workflows/**'
       - 'go.mod'
       - 'go.sum'
@@ -116,6 +117,14 @@ jobs:
       - uses: actions/checkout@v4
       - run: bash scripts/check_run_quality_foundation_guard.sh
 
+  write-contract-boundaries:
+    name: gate#boundary 写 DTO / 运行态边界
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/check_write_contract_boundaries.sh
+
   summary:
     name: phase0-gates summary
     runs-on: ubuntu-latest
@@ -129,6 +138,7 @@ jobs:
       - webhook-handler-nil-err
       - feishu-sdk-only
       - run-quality-foundation
+      - write-contract-boundaries
     if: always()
     steps:
       - name: aggregate result
@@ -144,6 +154,7 @@ jobs:
             echo "- webhook-handler-nil-err: ${{ needs.webhook-handler-nil-err.result }}"
             echo "- feishu-sdk-only:         ${{ needs.feishu-sdk-only.result }}"
             echo "- run-quality-foundation:  ${{ needs.run-quality-foundation.result }}"
+            echo "- write-contract-boundaries: ${{ needs.write-contract-boundaries.result }}"
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "${{ needs.imctx-leaf.result }}" = "success" ] \
              && [ "${{ needs.phantom-symbols.result }}" = "success" ] \
@@ -152,7 +163,8 @@ jobs:
              && [ "${{ needs.no-fail-open.result }}" = "success" ] \
              && [ "${{ needs.webhook-handler-nil-err.result }}" = "success" ] \
              && [ "${{ needs.feishu-sdk-only.result }}" = "success" ] \
-             && [ "${{ needs.run-quality-foundation.result }}" = "success" ]; then
+             && [ "${{ needs.run-quality-foundation.result }}" = "success" ] \
+             && [ "${{ needs.write-contract-boundaries.result }}" = "success" ]; then
             echo "all phase 0 gates green"
             exit 0
           fi

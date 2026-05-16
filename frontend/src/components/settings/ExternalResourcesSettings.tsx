@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNodeClient } from '../../hooks/useNodeClient';
 import { useToastStore } from '../../store/toast';
-import type { ExternalResource } from '../../types/api';
+import type { ExternalResource, ExternalResourceSaveRequest } from '../../types/api';
 
 const TYPE_OPTIONS = ['database', 'monitoring', 'api', 'cache'] as const;
 const ENV_OPTIONS = ['production', 'staging', 'testing', 'development'] as const;
@@ -211,7 +211,7 @@ function AddResourceForm({ onSuccess }: { onSuccess: () => void }) {
     if (!validate()) return;
     setSaving(true);
     try {
-      const resource: Partial<ExternalResource> & { name: string } = {
+      const resource: ExternalResourceSaveRequest = {
         name: name.trim(),
         type,
         environment,
@@ -221,7 +221,7 @@ function AddResourceForm({ onSuccess }: { onSuccess: () => void }) {
         read_only: readOnly,
         enabled,
       };
-      await client.saveExternalResource(resource);
+      await client.upsertExternalResource(resource);
       showToast('success', t('externalResources.saveSuccess', { name: resource.name }));
       onSuccess();
     } catch (e) {

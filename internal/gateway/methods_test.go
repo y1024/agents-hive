@@ -86,6 +86,10 @@ func (s *configChannelStore) SaveChannelConfig(_ context.Context, rec *store.Cha
 	return nil
 }
 
+func (s *configChannelStore) UpsertChannelConfigFull(ctx context.Context, rec *store.ChannelConfigRecord) error {
+	return s.SaveChannelConfig(ctx, rec)
+}
+
 func (s *configChannelStore) SetConfig(_ context.Context, key, value string) error {
 	s.configs[key] = value
 	return nil
@@ -97,6 +101,10 @@ func (s *configChannelStore) SaveMCPServer(_ context.Context, rec *store.MCPServ
 	return nil
 }
 
+func (s *configChannelStore) UpsertMCPServerFull(ctx context.Context, rec *store.MCPServerRecord) error {
+	return s.SaveMCPServer(ctx, rec)
+}
+
 func (s *configChannelStore) DeleteMCPServer(_ context.Context, name string) error {
 	delete(s.mcp, name)
 	return nil
@@ -106,6 +114,10 @@ func (s *configChannelStore) SaveExternalResource(_ context.Context, rec *store.
 	cp := *rec
 	s.resources[rec.Name] = &cp
 	return nil
+}
+
+func (s *configChannelStore) UpsertExternalResourceFull(ctx context.Context, rec *store.ExternalResourceRecord) error {
+	return s.SaveExternalResource(ctx, rec)
 }
 
 func (s *configChannelStore) GetExternalResource(_ context.Context, name string) (*store.ExternalResourceRecord, error) {
@@ -408,6 +420,45 @@ func TestConfigUpdatePersistsWechatbotChannel(t *testing.T) {
 	assert.JSONEq(t, `{"enabled":true}`, rec.ConfigJSON)
 }
 
+func TestConfigUpdateDingTalkPatchPreservesOmittedClearsEmptyAndPreservesMasked(t *testing.T) {
+	cfg := config.Default()
+	cfg.Channel.DingTalk = config.DingTalkConfig{
+		Enabled:   true,
+		AppKey:    "old-app-key",
+		AppSecret: "real-app-secret",
+		Token:     "real-token",
+		AESKey:    "real-aes-key",
+		AgentID:   42,
+	}
+	var mu sync.RWMutex
+	db := newConfigChannelStore()
+
+	gw, token := newTestGateway(t)
+	registerConfigMethods(gw, Deps{Config: cfg, ConfigMu: &mu, Store: db})
+
+	resp := doRPC(t, gw, "config.update", map[string]interface{}{
+		"channel": map[string]interface{}{
+			"dingtalk": map[string]interface{}{
+				"enabled":    false,
+				"app_key":    "new-app-key",
+				"app_secret": maskedSecretValue,
+				"token":      "",
+			},
+		},
+	}, token)
+	require.Nil(t, resp.Error, "config.update should patch dingtalk fields: %v", resp.Error)
+	assert.False(t, cfg.Channel.DingTalk.Enabled)
+	assert.Equal(t, "new-app-key", cfg.Channel.DingTalk.AppKey)
+	assert.Equal(t, "real-app-secret", cfg.Channel.DingTalk.AppSecret)
+	assert.Empty(t, cfg.Channel.DingTalk.Token)
+	assert.Equal(t, "real-aes-key", cfg.Channel.DingTalk.AESKey)
+	assert.Equal(t, int64(42), cfg.Channel.DingTalk.AgentID)
+	require.NotNil(t, db.records["dingtalk"])
+	assert.Contains(t, db.records["dingtalk"].ConfigJSON, `"app_key":"new-app-key"`)
+	assert.NotContains(t, db.records["dingtalk"].ConfigJSON, `"app_id"`)
+	assert.NotContains(t, db.records["dingtalk"].ConfigJSON, maskedSecretValue)
+}
+
 func TestConfigUpdatePreservesMaskedChannelSecrets(t *testing.T) {
 	cfg := config.Default()
 	cfg.Channel.Feishu = config.FeishuConfig{
@@ -443,6 +494,48 @@ func TestConfigUpdatePreservesMaskedChannelSecrets(t *testing.T) {
 	assert.Contains(t, db.records["feishu"].ConfigJSON, `"app_secret":"real-app-secret"`)
 	assert.Contains(t, db.records["feishu"].ConfigJSON, `"verification_token":"real-verify-token"`)
 	assert.Contains(t, db.records["feishu"].ConfigJSON, `"encrypt_key":"real-encrypt-key"`)
+	assert.NotContains(t, db.records["feishu"].ConfigJSON, maskedSecretValue)
+}
+
+func TestConfigUpdateFeishuPatchPreservesOmittedAndClearsEmpty(t *testing.T) {
+	cfg := config.Default()
+	cfg.Channel.Feishu = config.FeishuConfig{
+		Enabled:           true,
+		AppID:             "cli_old",
+		AppSecret:         "real-app-secret",
+		Region:            "cn",
+		VerificationToken: "real-verify-token",
+		EncryptKey:        "real-encrypt-key",
+		WebhookURL:        "https://callback.example.com/feishu",
+		AckEmoji:          "Get",
+	}
+	var mu sync.RWMutex
+	db := newConfigChannelStore()
+
+	gw, token := newTestGateway(t)
+	registerConfigMethods(gw, Deps{Config: cfg, ConfigMu: &mu, Store: db})
+
+	resp := doRPC(t, gw, "config.update", map[string]interface{}{
+		"channel": map[string]interface{}{
+			"feishu": map[string]interface{}{
+				"enabled":     false,
+				"app_secret":  "",
+				"webhook_url": maskedSecretValue,
+			},
+		},
+	}, token)
+	require.Nil(t, resp.Error, "config.update should patch feishu fields: %v", resp.Error)
+	assert.False(t, cfg.Channel.Feishu.Enabled)
+	assert.Equal(t, "cli_old", cfg.Channel.Feishu.AppID)
+	assert.Empty(t, cfg.Channel.Feishu.AppSecret)
+	assert.Equal(t, "cn", cfg.Channel.Feishu.Region)
+	assert.Equal(t, "real-verify-token", cfg.Channel.Feishu.VerificationToken)
+	assert.Equal(t, "real-encrypt-key", cfg.Channel.Feishu.EncryptKey)
+	assert.Equal(t, "https://callback.example.com/feishu", cfg.Channel.Feishu.WebhookURL)
+	assert.Equal(t, "Get", cfg.Channel.Feishu.AckEmoji)
+	require.NotNil(t, db.records["feishu"])
+	assert.Contains(t, db.records["feishu"].ConfigJSON, `"app_secret":""`)
+	assert.Contains(t, db.records["feishu"].ConfigJSON, `"app_id":"cli_old"`)
 	assert.NotContains(t, db.records["feishu"].ConfigJSON, maskedSecretValue)
 }
 

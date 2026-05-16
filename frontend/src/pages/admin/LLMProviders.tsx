@@ -4,7 +4,14 @@ import type { TFunction } from 'i18next';
 import { Plus, Trash2, Check, X, ChevronDown, ChevronUp, Star } from 'lucide-react';
 import { useNodeClient } from '../../hooks/useNodeClient';
 import { useToastStore } from '../../store/toast';
-import type { LLMProviderRecord, LLMModelRecord } from '../../types/api';
+import type {
+  LLMProviderCreateRequest,
+  LLMProviderRecord,
+  LLMProviderUpdateRequest,
+  LLMModelCreateRequest,
+  LLMModelRecord,
+  LLMModelUpdateRequest,
+} from '../../types/api';
 
 // 支持的 provider 类型（与后端 provider.go 对齐）
 const PROVIDER_TYPES = [
@@ -40,15 +47,26 @@ const EMPTY_PROVIDER: ProviderFormData = {
   service_type: 'llm',
 };
 
-interface ProviderFormProps {
+interface ProviderCreateFormProps {
   initial?: Partial<ProviderFormData>;
-  isEdit?: boolean;
-  onSubmit: (data: ProviderFormSubmitData) => Promise<void>;
+  isEdit?: false;
+  onSubmit: (data: ProviderCreateSubmitData) => Promise<void>;
   onCancel: () => void;
 }
 
-type ProviderFormSubmitData = Partial<ProviderFormData> & { name: string };
-type ModelFormSubmitData = Partial<ModelFormData> & { name: string };
+interface ProviderUpdateFormProps {
+  initial?: Partial<ProviderFormData>;
+  isEdit: true;
+  onSubmit: (data: ProviderUpdateSubmitData) => Promise<void>;
+  onCancel: () => void;
+}
+
+type ProviderFormProps = ProviderCreateFormProps | ProviderUpdateFormProps;
+
+type ProviderCreateSubmitData = LLMProviderCreateRequest;
+type ProviderUpdateSubmitData = LLMProviderUpdateRequest;
+type ModelCreateSubmitData = LLMModelCreateRequest;
+type ModelUpdateSubmitData = LLMModelUpdateRequest;
 
 function ProviderForm({ initial, isEdit, onSubmit, onCancel }: ProviderFormProps) {
   const { t } = useTranslation();
@@ -61,9 +79,9 @@ function ProviderForm({ initial, isEdit, onSubmit, onCancel }: ProviderFormProps
     setForm((f) => ({ ...f, [k]: v }));
   };
 
-  const buildSubmitPayload = (): ProviderFormSubmitData => {
+  const buildSubmitPayload = (): ProviderCreateSubmitData | ProviderUpdateSubmitData => {
     if (!isEdit) return form;
-    const payload: ProviderFormSubmitData = { name: form.name };
+    const payload: ProviderUpdateSubmitData = {};
     touched.forEach((key) => {
       assignProviderField(payload, key, form[key]);
     });
@@ -74,7 +92,11 @@ function ProviderForm({ initial, isEdit, onSubmit, onCancel }: ProviderFormProps
     if (!form.name.trim()) return;
     setSaving(true);
     try {
-      await onSubmit(buildSubmitPayload());
+      if (isEdit) {
+        await onSubmit(buildSubmitPayload() as ProviderUpdateSubmitData);
+      } else {
+        await onSubmit(buildSubmitPayload() as ProviderCreateSubmitData);
+      }
     } finally {
       setSaving(false);
     }
@@ -194,13 +216,12 @@ const EMPTY_MODEL: ModelFormData = {
 };
 
 function assignProviderField(
-  payload: ProviderFormSubmitData,
+  payload: ProviderCreateSubmitData | ProviderUpdateSubmitData,
   key: keyof ProviderFormData,
   value: ProviderFormData[keyof ProviderFormData]
 ) {
   switch (key) {
     case 'name':
-      payload.name = value as string;
       break;
     case 'provider_type':
       payload.provider_type = value as string;
@@ -227,7 +248,7 @@ function assignProviderField(
 }
 
 function assignModelField(
-  payload: ModelFormSubmitData,
+  payload: ModelCreateSubmitData | ModelUpdateSubmitData,
   key: keyof ModelFormData,
   value: ModelFormData[keyof ModelFormData]
 ) {
@@ -256,13 +277,23 @@ function assignModelField(
   }
 }
 
-interface ModelFormProps {
+interface ModelCreateFormProps {
   providers: LLMProviderRecord[];
   initial?: Partial<ModelFormData>;
-  isEdit?: boolean;
-  onSubmit: (data: ModelFormSubmitData) => Promise<void>;
+  isEdit?: false;
+  onSubmit: (data: ModelCreateSubmitData) => Promise<void>;
   onCancel: () => void;
 }
+
+interface ModelUpdateFormProps {
+  providers: LLMProviderRecord[];
+  initial?: Partial<ModelFormData>;
+  isEdit: true;
+  onSubmit: (data: ModelUpdateSubmitData) => Promise<void>;
+  onCancel: () => void;
+}
+
+type ModelFormProps = ModelCreateFormProps | ModelUpdateFormProps;
 
 function ModelForm({ providers, initial, isEdit, onSubmit, onCancel }: ModelFormProps) {
   const { t } = useTranslation();
@@ -275,9 +306,9 @@ function ModelForm({ providers, initial, isEdit, onSubmit, onCancel }: ModelForm
     setForm((f) => ({ ...f, [k]: v }));
   };
 
-  const buildSubmitPayload = (): ModelFormSubmitData => {
+  const buildSubmitPayload = (): ModelCreateSubmitData | ModelUpdateSubmitData => {
     if (!isEdit) return form;
-    const payload: ModelFormSubmitData = { name: form.name };
+    const payload: ModelUpdateSubmitData = {};
     touched.forEach((key) => {
       assignModelField(payload, key, form[key]);
     });
@@ -288,7 +319,11 @@ function ModelForm({ providers, initial, isEdit, onSubmit, onCancel }: ModelForm
     if (!form.name.trim() || !form.model.trim()) return;
     setSaving(true);
     try {
-      await onSubmit(buildSubmitPayload());
+      if (isEdit) {
+        await onSubmit(buildSubmitPayload() as ModelUpdateSubmitData);
+      } else {
+        await onSubmit(buildSubmitPayload() as ModelCreateSubmitData);
+      }
     } finally {
       setSaving(false);
     }
@@ -420,7 +455,7 @@ export function LLMProviders() {
   useEffect(() => { load(); }, [load]);
 
   // ── Provider CRUD ──
-  const handleCreateProvider = async (data: ProviderFormSubmitData) => {
+  const handleCreateProvider = async (data: ProviderCreateSubmitData) => {
     await client.adminCreateLLMProvider({
       ...data,
       provider_type: data.provider_type ?? EMPTY_PROVIDER.provider_type,
@@ -430,7 +465,7 @@ export function LLMProviders() {
     load();
   };
 
-  const handleUpdateProvider = async (name: string, data: ProviderFormSubmitData) => {
+  const handleUpdateProvider = async (name: string, data: ProviderUpdateSubmitData) => {
     await client.adminUpdateLLMProvider(name, data);
     addToast('success', `Provider "${name}" 已更新`);
     setEditingProvider(null);
@@ -462,7 +497,7 @@ export function LLMProviders() {
     });
 
   // ── Model CRUD ──
-  const handleCreateModel = async (data: ModelFormSubmitData) => {
+  const handleCreateModel = async (data: ModelCreateSubmitData) => {
     await client.adminCreateLLMModel({
       ...data,
       model: data.model ?? '',
@@ -473,9 +508,9 @@ export function LLMProviders() {
     load();
   };
 
-  const handleUpdateModel = async (name: string, data: ModelFormSubmitData) => {
+  const handleUpdateModel = async (name: string, data: ModelUpdateSubmitData) => {
     await client.adminUpdateLLMModel(name, data);
-    const newName = data.name.trim();
+    const newName = data.name?.trim() ?? '';
     addToast('success', newName && newName !== name ? `Model "${name}" 已重命名为 "${newName}"` : `Model "${name}" 已更新`);
     setEditingModel(null);
     load();

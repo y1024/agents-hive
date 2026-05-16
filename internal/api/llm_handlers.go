@@ -147,7 +147,7 @@ func (s *Server) handleAdminCreateLLMProvider(w http.ResponseWriter, r *http.Req
 		ServiceType:  serviceType,
 		ConfigJSON:   configJSON,
 	}
-	if err := s.store.SaveLLMProvider(ctx, rec); err != nil {
+	if err := s.store.CreateLLMProvider(ctx, rec); err != nil {
 		s.logger.Error("保存 LLM Provider 失败", zap.Error(err))
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "保存失败: " + err.Error(), Code: errs.CodeStoreWriteFailed})
 		return
@@ -238,7 +238,7 @@ func (s *Server) handleAdminUpdateLLMProvider(w http.ResponseWriter, r *http.Req
 		existing.ConfigJSON = configJSON
 	}
 
-	if err := s.store.SaveLLMProvider(ctx, existing); err != nil {
+	if err := s.store.UpdateLLMProvider(ctx, name, existing); err != nil {
 		s.logger.Error("更新 LLM Provider 失败", zap.Error(err))
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "更新失败: " + err.Error(), Code: errs.CodeStoreWriteFailed})
 		return
@@ -387,7 +387,7 @@ func (s *Server) handleAdminCreateLLMModel(w http.ResponseWriter, r *http.Reques
 		Enabled:      req.Enabled,
 		ConfigJSON:   configJSON,
 	}
-	if err := s.store.SaveLLMModel(ctx, rec); err != nil {
+	if err := s.store.CreateLLMModel(ctx, rec); err != nil {
 		s.logger.Error("保存 LLM Model 失败", zap.Error(err))
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "保存失败: " + err.Error(), Code: errs.CodeStoreWriteFailed})
 		return

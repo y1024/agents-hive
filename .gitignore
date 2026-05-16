@@ -49,6 +49,7 @@ scripts/*
 !scripts/ci/
 !scripts/ci/**
 !scripts/check_run_quality_foundation_guard.sh
+!scripts/check_write_contract_boundaries.sh
 openspec/
 config.prd.json
 hive-linux

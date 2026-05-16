@@ -42,6 +42,18 @@ func (nilScheduledTaskStore) SaveScheduledTask(context.Context, *store.Scheduled
 	return nil
 }
 
+func (nilScheduledTaskStore) CreateScheduledTask(context.Context, *store.ScheduledTaskDefinition, *time.Time) error {
+	return nil
+}
+
+func (nilScheduledTaskStore) UpdateScheduledTaskDefinition(context.Context, *store.ScheduledTaskDefinition, *time.Time) error {
+	return nil
+}
+
+func (nilScheduledTaskStore) SetScheduledTaskEnabled(context.Context, string, bool, *time.Time) error {
+	return nil
+}
+
 func (nilScheduledTaskStore) GetScheduledTask(_ context.Context, id string) (*store.ScheduledTask, error) {
 	return &store.ScheduledTask{ID: id, CreatedBy: ""}, nil
 }
@@ -297,6 +309,54 @@ func TestScheduledTaskUpdateKeepsRunningLease(t *testing.T) {
 	}
 	if got.ActiveRunID != "run-1" || got.LeaseExpiresAt == nil {
 		t.Fatalf("update must preserve running lease: %+v", got)
+	}
+}
+
+func TestScheduledTaskUpdateRejectsRuntimeFieldOverwrite(t *testing.T) {
+	srv, appStore := newScheduledTaskTestServer(t)
+	leaseUntil := time.Now().UTC().Add(time.Hour)
+	nextRun := time.Now().UTC().Add(time.Hour)
+	if err := appStore.SaveScheduledTask(context.Background(), &store.ScheduledTask{
+		ID:             "task-runtime-boundary",
+		Name:           "runtime-boundary",
+		TargetType:     "session",
+		Prompt:         "run",
+		IntervalSec:    60,
+		Timezone:       "UTC",
+		Enabled:        true,
+		CreatedBy:      "u1",
+		NextRunAt:      &nextRun,
+		ActiveRunID:    "run-real",
+		LeaseExpiresAt: &leaseUntil,
+		LastError:      "running",
+	}); err != nil {
+		t.Fatalf("SaveScheduledTask: %v", err)
+	}
+	body := `{
+		"name":"runtime-boundary-renamed",
+		"target_type":"session",
+		"prompt":"run updated",
+		"interval_sec":60,
+		"timezone":"UTC",
+		"enabled":true,
+		"active_run_id":"run-from-browser",
+		"lease_expires_at":"2030-01-01T00:00:00Z",
+		"last_error":"browser overwrite"
+	}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/scheduled-tasks/task-runtime-boundary", bytes.NewBufferString(body))
+	req.SetPathValue("id", "task-runtime-boundary")
+	req = scheduledTaskUserCtx(req, "u1")
+	rec := httptest.NewRecorder()
+	srv.Mux().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	got, err := appStore.GetScheduledTask(req.Context(), "task-runtime-boundary")
+	if err != nil {
+		t.Fatalf("GetScheduledTask: %v", err)
+	}
+	if got.ActiveRunID != "run-real" || got.LeaseExpiresAt == nil || !got.LeaseExpiresAt.Equal(leaseUntil) || got.LastError != "running" {
+		t.Fatalf("definition update must not overwrite runtime state: %+v", got)
 	}
 }
 

@@ -1109,6 +1109,17 @@ func (s *PostgresStore) SaveLLMProvider(ctx context.Context, rec *LLMProviderRec
 	return nil
 }
 
+func (s *PostgresStore) CreateLLMProvider(ctx context.Context, rec *LLMProviderRecord) error {
+	return s.SaveLLMProvider(ctx, rec)
+}
+
+func (s *PostgresStore) UpdateLLMProvider(ctx context.Context, name string, rec *LLMProviderRecord) error {
+	if rec != nil && rec.Name == "" {
+		rec.Name = name
+	}
+	return s.SaveLLMProvider(ctx, rec)
+}
+
 func (s *PostgresStore) DeleteLLMProvider(ctx context.Context, name string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1197,6 +1208,10 @@ func (s *PostgresStore) SaveLLMModel(ctx context.Context, rec *LLMModelRecord) e
 		s.logger.Warn("发送 LLM 模型配置变更通知失败", zap.String("name", rec.Name), zap.Error(err))
 	}
 	return nil
+}
+
+func (s *PostgresStore) CreateLLMModel(ctx context.Context, rec *LLMModelRecord) error {
+	return s.SaveLLMModel(ctx, rec)
 }
 
 func (s *PostgresStore) UpdateLLMModel(ctx context.Context, oldName string, rec *LLMModelRecord) error {
@@ -1395,6 +1410,10 @@ func (s *PostgresStore) SaveChannelConfig(ctx context.Context, rec *ChannelConfi
 	return nil
 }
 
+func (s *PostgresStore) UpsertChannelConfigFull(ctx context.Context, rec *ChannelConfigRecord) error {
+	return s.SaveChannelConfig(ctx, rec)
+}
+
 func (s *PostgresStore) ListChannelConfigs(ctx context.Context) ([]*ChannelConfigRecord, error) {
 	rows, err := s.pool.Query(ctx,
 		"SELECT platform, enabled, config_json, updated_at FROM channel_configs ORDER BY platform")
@@ -1566,22 +1585,123 @@ func scanScheduledTask(row scheduledTaskScanner) (*ScheduledTask, error) {
 	return &rec, nil
 }
 
-func (s *PostgresStore) SaveScheduledTask(ctx context.Context, rec *ScheduledTask) error {
-	targetType := rec.TargetType
-	if targetType == "" {
-		targetType = "im_push"
+func normalizeScheduledTaskDefinition(rec *ScheduledTaskDefinition) (ScheduledTaskDefinition, []byte, error) {
+	if rec == nil {
+		return ScheduledTaskDefinition{}, nil, errs.New(errs.CodeInvalidArgument, "定时任务定义不能为空")
 	}
-	timezone := rec.Timezone
-	if timezone == "" {
-		timezone = "UTC"
+	cp := *rec
+	if cp.TargetType == "" {
+		cp.TargetType = "im_push"
 	}
-	targetConfig := rec.TargetConfig
-	if targetConfig == nil {
-		targetConfig = map[string]any{}
+	if cp.Timezone == "" {
+		cp.Timezone = "UTC"
 	}
-	targetConfigJSON, err := json.Marshal(targetConfig)
+	if cp.TargetConfig == nil {
+		cp.TargetConfig = map[string]any{}
+	}
+	targetConfigJSON, err := json.Marshal(cp.TargetConfig)
 	if err != nil {
-		return errs.Wrap(errs.CodeStoreWriteFailed, "序列化定时任务 target_config 失败", err)
+		return ScheduledTaskDefinition{}, nil, errs.Wrap(errs.CodeStoreWriteFailed, "序列化定时任务 target_config 失败", err)
+	}
+	return cp, targetConfigJSON, nil
+}
+
+func (s *PostgresStore) CreateScheduledTask(ctx context.Context, rec *ScheduledTaskDefinition, nextRunAt *time.Time) error {
+	cp, targetConfigJSON, err := normalizeScheduledTaskDefinition(rec)
+	if err != nil {
+		return err
+	}
+	_, err = s.pool.Exec(ctx,
+		`INSERT INTO scheduled_pushes (
+			id, name, description, target_type, target_config, platform, prompt, cron_expr, interval_sec, timezone,
+			enabled, created_by, next_run_at, created_at, updated_at
+		)
+		VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW())`,
+		cp.ID, cp.Name, cp.Description, cp.TargetType, string(targetConfigJSON), cp.Platform, cp.Prompt, cp.CronExpr, cp.IntervalSec, cp.Timezone,
+		cp.Enabled, cp.CreatedBy, nullableTimePtr(nextRunAt),
+	)
+	if err != nil {
+		return errs.Wrap(errs.CodeStoreWriteFailed, "创建定时任务失败", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) UpdateScheduledTaskDefinition(ctx context.Context, rec *ScheduledTaskDefinition, nextRunAt *time.Time) error {
+	cp, targetConfigJSON, err := normalizeScheduledTaskDefinition(rec)
+	if err != nil {
+		return err
+	}
+	ct, err := s.pool.Exec(ctx,
+		`UPDATE scheduled_pushes
+		SET name = $2,
+			description = $3,
+			target_type = $4,
+			target_config = $5::jsonb,
+			platform = $6,
+			prompt = $7,
+			cron_expr = $8,
+			interval_sec = $9,
+			timezone = $10,
+			enabled = $11,
+			created_by = $12,
+			next_run_at = $13,
+			updated_at = NOW()
+		WHERE id = $1`,
+		cp.ID, cp.Name, cp.Description, cp.TargetType, string(targetConfigJSON), cp.Platform, cp.Prompt, cp.CronExpr, cp.IntervalSec, cp.Timezone,
+		cp.Enabled, cp.CreatedBy, nullableTimePtr(nextRunAt),
+	)
+	if err != nil {
+		return errs.Wrap(errs.CodeStoreWriteFailed, "更新定时任务定义失败", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) SetScheduledTaskEnabled(ctx context.Context, id string, enabled bool, nextRunAt *time.Time) error {
+	ct, err := s.pool.Exec(ctx,
+		`UPDATE scheduled_pushes
+		SET enabled = $2,
+			next_run_at = $3,
+			updated_at = NOW()
+		WHERE id = $1`,
+		id, enabled, nullableTimePtr(nextRunAt),
+	)
+	if err != nil {
+		return errs.Wrap(errs.CodeStoreWriteFailed, "更新定时任务启用状态失败", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) UpdateScheduledTaskRuntimeState(ctx context.Context, id string, state ScheduledTaskRuntimeState) error {
+	ct, err := s.pool.Exec(ctx,
+		`UPDATE scheduled_pushes
+		SET last_run_at = $2,
+			next_run_at = $3,
+			last_error = $4,
+			active_run_id = $5,
+			lease_expires_at = $6,
+			updated_at = NOW()
+		WHERE id = $1`,
+		id, nullableTimePtr(state.LastRunAt), nullableTimePtr(state.NextRunAt), state.LastError, state.ActiveRunID, nullableTimePtr(state.LeaseExpiresAt),
+	)
+	if err != nil {
+		return errs.Wrap(errs.CodeStoreWriteFailed, "更新定时任务运行态失败", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) SaveScheduledTask(ctx context.Context, rec *ScheduledTask) error {
+	def, targetConfigJSON, err := normalizeScheduledTaskDefinition(rec.Definition())
+	if err != nil {
+		return err
 	}
 	_, err = s.pool.Exec(ctx,
 		`INSERT INTO scheduled_pushes (
@@ -1603,7 +1723,7 @@ func (s *PostgresStore) SaveScheduledTask(ctx context.Context, rec *ScheduledTas
 			created_by=EXCLUDED.created_by,
 			next_run_at=EXCLUDED.next_run_at,
 			updated_at=NOW()`,
-		rec.ID, rec.Name, rec.Description, targetType, string(targetConfigJSON), rec.Platform, rec.Prompt, rec.CronExpr, rec.IntervalSec, timezone,
+		def.ID, def.Name, def.Description, def.TargetType, string(targetConfigJSON), def.Platform, def.Prompt, def.CronExpr, def.IntervalSec, def.Timezone,
 		rec.Enabled, rec.CreatedBy, nullableTimePtr(rec.LastRunAt), nullableTimePtr(rec.NextRunAt), rec.LastError, rec.ActiveRunID, rec.LeaseExpiresAt,
 	)
 	if err != nil {
@@ -2172,6 +2292,10 @@ func (s *PostgresStore) SaveMCPServer(ctx context.Context, rec *MCPServerRecord)
 	return nil
 }
 
+func (s *PostgresStore) UpsertMCPServerFull(ctx context.Context, rec *MCPServerRecord) error {
+	return s.SaveMCPServer(ctx, rec)
+}
+
 func (s *PostgresStore) DeleteMCPServer(ctx context.Context, name string) error {
 	ct, err := s.pool.Exec(ctx, "DELETE FROM mcp_servers WHERE name = $1", name)
 	if err != nil {
@@ -2242,6 +2366,21 @@ func (s *PostgresStore) SaveExternalResource(ctx context.Context, rec *ExternalR
 		s.logger.Warn("发送外部资源配置变更通知失败", zap.String("name", rec.Name), zap.Error(err))
 	}
 	return nil
+}
+
+func (s *PostgresStore) CreateExternalResource(ctx context.Context, rec *ExternalResourceRecord) error {
+	return s.SaveExternalResource(ctx, rec)
+}
+
+func (s *PostgresStore) UpdateExternalResource(ctx context.Context, name string, rec *ExternalResourceRecord) error {
+	if rec != nil && rec.Name == "" {
+		rec.Name = name
+	}
+	return s.SaveExternalResource(ctx, rec)
+}
+
+func (s *PostgresStore) UpsertExternalResourceFull(ctx context.Context, rec *ExternalResourceRecord) error {
+	return s.SaveExternalResource(ctx, rec)
 }
 
 func (s *PostgresStore) DeleteExternalResource(ctx context.Context, name string) error {

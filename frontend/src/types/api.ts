@@ -1391,6 +1391,18 @@ export interface ExternalResource {
   updated_at: string;
 }
 
+export interface ExternalResourceSaveRequest {
+  name: string;
+  type?: string;
+  environment?: string;
+  description?: string;
+  connection?: string;
+  endpoint?: string;
+  credentials?: string;
+  read_only?: boolean;
+  enabled?: boolean;
+}
+
 // Gateway RPC 响应格式
 export interface RPCResponse<T = unknown> {
   id: string;
@@ -1453,6 +1465,19 @@ export interface AdminProvider {
   config_json: Record<string, unknown>;
 }
 
+export interface AdminProviderCreateRequest {
+  name: string;
+  provider_type: string;
+  enabled?: boolean;
+  config_json?: Record<string, unknown>;
+}
+
+export interface AdminProviderUpdateRequest {
+  provider_type?: string;
+  enabled?: boolean;
+  config_json?: Record<string, unknown>;
+}
+
 export interface AdminProvidersResponse {
   providers: AdminProvider[];
 }
@@ -1492,6 +1517,29 @@ export interface LLMProviderRecord {
   updated_at: string;
 }
 
+export interface LLMProviderCreateRequest {
+  name: string;
+  provider_type: string;
+  base_url?: string;
+  api_key?: string;
+  is_default?: boolean;
+  enabled?: boolean;
+  api_format?: string;
+  service_type?: string;
+  config_json?: string;
+}
+
+export interface LLMProviderUpdateRequest {
+  provider_type?: string;
+  base_url?: string;
+  api_key?: string;
+  is_default?: boolean;
+  enabled?: boolean;
+  api_format?: string;
+  service_type?: string;
+  config_json?: string;
+}
+
 // LLM Model 管理
 export interface LLMModelRecord {
   name: string;
@@ -1504,4 +1552,26 @@ export interface LLMModelRecord {
   config_json: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface LLMModelCreateRequest {
+  name: string;
+  provider_name?: string;
+  model: string;
+  base_url?: string;
+  api_key?: string;
+  is_default?: boolean;
+  enabled?: boolean;
+  config_json?: string;
+}
+
+export interface LLMModelUpdateRequest {
+  name?: string;
+  provider_name?: string;
+  model?: string;
+  base_url?: string;
+  api_key?: string;
+  is_default?: boolean;
+  enabled?: boolean;
+  config_json?: string;
 }

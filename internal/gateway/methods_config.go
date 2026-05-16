@@ -12,6 +12,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/chef-guo/agents-hive/internal/collections"
 	"github.com/chef-guo/agents-hive/internal/config"
 	"github.com/chef-guo/agents-hive/internal/errs"
 	"github.com/chef-guo/agents-hive/internal/security"
@@ -51,11 +52,123 @@ type AgentUpdateRequest struct {
 
 // ChannelUpdateRequest IM 通道相关可更新字段
 type ChannelUpdateRequest struct {
-	Enabled   *bool                   `json:"enabled,omitempty"`
-	DingTalk  *config.DingTalkConfig  `json:"dingtalk,omitempty"`
-	Feishu    *config.FeishuConfig    `json:"feishu,omitempty"`
-	WeCom     *config.WeComConfig     `json:"wecom,omitempty"`
-	WeChatBot *config.WeChatBotConfig `json:"wechatbot,omitempty"`
+	Enabled   *bool                  `json:"enabled,omitempty"`
+	DingTalk  *DingTalkChannelPatch  `json:"dingtalk,omitempty"`
+	Feishu    *FeishuChannelPatch    `json:"feishu,omitempty"`
+	WeCom     *WeComChannelPatch     `json:"wecom,omitempty"`
+	WeChatBot *WeChatBotChannelPatch `json:"wechatbot,omitempty"`
+}
+
+// DingTalkChannelPatch 钉钉通道可更新字段
+type DingTalkChannelPatch struct {
+	Enabled   *bool   `json:"enabled,omitempty"`
+	AppKey    *string `json:"app_key,omitempty"`
+	AppSecret *string `json:"app_secret,omitempty"`
+	Token     *string `json:"token,omitempty"`
+	AESKey    *string `json:"aes_key,omitempty"`
+	AgentID   *int64  `json:"agent_id,omitempty"`
+}
+
+// FeishuChannelPatch 飞书通道可更新字段
+type FeishuChannelPatch struct {
+	Enabled             *bool                     `json:"enabled,omitempty"`
+	AppID               *string                   `json:"app_id,omitempty"`
+	AppSecret           *string                   `json:"app_secret,omitempty"`
+	Region              *string                   `json:"region,omitempty"`
+	VerificationToken   *string                   `json:"verification_token,omitempty"`
+	EncryptKey          *string                   `json:"encrypt_key,omitempty"`
+	EventEncryptEnabled *bool                     `json:"event_encrypt_enabled,omitempty"`
+	IngressMode         *config.FeishuIngressMode `json:"ingress_mode,omitempty"`
+	Reliability         *FeishuReliabilityPatch   `json:"reliability,omitempty"`
+	LongconnEnabled     *bool                     `json:"longconn_enabled,omitempty"`
+	WebhookURL          *string                   `json:"webhook_url,omitempty"`
+	AckEmoji            *string                   `json:"ack_emoji,omitempty"`
+	Renderer            *FeishuRendererPatch      `json:"renderer,omitempty"`
+	Inbound             *FeishuInboundPatch       `json:"inbound,omitempty"`
+	Governance          *FeishuGovernancePatch    `json:"governance,omitempty"`
+	Identity            *FeishuIdentityPatch      `json:"identity,omitempty"`
+	Outbound            *FeishuOutboundPatch      `json:"outbound,omitempty"`
+	Security            *FeishuSecurityPatch      `json:"security,omitempty"`
+	Push                *FeishuPushPatch          `json:"push,omitempty"`
+}
+
+// FeishuReliabilityPatch 飞书可靠性配置可更新字段
+type FeishuReliabilityPatch struct {
+	LongconnEnabled         *bool          `json:"longconn_enabled,omitempty"`
+	LongconnGapFetchEnabled *bool          `json:"longconn_gap_fetch_enabled,omitempty"`
+	HeartbeatStaleWindow    *time.Duration `json:"heartbeat_stale_window,omitempty"`
+	GapFetchMaxWindow       *time.Duration `json:"gap_fetch_max_window,omitempty"`
+}
+
+// FeishuRendererPatch 飞书渲染器配置可更新字段
+type FeishuRendererPatch struct {
+	Disabled          *bool `json:"disabled,omitempty"`
+	ThrottleMs        *int  `json:"throttle_ms,omitempty"`
+	ShowAgentProgress *bool `json:"show_agent_progress,omitempty"`
+}
+
+// FeishuInboundPatch 飞书入站配置可更新字段
+type FeishuInboundPatch struct {
+	EnableContextResolver *bool `json:"enable_context_resolver,omitempty"`
+}
+
+// FeishuIdentityPatch 飞书身份配置可更新字段
+type FeishuIdentityPatch struct {
+	UserCacheSize     *int    `json:"user_cache_size,omitempty"`
+	UserCacheTTLSec   *int    `json:"user_cache_ttl_sec,omitempty"`
+	EnableGroupEnrich *bool   `json:"enable_group_enrich,omitempty"`
+	NameLocale        *string `json:"name_locale,omitempty"`
+}
+
+// FeishuOutboundPatch 飞书出站配置可更新字段
+type FeishuOutboundPatch struct {
+	GlobalQPS            *int  `json:"global_qps,omitempty"`
+	PerChatQPS           *int  `json:"per_chat_qps,omitempty"`
+	MaxRetries           *int  `json:"max_retries,omitempty"`
+	EnableBinaryTransfer *bool `json:"enable_binary_transfer,omitempty"`
+}
+
+// FeishuSecurityPatch 飞书安全配置可更新字段
+type FeishuSecurityPatch struct {
+	PermissionDegradeThreshold *int `json:"permission_degrade_threshold,omitempty"`
+}
+
+// FeishuPushPatch 飞书主动推送配置可更新字段
+type FeishuPushPatch struct {
+	Enabled           *bool `json:"enabled,omitempty"`
+	PerChatPerMinute  *int  `json:"per_chat_per_minute,omitempty"`
+	IdempotencyTTLSec *int  `json:"idempotency_ttl_sec,omitempty"`
+}
+
+// FeishuGovernancePatch 飞书治理配置可更新字段
+type FeishuGovernancePatch struct {
+	CommandACL        *FeishuCommandACLPatch `json:"command_acl,omitempty"`
+	ModelAllowlist    *[]string              `json:"model_allowlist,omitempty"`
+	DebugEnabled      *bool                  `json:"debug_enabled,omitempty"`
+	MultiAgentEnabled *bool                  `json:"multi_agent_enabled,omitempty"`
+}
+
+// FeishuCommandACLPatch 飞书命令 ACL 配置可更新字段
+type FeishuCommandACLPatch struct {
+	ResetAllowlist *map[string][]string `json:"reset_allowlist,omitempty"`
+}
+
+// WeComChannelPatch 企业微信通道可更新字段
+type WeComChannelPatch struct {
+	Enabled        *bool   `json:"enabled,omitempty"`
+	CorpID         *string `json:"corp_id,omitempty"`
+	AgentID        *int    `json:"agent_id,omitempty"`
+	Secret         *string `json:"secret,omitempty"`
+	Token          *string `json:"token,omitempty"`
+	EncodingAESKey *string `json:"encoding_aes_key,omitempty"`
+}
+
+// WeChatBotChannelPatch 个人微信通道可更新字段
+type WeChatBotChannelPatch struct {
+	Enabled  *bool   `json:"enabled,omitempty"`
+	BaseURL  *string `json:"base_url,omitempty"`
+	CredRoot *string `json:"cred_root,omitempty"`
+	LogLevel *string `json:"log_level,omitempty"`
 }
 
 // MCPUpdateRequest MCP 相关可更新字段
@@ -237,22 +350,22 @@ func registerConfigMethods(gw *Gateway, deps Deps) {
 			// channel.enabled 父开关已改为从各通道 Enabled 状态自动推导，无需单独管理
 			if req.Channel != nil {
 				if req.Channel.DingTalk != nil {
-					next := mergeDingTalkConfig(deps.Config.Channel.DingTalk, *req.Channel.DingTalk)
+					next := applyDingTalkChannelPatch(deps.Config.Channel.DingTalk, req.Channel.DingTalk)
 					deps.Config.Channel.DingTalk = next
 					saveChannelToDB(ctx, deps.Store, "dingtalk", next)
 				}
 				if req.Channel.Feishu != nil {
-					next := mergeFeishuConfig(deps.Config.Channel.Feishu, *req.Channel.Feishu)
+					next := applyFeishuChannelPatch(deps.Config.Channel.Feishu, req.Channel.Feishu)
 					deps.Config.Channel.Feishu = next
 					saveChannelToDB(ctx, deps.Store, "feishu", next)
 				}
 				if req.Channel.WeCom != nil {
-					next := mergeWeComConfig(deps.Config.Channel.WeCom, *req.Channel.WeCom)
+					next := applyWeComChannelPatch(deps.Config.Channel.WeCom, req.Channel.WeCom)
 					deps.Config.Channel.WeCom = next
 					saveChannelToDB(ctx, deps.Store, "wecom", next)
 				}
 				if req.Channel.WeChatBot != nil {
-					next := mergeWeChatBotConfig(deps.Config.Channel.WeChatBot, *req.Channel.WeChatBot)
+					next := applyWeChatBotChannelPatch(deps.Config.Channel.WeChatBot, req.Channel.WeChatBot)
 					deps.Config.Channel.WeChatBot = next
 					saveChannelToDB(ctx, deps.Store, "wechatbot", next)
 				}
@@ -460,7 +573,7 @@ func saveChannelToDB(ctx context.Context, db store.Store, platform string, cfg a
 	}
 	_ = json.Unmarshal(data, &enabledMap)
 
-	if err := db.SaveChannelConfig(ctx, &store.ChannelConfigRecord{
+	if err := db.UpsertChannelConfigFull(ctx, &store.ChannelConfigRecord{
 		Platform:   platform,
 		Enabled:    enabledMap.Enabled,
 		ConfigJSON: string(data),
@@ -487,7 +600,7 @@ func saveMCPServerToDB(ctx context.Context, db store.Store, name string, srv con
 		timeout = "30s"
 	}
 
-	if err := db.SaveMCPServer(ctx, &store.MCPServerRecord{
+	if err := db.UpsertMCPServerFull(ctx, &store.MCPServerRecord{
 		Name:      name,
 		Transport: transport,
 		Command:   srv.Command,
@@ -549,43 +662,253 @@ func redactGatewayTokens(view map[string]any) {
 	gateway["tokens"] = tokens
 }
 
-func mergeDingTalkConfig(existing, incoming config.DingTalkConfig) config.DingTalkConfig {
-	incoming.AppSecret = mergeSecretString(existing.AppSecret, incoming.AppSecret)
-	incoming.Token = mergeSecretString(existing.Token, incoming.Token)
-	incoming.AESKey = mergeSecretString(existing.AESKey, incoming.AESKey)
-	return incoming
+func applyDingTalkChannelPatch(existing config.DingTalkConfig, patch *DingTalkChannelPatch) config.DingTalkConfig {
+	next := existing
+	if patch == nil {
+		return next
+	}
+	if patch.Enabled != nil {
+		next.Enabled = *patch.Enabled
+	}
+	if patch.AppKey != nil {
+		next.AppKey = mergeSecretString(existing.AppKey, *patch.AppKey)
+	}
+	if patch.AppSecret != nil {
+		next.AppSecret = mergeSecretString(existing.AppSecret, *patch.AppSecret)
+	}
+	if patch.Token != nil {
+		next.Token = mergeSecretString(existing.Token, *patch.Token)
+	}
+	if patch.AESKey != nil {
+		next.AESKey = mergeSecretString(existing.AESKey, *patch.AESKey)
+	}
+	if patch.AgentID != nil {
+		next.AgentID = *patch.AgentID
+	}
+	return next
 }
 
-func mergeFeishuConfig(existing, incoming config.FeishuConfig) config.FeishuConfig {
-	incoming.AppSecret = mergeSecretString(existing.AppSecret, incoming.AppSecret)
-	incoming.VerificationToken = mergeSecretString(existing.VerificationToken, incoming.VerificationToken)
-	incoming.EncryptKey = mergeSecretString(existing.EncryptKey, incoming.EncryptKey)
-	incoming.WebhookURL = mergeSecretString(existing.WebhookURL, incoming.WebhookURL)
-	return incoming
+func applyFeishuChannelPatch(existing config.FeishuConfig, patch *FeishuChannelPatch) config.FeishuConfig {
+	next := existing
+	if patch == nil {
+		return next
+	}
+	if patch.Enabled != nil {
+		next.Enabled = *patch.Enabled
+	}
+	if patch.AppID != nil {
+		next.AppID = mergeSecretString(existing.AppID, *patch.AppID)
+	}
+	if patch.AppSecret != nil {
+		next.AppSecret = mergeSecretString(existing.AppSecret, *patch.AppSecret)
+	}
+	if patch.Region != nil {
+		next.Region = *patch.Region
+	}
+	if patch.VerificationToken != nil {
+		next.VerificationToken = mergeSecretString(existing.VerificationToken, *patch.VerificationToken)
+	}
+	if patch.EncryptKey != nil {
+		next.EncryptKey = mergeSecretString(existing.EncryptKey, *patch.EncryptKey)
+	}
+	if patch.EventEncryptEnabled != nil {
+		next.EventEncryptEnabled = *patch.EventEncryptEnabled
+	}
+	if patch.IngressMode != nil {
+		next.IngressMode = *patch.IngressMode
+	}
+	if patch.Reliability != nil {
+		next.Reliability = applyFeishuReliabilityPatch(next.Reliability, patch.Reliability)
+	}
+	if patch.LongconnEnabled != nil {
+		next.LongconnEnabled = *patch.LongconnEnabled
+	}
+	if patch.WebhookURL != nil {
+		next.WebhookURL = mergeSecretString(existing.WebhookURL, *patch.WebhookURL)
+	}
+	if patch.AckEmoji != nil {
+		next.AckEmoji = *patch.AckEmoji
+	}
+	if patch.Renderer != nil {
+		next.Renderer = applyFeishuRendererPatch(next.Renderer, patch.Renderer)
+	}
+	if patch.Inbound != nil {
+		next.Inbound = applyFeishuInboundPatch(next.Inbound, patch.Inbound)
+	}
+	if patch.Governance != nil {
+		next.Governance = applyFeishuGovernancePatch(next.Governance, patch.Governance)
+	}
+	if patch.Identity != nil {
+		next.Identity = applyFeishuIdentityPatch(next.Identity, patch.Identity)
+	}
+	if patch.Outbound != nil {
+		next.Outbound = applyFeishuOutboundPatch(next.Outbound, patch.Outbound)
+	}
+	if patch.Security != nil {
+		next.Security = applyFeishuSecurityPatch(next.Security, patch.Security)
+	}
+	if patch.Push != nil {
+		next.Push = applyFeishuPushPatch(next.Push, patch.Push)
+	}
+	return next
 }
 
-func mergeWeComConfig(existing, incoming config.WeComConfig) config.WeComConfig {
-	incoming.Secret = mergeSecretString(existing.Secret, incoming.Secret)
-	incoming.Token = mergeSecretString(existing.Token, incoming.Token)
-	incoming.EncodingAESKey = mergeSecretString(existing.EncodingAESKey, incoming.EncodingAESKey)
-	return incoming
+func applyFeishuReliabilityPatch(existing config.FeishuReliabilityConfig, patch *FeishuReliabilityPatch) config.FeishuReliabilityConfig {
+	next := existing
+	if patch.LongconnEnabled != nil {
+		next.LongconnEnabled = *patch.LongconnEnabled
+	}
+	if patch.LongconnGapFetchEnabled != nil {
+		next.LongconnGapFetchEnabled = *patch.LongconnGapFetchEnabled
+	}
+	if patch.HeartbeatStaleWindow != nil {
+		next.HeartbeatStaleWindow = *patch.HeartbeatStaleWindow
+	}
+	if patch.GapFetchMaxWindow != nil {
+		next.GapFetchMaxWindow = *patch.GapFetchMaxWindow
+	}
+	return next
 }
 
-func mergeWeChatBotConfig(existing, incoming config.WeChatBotConfig) config.WeChatBotConfig {
-	if incoming.BaseURL == "" {
-		incoming.BaseURL = existing.BaseURL
-	} else {
-		incoming.BaseURL = mergeSecretString(existing.BaseURL, incoming.BaseURL)
+func applyFeishuRendererPatch(existing config.FeishuRendererConfig, patch *FeishuRendererPatch) config.FeishuRendererConfig {
+	next := existing
+	if patch.Disabled != nil {
+		next.Disabled = *patch.Disabled
 	}
-	if incoming.CredRoot == "" {
-		incoming.CredRoot = existing.CredRoot
-	} else {
-		incoming.CredRoot = mergeSecretString(existing.CredRoot, incoming.CredRoot)
+	if patch.ThrottleMs != nil {
+		next.ThrottleMs = *patch.ThrottleMs
 	}
-	if incoming.LogLevel == "" {
-		incoming.LogLevel = existing.LogLevel
+	if patch.ShowAgentProgress != nil {
+		next.ShowAgentProgress = *patch.ShowAgentProgress
 	}
-	return incoming
+	return next
+}
+
+func applyFeishuInboundPatch(existing config.FeishuInboundConfig, patch *FeishuInboundPatch) config.FeishuInboundConfig {
+	next := existing
+	if patch.EnableContextResolver != nil {
+		next.EnableContextResolver = patch.EnableContextResolver
+	}
+	return next
+}
+
+func applyFeishuGovernancePatch(existing config.FeishuGovernanceConfig, patch *FeishuGovernancePatch) config.FeishuGovernanceConfig {
+	next := existing
+	if patch.CommandACL != nil && patch.CommandACL.ResetAllowlist != nil {
+		next.CommandACL.ResetAllowlist = *patch.CommandACL.ResetAllowlist
+	}
+	if patch.ModelAllowlist != nil {
+		next.ModelAllowlist = append([]string(nil), (*patch.ModelAllowlist)...)
+	}
+	if patch.DebugEnabled != nil {
+		next.DebugEnabled = *patch.DebugEnabled
+	}
+	if patch.MultiAgentEnabled != nil {
+		next.MultiAgentEnabled = *patch.MultiAgentEnabled
+	}
+	return next
+}
+
+func applyFeishuIdentityPatch(existing config.FeishuIdentityConfig, patch *FeishuIdentityPatch) config.FeishuIdentityConfig {
+	next := existing
+	if patch.UserCacheSize != nil {
+		next.UserCacheSize = *patch.UserCacheSize
+	}
+	if patch.UserCacheTTLSec != nil {
+		next.UserCacheTTLSec = *patch.UserCacheTTLSec
+	}
+	if patch.EnableGroupEnrich != nil {
+		next.EnableGroupEnrich = patch.EnableGroupEnrich
+	}
+	if patch.NameLocale != nil {
+		next.NameLocale = *patch.NameLocale
+	}
+	return next
+}
+
+func applyFeishuOutboundPatch(existing config.FeishuOutboundConfig, patch *FeishuOutboundPatch) config.FeishuOutboundConfig {
+	next := existing
+	if patch.GlobalQPS != nil {
+		next.GlobalQPS = *patch.GlobalQPS
+	}
+	if patch.PerChatQPS != nil {
+		next.PerChatQPS = *patch.PerChatQPS
+	}
+	if patch.MaxRetries != nil {
+		next.MaxRetries = *patch.MaxRetries
+	}
+	if patch.EnableBinaryTransfer != nil {
+		next.EnableBinaryTransfer = *patch.EnableBinaryTransfer
+	}
+	return next
+}
+
+func applyFeishuSecurityPatch(existing config.FeishuSecurityConfig, patch *FeishuSecurityPatch) config.FeishuSecurityConfig {
+	next := existing
+	if patch.PermissionDegradeThreshold != nil {
+		next.PermissionDegradeThreshold = *patch.PermissionDegradeThreshold
+	}
+	return next
+}
+
+func applyFeishuPushPatch(existing config.FeishuPushConfig, patch *FeishuPushPatch) config.FeishuPushConfig {
+	next := existing
+	if patch.Enabled != nil {
+		next.Enabled = *patch.Enabled
+	}
+	if patch.PerChatPerMinute != nil {
+		next.PerChatPerMinute = *patch.PerChatPerMinute
+	}
+	if patch.IdempotencyTTLSec != nil {
+		next.IdempotencyTTLSec = *patch.IdempotencyTTLSec
+	}
+	return next
+}
+
+func applyWeComChannelPatch(existing config.WeComConfig, patch *WeComChannelPatch) config.WeComConfig {
+	next := existing
+	if patch == nil {
+		return next
+	}
+	if patch.Enabled != nil {
+		next.Enabled = *patch.Enabled
+	}
+	if patch.CorpID != nil {
+		next.CorpID = *patch.CorpID
+	}
+	if patch.AgentID != nil {
+		next.AgentID = *patch.AgentID
+	}
+	if patch.Secret != nil {
+		next.Secret = mergeSecretString(existing.Secret, *patch.Secret)
+	}
+	if patch.Token != nil {
+		next.Token = mergeSecretString(existing.Token, *patch.Token)
+	}
+	if patch.EncodingAESKey != nil {
+		next.EncodingAESKey = mergeSecretString(existing.EncodingAESKey, *patch.EncodingAESKey)
+	}
+	return next
+}
+
+func applyWeChatBotChannelPatch(existing config.WeChatBotConfig, patch *WeChatBotChannelPatch) config.WeChatBotConfig {
+	next := existing
+	if patch == nil {
+		return next
+	}
+	if patch.Enabled != nil {
+		next.Enabled = *patch.Enabled
+	}
+	if patch.BaseURL != nil {
+		next.BaseURL = mergeSecretString(existing.BaseURL, *patch.BaseURL)
+	}
+	if patch.CredRoot != nil {
+		next.CredRoot = mergeSecretString(existing.CredRoot, *patch.CredRoot)
+	}
+	if patch.LogLevel != nil {
+		next.LogLevel = *patch.LogLevel
+	}
+	return next
 }
 
 func mergeMCPServerUpdate(existing config.MCPServerConfig, incoming *MCPServerUpdateReq) config.MCPServerConfig {
@@ -626,7 +949,7 @@ func mergeSecretString(existing, incoming string) string {
 
 func mergeSecretStringMap(existing, incoming map[string]string) map[string]string {
 	if incoming == nil {
-		return cloneStringMap(existing)
+		return collections.CloneStringMap(existing)
 	}
 	out := make(map[string]string, len(incoming))
 	for k, v := range incoming {
@@ -634,17 +957,6 @@ func mergeSecretStringMap(existing, incoming map[string]string) map[string]strin
 			out[k] = existing[k]
 			continue
 		}
-		out[k] = v
-	}
-	return out
-}
-
-func cloneStringMap(in map[string]string) map[string]string {
-	if in == nil {
-		return nil
-	}
-	out := make(map[string]string, len(in))
-	for k, v := range in {
 		out[k] = v
 	}
 	return out

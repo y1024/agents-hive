@@ -57,7 +57,10 @@ type Store interface {
 
 	// IM 通道配置
 	GetChannelConfig(ctx context.Context, platform string) (*ChannelConfigRecord, error)
+	// Deprecated: SaveChannelConfig 会 upsert 完整持久化记录。新的写路径应使用
+	// UpsertChannelConfigFull 显式表达意图。
 	SaveChannelConfig(ctx context.Context, rec *ChannelConfigRecord) error
+	UpsertChannelConfigFull(ctx context.Context, rec *ChannelConfigRecord) error
 	ListChannelConfigs(ctx context.Context) ([]*ChannelConfigRecord, error)
 
 	// 官方 wechatbot 用户绑定与会话映射
@@ -81,6 +84,12 @@ type Store interface {
 	UpdateScheduledPushRun(ctx context.Context, id string, lastRunAt, nextRunAt time.Time, lastError string) error
 
 	// Agent 定时任务
+	CreateScheduledTask(ctx context.Context, rec *ScheduledTaskDefinition, nextRunAt *time.Time) error
+	UpdateScheduledTaskDefinition(ctx context.Context, rec *ScheduledTaskDefinition, nextRunAt *time.Time) error
+	SetScheduledTaskEnabled(ctx context.Context, id string, enabled bool, nextRunAt *time.Time) error
+	UpdateScheduledTaskRuntimeState(ctx context.Context, id string, state ScheduledTaskRuntimeState) error
+	// Deprecated: SaveScheduledTask 会 upsert 完整持久化记录。新的写路径必须按语义使用
+	// CreateScheduledTask、UpdateScheduledTaskDefinition 或运行态专用方法。
 	SaveScheduledTask(ctx context.Context, rec *ScheduledTask) error
 	GetScheduledTask(ctx context.Context, id string) (*ScheduledTask, error)
 	DeleteScheduledTask(ctx context.Context, id string) error
@@ -98,19 +107,31 @@ type Store interface {
 
 	// MCP 服务端配置
 	GetMCPServer(ctx context.Context, name string) (*MCPServerRecord, error)
+	// Deprecated: SaveMCPServer 会 upsert 完整持久化记录。新的写路径应使用
+	// UpsertMCPServerFull 或字段级更新方法。
 	SaveMCPServer(ctx context.Context, rec *MCPServerRecord) error
+	UpsertMCPServerFull(ctx context.Context, rec *MCPServerRecord) error
 	DeleteMCPServer(ctx context.Context, name string) error
 	ListMCPServers(ctx context.Context) ([]*MCPServerRecord, error)
 
 	// 外部资源配置
 	GetExternalResource(ctx context.Context, name string) (*ExternalResourceRecord, error)
+	// Deprecated: SaveExternalResource 会 upsert 完整持久化记录。新的写路径应按语义使用
+	// CreateExternalResource、UpdateExternalResource 或 UpsertExternalResourceFull。
 	SaveExternalResource(ctx context.Context, rec *ExternalResourceRecord) error
+	CreateExternalResource(ctx context.Context, rec *ExternalResourceRecord) error
+	UpdateExternalResource(ctx context.Context, name string, rec *ExternalResourceRecord) error
+	UpsertExternalResourceFull(ctx context.Context, rec *ExternalResourceRecord) error
 	DeleteExternalResource(ctx context.Context, name string) error
 	ListExternalResources(ctx context.Context) ([]*ExternalResourceRecord, error)
 
 	// LLM 提供商配置
 	GetLLMProvider(ctx context.Context, name string) (*LLMProviderRecord, error)
+	// Deprecated: SaveLLMProvider 会 upsert 完整持久化记录。新的写路径应使用
+	// CreateLLMProvider 或 UpdateLLMProvider。
 	SaveLLMProvider(ctx context.Context, rec *LLMProviderRecord) error
+	CreateLLMProvider(ctx context.Context, rec *LLMProviderRecord) error
+	UpdateLLMProvider(ctx context.Context, name string, rec *LLMProviderRecord) error
 	DeleteLLMProvider(ctx context.Context, name string) error
 	ListLLMProviders(ctx context.Context) ([]*LLMProviderRecord, error)
 	// SetDefaultLLMProvider 原子化地将指定 Provider 设为默认（事务保证唯一性）
@@ -118,7 +139,10 @@ type Store interface {
 
 	// LLM 模型配置
 	GetLLMModel(ctx context.Context, name string) (*LLMModelRecord, error)
+	// Deprecated: SaveLLMModel 会 upsert 完整持久化记录。新的写路径应使用
+	// CreateLLMModel 或 UpdateLLMModel。
 	SaveLLMModel(ctx context.Context, rec *LLMModelRecord) error
+	CreateLLMModel(ctx context.Context, rec *LLMModelRecord) error
 	UpdateLLMModel(ctx context.Context, oldName string, rec *LLMModelRecord) error
 	DeleteLLMModel(ctx context.Context, name string) error
 	ListLLMModels(ctx context.Context) ([]*LLMModelRecord, error)
@@ -199,6 +223,33 @@ type ScheduledPushRecord struct {
 	UpdatedAt   time.Time `json:"updated_at,omitempty"`
 }
 
+// ScheduledTaskDefinition 是定时任务的用户可编辑定义部分。
+type ScheduledTaskDefinition struct {
+	ID           string         `json:"id"`
+	Name         string         `json:"name"`
+	Description  string         `json:"description,omitempty"`
+	TargetType   string         `json:"target_type"`
+	TargetConfig map[string]any `json:"target_config"`
+	Platform     string         `json:"platform,omitempty"`
+	Prompt       string         `json:"prompt"`
+	CronExpr     string         `json:"cron_expr,omitempty"`
+	IntervalSec  int            `json:"interval_sec,omitempty"`
+	Timezone     string         `json:"timezone"`
+	Enabled      bool           `json:"enabled"`
+	CreatedBy    string         `json:"created_by"`
+	CreatedAt    time.Time      `json:"created_at"`
+	UpdatedAt    time.Time      `json:"updated_at"`
+}
+
+// ScheduledTaskRuntimeState 是调度器和执行循环维护的运行态字段。
+type ScheduledTaskRuntimeState struct {
+	LastRunAt      *time.Time `json:"last_run_at,omitempty"`
+	NextRunAt      *time.Time `json:"next_run_at,omitempty"`
+	LastError      string     `json:"last_error,omitempty"`
+	ActiveRunID    string     `json:"active_run_id,omitempty"`
+	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"`
+}
+
 // ScheduledTask 是 Agent 定时任务。物理表沿用 scheduled_pushes。
 type ScheduledTask struct {
 	ID             string         `json:"id"`
@@ -220,6 +271,47 @@ type ScheduledTask struct {
 	LeaseExpiresAt *time.Time     `json:"lease_expires_at,omitempty"`
 	CreatedAt      time.Time      `json:"created_at"`
 	UpdatedAt      time.Time      `json:"updated_at"`
+}
+
+// Definition 返回不含运行态字段的定时任务定义。
+func (t *ScheduledTask) Definition() *ScheduledTaskDefinition {
+	if t == nil {
+		return nil
+	}
+	targetConfig := t.TargetConfig
+	if targetConfig == nil {
+		targetConfig = map[string]any{}
+	}
+	return &ScheduledTaskDefinition{
+		ID:           t.ID,
+		Name:         t.Name,
+		Description:  t.Description,
+		TargetType:   t.TargetType,
+		TargetConfig: targetConfig,
+		Platform:     t.Platform,
+		Prompt:       t.Prompt,
+		CronExpr:     t.CronExpr,
+		IntervalSec:  t.IntervalSec,
+		Timezone:     t.Timezone,
+		Enabled:      t.Enabled,
+		CreatedBy:    t.CreatedBy,
+		CreatedAt:    t.CreatedAt,
+		UpdatedAt:    t.UpdatedAt,
+	}
+}
+
+// RuntimeState 返回只应由调度器和执行循环维护的运行态字段。
+func (t *ScheduledTask) RuntimeState() ScheduledTaskRuntimeState {
+	if t == nil {
+		return ScheduledTaskRuntimeState{}
+	}
+	return ScheduledTaskRuntimeState{
+		LastRunAt:      t.LastRunAt,
+		NextRunAt:      t.NextRunAt,
+		LastError:      t.LastError,
+		ActiveRunID:    t.ActiveRunID,
+		LeaseExpiresAt: t.LeaseExpiresAt,
+	}
 }
 
 // ScheduledTaskRun 是一次定时任务运行记录。

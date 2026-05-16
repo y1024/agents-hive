@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/chef-guo/agents-hive/internal/agentquality"
+	"github.com/chef-guo/agents-hive/internal/collections"
 	"github.com/chef-guo/agents-hive/internal/config"
 	"github.com/chef-guo/agents-hive/internal/llm"
 	"github.com/chef-guo/agents-hive/internal/mcphost"
@@ -538,7 +539,7 @@ func buildAdmissionEntries(session *SessionState, catalog []mcphost.ToolDefiniti
 }
 
 func mergeAllowedToolInputsWithMixedReadDefaults(inputs map[string]map[string]string, visible []mcphost.ToolDefinition) map[string]map[string]string {
-	out := cloneAllowedToolInputsForVisibility(inputs)
+	out := collections.CloneNonEmptyNestedStringMap(inputs)
 	for _, tool := range visible {
 		name := strings.TrimSpace(tool.Name)
 		if name == "" {
@@ -596,7 +597,7 @@ func allowedToolsForRuntime(decision router.RouteDecision, visible []mcphost.Too
 
 func defaultRuntimeAllowedInputsForTool(name string, routed map[string]string, callable bool) map[string]string {
 	if len(routed) > 0 {
-		return cloneStringMap(routed)
+		return collections.CloneNonEmptyStringMap(routed)
 	}
 	if callable && router.IsMixedReadWriteTool(name) {
 		return router.MixedReadOnlyToolInputs(name)
@@ -675,27 +676,6 @@ func cloneToolRecallScores(in map[string]float64) map[string]float64 {
 	out := make(map[string]float64, len(in))
 	for k, v := range in {
 		out[k] = v
-	}
-	return out
-}
-
-func cloneAllowedToolInputsForVisibility(in map[string]map[string]string) map[string]map[string]string {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make(map[string]map[string]string, len(in))
-	for tool, values := range in {
-		if len(values) == 0 {
-			continue
-		}
-		copied := make(map[string]string, len(values))
-		for key, value := range values {
-			copied[key] = value
-		}
-		out[tool] = copied
-	}
-	if len(out) == 0 {
-		return nil
 	}
 	return out
 }
@@ -817,17 +797,6 @@ func stringSet(items []string) map[string]bool {
 		if item != "" {
 			out[item] = true
 		}
-	}
-	return out
-}
-
-func cloneStringMap(in map[string]string) map[string]string {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(in))
-	for key, value := range in {
-		out[key] = value
 	}
 	return out
 }

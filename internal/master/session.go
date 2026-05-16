@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/chef-guo/agents-hive/internal/collections"
 	"github.com/chef-guo/agents-hive/internal/imctx"
 	"github.com/chef-guo/agents-hive/internal/llm"
 	"github.com/chef-guo/agents-hive/internal/memory"
@@ -378,7 +379,7 @@ func (s *SessionState) SetAllowedToolInputs(inputs map[string]map[string]string)
 		s.allowedToolInputs = nil
 		return
 	}
-	s.allowedToolInputs = cloneAllowedToolInputs(inputs)
+	s.allowedToolInputs = collections.CloneNonEmptyNestedStringMap(inputs)
 }
 
 func (s *SessionState) SetRouteDecision(decision router.RouteDecision) {
@@ -423,7 +424,7 @@ func (s *SessionState) AllowedToolInputsSnapshot() map[string]map[string]string 
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return cloneAllowedToolInputs(s.allowedToolInputs)
+	return collections.CloneNonEmptyNestedStringMap(s.allowedToolInputs)
 }
 
 // AddReflectionBlock 记录结构性失败产出的会话级工具阻断；瞬态失败会被忽略。
@@ -510,27 +511,6 @@ func isStructuralReflectionFailureKind(kind string) bool {
 	return strings.HasPrefix(kind, "4") && strings.HasSuffix(kind, "xx")
 }
 
-func cloneAllowedToolInputs(in map[string]map[string]string) map[string]map[string]string {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make(map[string]map[string]string, len(in))
-	for tool, values := range in {
-		if len(values) == 0 {
-			continue
-		}
-		copied := make(map[string]string, len(values))
-		for key, value := range values {
-			copied[key] = value
-		}
-		out[tool] = copied
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
 func cloneRouteDecision(in router.RouteDecision) router.RouteDecision {
 	out := in
 	out.AllowedTools = append([]string(nil), in.AllowedTools...)
@@ -538,7 +518,7 @@ func cloneRouteDecision(in router.RouteDecision) router.RouteDecision {
 	out.BlockedTools = append([]router.BlockedTool(nil), in.BlockedTools...)
 	out.AllowedCapabilities = append([]router.CapabilityEntry(nil), in.AllowedCapabilities...)
 	out.BlockedCapabilities = append([]router.CapabilityEntry(nil), in.BlockedCapabilities...)
-	out.AllowedToolInputs = cloneAllowedToolInputs(in.AllowedToolInputs)
+	out.AllowedToolInputs = collections.CloneNonEmptyNestedStringMap(in.AllowedToolInputs)
 	return out
 }
 

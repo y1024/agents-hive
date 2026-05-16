@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/chef-guo/agents-hive/internal/collections"
 	"github.com/chef-guo/agents-hive/internal/router"
 )
 
@@ -55,7 +56,7 @@ func RouteDecisionEventFromRouter(decision router.RouteDecision) RouteDecisionEv
 		BlockedEntries:    cloneCapabilityEntries(decision.BlockedCapabilities),
 		CallableTools:     append([]string(nil), decision.AllowedTools...),
 		RecommendedTools:  append([]string(nil), decision.VisibleOnly...),
-		AllowedToolInputs: cloneAllowedToolInputs(decision.AllowedToolInputs),
+		AllowedToolInputs: collections.CloneNonEmptyNestedStringMap(decision.AllowedToolInputs),
 		VisibleOnly:       append([]string(nil), decision.VisibleOnly...),
 		BlockedTools:      blocked,
 		BlockedReasons:    reasons,
@@ -86,27 +87,6 @@ func cloneCapabilityEntries(in []router.CapabilityEntry) []router.CapabilityEntr
 		copied := entry
 		copied.Capabilities = append([]router.Capability(nil), entry.Capabilities...)
 		out = append(out, copied)
-	}
-	return out
-}
-
-func cloneAllowedToolInputs(in map[string]map[string]string) map[string]map[string]string {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make(map[string]map[string]string, len(in))
-	for tool, values := range in {
-		if len(values) == 0 {
-			continue
-		}
-		copied := make(map[string]string, len(values))
-		for key, value := range values {
-			copied[key] = value
-		}
-		out[tool] = copied
-	}
-	if len(out) == 0 {
-		return nil
 	}
 	return out
 }

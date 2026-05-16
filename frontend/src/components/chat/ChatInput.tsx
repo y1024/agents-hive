@@ -51,6 +51,7 @@ export interface SendOptions {
 }
 
 interface Props {
+  sessionId: string;
   onSend: (content: string, options?: SendOptions) => void;
   onStop?: () => void;
   disabled?: boolean;
@@ -61,6 +62,7 @@ interface Props {
 }
 
 export function ChatInput({
+  sessionId,
   onSend,
   onStop,
   disabled,
@@ -114,13 +116,19 @@ export function ChatInput({
 
   const handleSwitchModel = useCallback(async (name: string) => {
     try {
-      await client.switchModel(name);
-      useChatStore.setState({ activeModel: name });
+      await client.switchModel(sessionId, name);
+      useChatStore.setState((s) => ({
+        activeModel: name,
+        availableModels: s.availableModels.map((model) => ({
+          ...model,
+          is_active: model.name === name,
+        })),
+      }));
     } catch (e) {
       addToast('error', e instanceof Error ? e.message : t('common.error'));
     }
     setModelOpen(false);
-  }, [client, addToast, t]);
+  }, [client, sessionId, addToast, t]);
 
   const processFiles = useCallback((inputFiles: globalThis.File[]) => {
     const remaining = MAX_FILE_COUNT - files.length;

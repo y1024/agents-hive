@@ -75,10 +75,12 @@ var builtinToolRules = map[string]BuiltinToolRule{
 	"bash":                       {Domain: "filesystem", Invocation: InvocationDirectTool, Risk: RiskRuntimeExec, SideEffect: true, Capabilities: []Capability{CapabilityRuntimeExec}},
 	"batch":                      {Domain: "agent", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true},
 	"browser_interact":           {Domain: "web", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true},
+	"cancel_escalation":          {Domain: "customer_service", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true, Capabilities: []Capability{CapabilityCustomerServiceCancelEscalation}},
 	"create_handoff_summary":     {Domain: "agent", Invocation: InvocationDirectTool, Risk: RiskReadOnly, ReadOnly: true},
 	"create_tool":                {Domain: "tools", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true, Capabilities: []Capability{CapabilityMetaToolRegister}},
 	"edit":                       {Domain: "filesystem", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true},
 	"enter_plan_mode":            {Domain: "planning", Invocation: InvocationDirectTool, Risk: RiskReadOnly, ReadOnly: true},
+	"escalate_to_human":          {Domain: "customer_service", Invocation: InvocationDirectTool, Risk: RiskExternalWrite, SideEffect: true, Capabilities: []Capability{CapabilityExternalSend, CapabilityCustomerServiceEscalate}},
 	"exit_plan_mode":             {Domain: "planning", Invocation: InvocationDirectTool, Risk: RiskReadOnly, ReadOnly: true},
 	"feishu_api":                 {Domain: "messaging", Invocation: InvocationDirectTool, Risk: RiskExternalWrite, SideEffect: true, Capabilities: []Capability{CapabilityExternalSend, CapabilityExternalSendFeishu}},
 	"finish_plan":                {Domain: "planning", Invocation: InvocationDirectTool, Risk: RiskReadOnly, ReadOnly: true},
@@ -87,6 +89,7 @@ var builtinToolRules = map[string]BuiltinToolRule{
 	"glob":                       {Domain: "filesystem", Invocation: InvocationDirectTool, Risk: RiskReadOnly, ReadOnly: true},
 	"grep":                       {Domain: "filesystem", Invocation: InvocationDirectTool, Risk: RiskReadOnly, ReadOnly: true},
 	"im_api":                     {Domain: "messaging", Invocation: InvocationDirectTool, Risk: RiskExternalWrite, SideEffect: true, Capabilities: allExternalSendCapabilities()},
+	"kb_search":                  {Domain: "customer_service", Invocation: InvocationDirectTool, Risk: RiskReadOnly, ReadOnly: true, Capabilities: []Capability{CapabilityCustomerServiceKBRead}},
 	"ls":                         {Domain: "filesystem", Invocation: InvocationDirectTool, Risk: RiskReadOnly, ReadOnly: true},
 	"memory":                     {Domain: "agent", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true},
 	"multi_edit":                 {Domain: "filesystem", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true},
@@ -149,10 +152,12 @@ var structuredDangerousTools = map[string]bool{
 }
 
 type mixedActionRule struct {
-	Field               string
-	ReadOnlyActions     []string
-	LocalWriteActions   []string
-	ExternalSendActions []string
+	Field                    string
+	ReadOnlyActions          []string
+	RoutineSideEffectActions []string
+	PrivilegedActions        []string
+	LocalWriteActions        []string
+	ExternalSendActions      []string
 }
 
 var mixedActionRules = map[string]mixedActionRule{
@@ -169,11 +174,28 @@ var mixedActionRules = map[string]mixedActionRule{
 			"read_sheet",
 			"download_message_resource",
 		},
+		RoutineSideEffectActions: []string{"send_message"},
+		PrivilegedActions: []string{
+			"upload_image", "upload_file",
+			"send_image", "send_file",
+			"create_approval", "create_bitable_record", "update_bitable_record",
+			"create_task", "complete_task", "write_sheet",
+		},
 		ExternalSendActions: []string{
 			"search_contacts", "get_user_info",
 			"get_chat_info", "get_chat_admins", "list_chat_members",
 			"upload_image", "upload_file",
 			"send_message", "send_image", "send_file",
+		},
+	},
+	"im_api": {
+		Field: "action",
+		ReadOnlyActions: []string{
+			"search_recipients", "list_recent_conversations", "resolve_recipient",
+		},
+		RoutineSideEffectActions: []string{"send_message"},
+		ExternalSendActions: []string{
+			"search_recipients", "list_recent_conversations", "resolve_recipient", "send_message",
 		},
 	},
 	"memory": {
@@ -237,12 +259,13 @@ var hostToolSets = map[HostToolSet]map[string]bool{
 }
 
 var hostToolGroups = map[string][]string{
-	"agent":     {"spawn_agent", "parallel_dispatch", "task"},
-	"discovery": {"tool_search"},
-	"fs":        {"read_file", "write_file", "edit", "glob", "grep", "ls", "multiedit", "multi_edit", "apply_patch"},
-	"lsp":       {"lsp_definition", "lsp_references", "lsp_hover", "lsp_symbols", "lsp_diagnostics", "lsp_rename", "lsp_code_action", "lsp_format", "lsp_completion"},
-	"runtime":   {"bash"},
-	"web":       {"websearch", "webfetch", "web_search", "web_fetch", "browser_interact"},
+	"agent":            {"spawn_agent", "parallel_dispatch", "task"},
+	"customer_service": {"kb_search", "escalate_to_human", "cancel_escalation"},
+	"discovery":        {"tool_search"},
+	"fs":               {"read_file", "write_file", "edit", "glob", "grep", "ls", "multiedit", "multi_edit", "apply_patch"},
+	"lsp":              {"lsp_definition", "lsp_references", "lsp_hover", "lsp_symbols", "lsp_diagnostics", "lsp_rename", "lsp_code_action", "lsp_format", "lsp_completion"},
+	"runtime":          {"bash"},
+	"web":              {"websearch", "webfetch", "web_search", "web_fetch", "browser_interact"},
 }
 
 var hostToolPolicyProfiles = map[string][]string{
@@ -314,19 +337,22 @@ func BuiltinToolProfile(name string) (ToolProfile, bool) {
 		return ToolProfile{}, false
 	}
 	return ToolProfile{
-		Name:         normalized,
-		Kind:         CapabilityKindBuiltinTool,
-		Domain:       rule.Domain,
-		Source:       CapabilitySourceBuiltin,
-		Invocation:   rule.Invocation,
-		Risk:         rule.Risk,
-		Trust:        TrustBuiltIn,
-		ReadOnly:     rule.ReadOnly,
-		Destructive:  rule.Destructive,
-		Idempotent:   rule.Idempotent,
-		OpenWorld:    rule.OpenWorld,
-		SideEffect:   rule.SideEffect,
-		Capabilities: cloneCapabilities(rule.Capabilities),
+		Name:          normalized,
+		Kind:          CapabilityKindBuiltinTool,
+		Domain:        rule.Domain,
+		Source:        CapabilitySourceBuiltin,
+		Invocation:    rule.Invocation,
+		Risk:          rule.Risk,
+		Trust:         TrustBuiltIn,
+		ReadOnly:      rule.ReadOnly,
+		Destructive:   rule.Destructive,
+		Idempotent:    rule.Idempotent,
+		OpenWorld:     rule.OpenWorld,
+		SideEffect:    rule.SideEffect,
+		Capabilities:  cloneCapabilities(rule.Capabilities),
+		Version:       "v1",
+		Visibility:    "system",
+		PolicyProfile: "default",
 	}, true
 }
 
@@ -373,6 +399,24 @@ func MixedLocalWriteActions(name string) []string {
 		return nil
 	}
 	return cloneStrings(rule.LocalWriteActions)
+}
+
+// RoutineSideEffectActions 返回用户明确要求后可直接执行的常规副作用动作。
+func RoutineSideEffectActions(name string) []string {
+	rule, ok := mixedActionRuleForTool(name)
+	if !ok {
+		return nil
+	}
+	return cloneStrings(rule.RoutineSideEffectActions)
+}
+
+// PrivilegedActions 返回需要执行前确认的高影响副作用动作。
+func PrivilegedActions(name string) []string {
+	rule, ok := mixedActionRuleForTool(name)
+	if !ok {
+		return nil
+	}
+	return cloneStrings(rule.PrivilegedActions)
 }
 
 // ExternalSendActions 返回外部发送意图下可用的检索和发送动作。
@@ -450,6 +494,16 @@ func StructuredDangerousAction(toolName, action string) bool {
 	return actions["*"] || actions[action]
 }
 
+// StructuredPrivilegedAction reports whether an action has high-impact side effects.
+func StructuredPrivilegedAction(toolName, action string) bool {
+	return containsActionString(PrivilegedActions(toolName), action) || StructuredDangerousAction(toolName, action)
+}
+
+// StructuredRoutineSideEffectAction reports whether an action is routine once inputs are validated.
+func StructuredRoutineSideEffectAction(toolName, action string) bool {
+	return containsActionString(RoutineSideEffectActions(toolName), action)
+}
+
 // StructuredDangerousActions returns the dangerous action names for a tool.
 func StructuredDangerousActions(toolName string) []string {
 	toolName = strings.TrimSpace(strings.ToLower(toolName))
@@ -472,7 +526,27 @@ func ProfileRequiresApproval(profile ToolProfile) bool {
 		return true
 	}
 	decision := EvaluateToolPolicy(profile, ToolPolicyContext{ForRoute: true})
-	return decision.RequiresApproval || decision.Action == ToolPolicyDeny
+	return decision.RequiresApproval
+}
+
+// ProfileMayRequireApproval reports catalog-level approval potential. It must
+// not be used as the concrete execution approval decision.
+func ProfileMayRequireApproval(profile ToolProfile) bool {
+	name := strings.TrimSpace(strings.ToLower(profile.Name))
+	if structuredDangerousTools[name] {
+		return true
+	}
+	if profile.OpenWorld || profile.Destructive {
+		return true
+	}
+	switch profile.Risk {
+	case RiskRuntimeExec, RiskDestructive, RiskUnknown:
+		return true
+	}
+	if IsMixedReadWriteTool(name) {
+		return len(PrivilegedActions(name)) > 0 || len(StructuredDangerousActions(name)) > 0
+	}
+	return false
 }
 
 // ToolActionProfile specializes a mixed read/write tool profile using a
@@ -480,7 +554,14 @@ func ProfileRequiresApproval(profile ToolProfile) bool {
 // Invariant: dangerous mixed operations return the original profile so
 // EvaluateToolPolicy can ask through the mixed policy instead of outer deny.
 func ToolActionProfile(profile ToolProfile, input json.RawMessage) ToolProfile {
-	if profile.Name == "" || !IsMixedReadWriteTool(profile.Name) {
+	if profile.Name == "" {
+		return profile
+	}
+	if !IsMixedReadWriteTool(profile.Name) {
+		if profile.Risk == RiskExternalWrite && len(input) > 0 && !IsRoutinePlainTextExternalSend(profile.Name, input) {
+			profile.ReadOnly = false
+			profile.SideEffect = true
+		}
 		return profile
 	}
 	if StructuredDangerousOperation(profile.Name, input) {
@@ -494,6 +575,18 @@ func ToolActionProfile(profile ToolProfile, input json.RawMessage) ToolProfile {
 		profile.Risk = RiskReadOnly
 		profile.ReadOnly = true
 		profile.SideEffect = false
+		return profile
+	}
+	if containsActionString(RoutineSideEffectActions(profile.Name), action) {
+		profile.Risk = RiskExternalWrite
+		profile.ReadOnly = false
+		profile.SideEffect = true
+		return profile
+	}
+	if containsActionString(PrivilegedActions(profile.Name), action) {
+		profile.Risk = RiskExternalWrite
+		profile.ReadOnly = false
+		profile.SideEffect = true
 		return profile
 	}
 	if containsActionString(MixedLocalWriteActions(profile.Name), action) {
@@ -580,6 +673,78 @@ func isDiscoveryOnlyProfile(profile ToolProfile) bool {
 	return profile.Invocation == InvocationDiscoveryOnly || strings.TrimSpace(profile.Name) == "tool_search"
 }
 
+func isDiscoveryEntrypoint(profile ToolProfile) bool {
+	return strings.TrimSpace(profile.Name) == "tool_search" &&
+		profile.Kind == CapabilityKindBuiltinTool &&
+		profile.Source == CapabilitySourceBuiltin &&
+		profile.Risk == RiskReadOnly
+}
+
+func isQuestionEntrypoint(profile ToolProfile) bool {
+	return strings.TrimSpace(profile.Name) == "question" &&
+		profile.Kind == CapabilityKindBuiltinTool &&
+		profile.Source == CapabilitySourceBuiltin &&
+		profile.Risk == RiskReadOnly &&
+		profile.ReadOnly &&
+		!ProfileHasSideEffect(profile)
+}
+
+func isListOnlySkillInvocation(profile ToolProfile, input json.RawMessage) bool {
+	if strings.TrimSpace(profile.Name) != "skill" {
+		return false
+	}
+	if len(strings.TrimSpace(string(input))) == 0 {
+		return true
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(input, &payload); err != nil {
+		return false
+	}
+	raw, ok := payload["name"]
+	if !ok {
+		return true
+	}
+	var name string
+	if err := json.Unmarshal(raw, &name); err != nil {
+		return false
+	}
+	return strings.TrimSpace(name) == ""
+}
+
+func isNamedSkillInvocation(profile ToolProfile, input json.RawMessage) bool {
+	if strings.TrimSpace(profile.Name) != "skill" || len(strings.TrimSpace(string(input))) == 0 {
+		return false
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(input, &payload); err != nil {
+		return false
+	}
+	raw, ok := payload["name"]
+	if !ok {
+		return false
+	}
+	var name string
+	if err := json.Unmarshal(raw, &name); err != nil {
+		return false
+	}
+	return strings.TrimSpace(name) != ""
+}
+
+func skillEntrypointCallableForIntent(intent IntentFrame) bool {
+	switch intent.Kind {
+	case IntentCreateSkill, IntentModifySkill, IntentManageTool:
+		return true
+	default:
+		return false
+	}
+}
+
+func isPlanControlProfile(profile ToolProfile) bool {
+	name := strings.TrimSpace(profile.Name)
+	return IsHostToolInSet(HostToolSetPlanControl, name) ||
+		name == "todo_write"
+}
+
 func structuredAction(input json.RawMessage) string {
 	if len(input) == 0 {
 		return ""
@@ -604,10 +769,12 @@ func structuredAction(input json.RawMessage) string {
 func mixedActionRuleForTool(name string) (mixedActionRule, bool) {
 	rule, ok := mixedActionRules[strings.TrimSpace(strings.ToLower(name))]
 	return mixedActionRule{
-		Field:               rule.Field,
-		ReadOnlyActions:     cloneStrings(rule.ReadOnlyActions),
-		LocalWriteActions:   cloneStrings(rule.LocalWriteActions),
-		ExternalSendActions: cloneStrings(rule.ExternalSendActions),
+		Field:                    rule.Field,
+		ReadOnlyActions:          cloneStrings(rule.ReadOnlyActions),
+		RoutineSideEffectActions: cloneStrings(rule.RoutineSideEffectActions),
+		PrivilegedActions:        cloneStrings(rule.PrivilegedActions),
+		LocalWriteActions:        cloneStrings(rule.LocalWriteActions),
+		ExternalSendActions:      cloneStrings(rule.ExternalSendActions),
 	}, ok
 }
 

@@ -14,9 +14,12 @@ import (
 
 	"github.com/chef-guo/agents-hive/internal/config"
 	"github.com/chef-guo/agents-hive/internal/errs"
+	"github.com/chef-guo/agents-hive/internal/security"
 	"github.com/chef-guo/agents-hive/internal/skills"
 	"github.com/chef-guo/agents-hive/internal/store"
 )
+
+const maskedSecretValue = security.RedactedValue
 
 // ConfigUpdateRequest 运行时配置更新请求（白名单模式）
 type ConfigUpdateRequest struct {
@@ -29,8 +32,9 @@ type ConfigUpdateRequest struct {
 
 // SecurityUpdateRequest 安全执行规则可更新字段
 type SecurityUpdateRequest struct {
-	DefaultPolicy *string                  `json:"default_policy,omitempty"` // "allow" | "ask" | "deny"
-	ExecRules     *[]config.ExecRuleConfig `json:"exec_rules,omitempty"`
+	DefaultPolicy  *string                  `json:"default_policy,omitempty"` // "allow" | "ask" | "deny"
+	ExecRules      *[]config.ExecRuleConfig `json:"exec_rules,omitempty"`
+	PermissionMode *string                  `json:"permission_mode,omitempty"` // "minimal" | "strict"
 }
 
 // HITLUpdateRequest HITL 相关可更新字段
@@ -62,13 +66,13 @@ type MCPUpdateRequest struct {
 
 // MCPServerUpdateReq 单个 MCP 服务端更新
 type MCPServerUpdateReq struct {
-	Command   string            `json:"command,omitempty"`
-	Args      []string          `json:"args,omitempty"`
+	Command   *string           `json:"command,omitempty"`
+	Args      *[]string         `json:"args,omitempty"`
 	Env       map[string]string `json:"env,omitempty"`
-	Transport string            `json:"transport,omitempty"`
-	URL       string            `json:"url,omitempty"`
+	Transport *string           `json:"transport,omitempty"`
+	URL       *string           `json:"url,omitempty"`
 	Headers   map[string]string `json:"headers,omitempty"`
-	Timeout   string            `json:"timeout,omitempty"`
+	Timeout   *string           `json:"timeout,omitempty"`
 }
 
 // registerConfigMethods 注册配置管理相关 RPC 方法
@@ -116,36 +120,16 @@ func registerConfigMethods(gw *Gateway, deps Deps) {
 				return nil, errs.New(errs.CodeInternal, "配置重载回调未注册")
 			}
 
-			// 记录旧的 LLM 配置，用于检测变更
-			deps.ConfigMu.RLock()
-			oldModel := deps.Config.LLM.Model
-			oldBaseURL := deps.Config.LLM.BaseURL
-			oldProvider := deps.Config.LLM.Provider
-			oldAPIFormat := deps.Config.LLM.APIFormat
-			deps.ConfigMu.RUnlock()
-
 			// 从 DB 全量重载到内存 Config
 			deps.ConfigMu.Lock()
 			deps.ReloadConfigFunc()
 			deps.ConfigMu.Unlock()
-
-			// LLM 配置变更时热更新到运行中的客户端
-			deps.ConfigMu.RLock()
-			newModel := deps.Config.LLM.Model
-			newBaseURL := deps.Config.LLM.BaseURL
-			newProvider := deps.Config.LLM.Provider
-			newAPIFormat := deps.Config.LLM.APIFormat
-			deps.ConfigMu.RUnlock()
 
 			// 热重载 AI 服务路由器（从 DB 重新加载 provider/model 配置）
 			if deps.AIRouter != nil {
 				if err := deps.AIRouter.Reload(ctx); err != nil {
 					zap.L().Warn("AI 路由器热重载失败", zap.Error(err))
 				}
-			}
-
-			if deps.Master != nil && (newModel != oldModel || newBaseURL != oldBaseURL || newProvider != oldProvider || newAPIFormat != oldAPIFormat) {
-				deps.Master.SwitchModel(newModel, newModel, newBaseURL, newProvider, newAPIFormat)
 			}
 
 			return json.Marshal(map[string]string{
@@ -158,45 +142,18 @@ func registerConfigMethods(gw *Gateway, deps Deps) {
 	gw.Register(MethodDef{
 		Name:        "config.get",
 		Description: "读取当前运行时配置（API Key 等敏感字段已脱敏）",
-		AuthScope:   "",
+		AuthScope:   "admin",
 		Handler: func(ctx context.Context, params json.RawMessage) (json.RawMessage, error) {
 			deps.ConfigMu.RLock()
 			cfg := *deps.Config // 值拷贝
 			deps.ConfigMu.RUnlock()
 
-			// 脱敏：替换 API Key 等敏感字段
-			if cfg.LLM.APIKey != "" {
-				cfg.LLM.APIKey = "***"
-			}
-			for i := range cfg.LLM.Models {
-				if cfg.LLM.Models[i].APIKey != "" {
-					cfg.LLM.Models[i].APIKey = "***"
-				}
-			}
-			for i := range cfg.Gateway.Tokens {
-				if cfg.Gateway.Tokens[i] != "" {
-					cfg.Gateway.Tokens[i] = "***"
-				}
-			}
-			if cfg.HITL.WebSocketToken != "" {
-				cfg.HITL.WebSocketToken = "***"
-			}
-			// 脱敏 MCP OAuth 密钥
-			for name, srv := range cfg.MCP.Servers {
-				if srv.OAuth != nil && srv.OAuth.ClientSecret != "" {
-					s := srv
-					s.OAuth = &config.OAuthConfig{
-						ClientID:     srv.OAuth.ClientID,
-						ClientSecret: "***",
-						AuthURL:      srv.OAuth.AuthURL,
-						TokenURL:     srv.OAuth.TokenURL,
-						Scopes:       srv.OAuth.Scopes,
-					}
-					cfg.MCP.Servers[name] = s
-				}
+			redacted, err := redactRuntimeConfigView(cfg)
+			if err != nil {
+				return nil, errs.Wrap(errs.CodeInternal, "脱敏运行时配置失败", err)
 			}
 
-			return json.Marshal(cfg)
+			return json.Marshal(redacted)
 		},
 	})
 
@@ -280,20 +237,24 @@ func registerConfigMethods(gw *Gateway, deps Deps) {
 			// channel.enabled 父开关已改为从各通道 Enabled 状态自动推导，无需单独管理
 			if req.Channel != nil {
 				if req.Channel.DingTalk != nil {
-					deps.Config.Channel.DingTalk = *req.Channel.DingTalk
-					saveChannelToDB(ctx, deps.Store, "dingtalk", req.Channel.DingTalk)
+					next := mergeDingTalkConfig(deps.Config.Channel.DingTalk, *req.Channel.DingTalk)
+					deps.Config.Channel.DingTalk = next
+					saveChannelToDB(ctx, deps.Store, "dingtalk", next)
 				}
 				if req.Channel.Feishu != nil {
-					deps.Config.Channel.Feishu = *req.Channel.Feishu
-					saveChannelToDB(ctx, deps.Store, "feishu", req.Channel.Feishu)
+					next := mergeFeishuConfig(deps.Config.Channel.Feishu, *req.Channel.Feishu)
+					deps.Config.Channel.Feishu = next
+					saveChannelToDB(ctx, deps.Store, "feishu", next)
 				}
 				if req.Channel.WeCom != nil {
-					deps.Config.Channel.WeCom = *req.Channel.WeCom
-					saveChannelToDB(ctx, deps.Store, "wecom", req.Channel.WeCom)
+					next := mergeWeComConfig(deps.Config.Channel.WeCom, *req.Channel.WeCom)
+					deps.Config.Channel.WeCom = next
+					saveChannelToDB(ctx, deps.Store, "wecom", next)
 				}
 				if req.Channel.WeChatBot != nil {
-					deps.Config.Channel.WeChatBot = *req.Channel.WeChatBot
-					saveChannelToDB(ctx, deps.Store, "wechatbot", req.Channel.WeChatBot)
+					next := mergeWeChatBotConfig(deps.Config.Channel.WeChatBot, *req.Channel.WeChatBot)
+					deps.Config.Channel.WeChatBot = next
+					saveChannelToDB(ctx, deps.Store, "wechatbot", next)
 				}
 			}
 
@@ -301,6 +262,11 @@ func registerConfigMethods(gw *Gateway, deps Deps) {
 			if req.MCP != nil {
 				if req.MCP.Timeout != nil {
 					if d, err := parseDurationStr(*req.MCP.Timeout); err == nil {
+						if deps.Store != nil {
+							if err := deps.Store.SetConfig(ctx, "mcp.timeout", *req.MCP.Timeout); err != nil {
+								zap.L().Error("持久化 mcp.timeout 失败", zap.Error(err))
+							}
+						}
 						deps.Config.MCP.Timeout = d
 					} else {
 						return nil, errs.Wrap(errs.CodeInvalidArgument, "无效的 MCP 超时时间格式", err)
@@ -321,24 +287,18 @@ func registerConfigMethods(gw *Gateway, deps Deps) {
 							}
 							continue
 						}
-						deps.Config.MCP.Servers[name] = config.MCPServerConfig{
-							Command:   srv.Command,
-							Args:      srv.Args,
-							Env:       srv.Env,
-							Transport: srv.Transport,
-							URL:       srv.URL,
-							Headers:   srv.Headers,
-							Timeout:   srv.Timeout,
-						}
+						existing := deps.Config.MCP.Servers[name]
+						next := mergeMCPServerUpdate(existing, srv)
+						deps.Config.MCP.Servers[name] = next
 						zap.L().Info("收到 MCP 服务端配置更新",
 							zap.String("name", name),
-							zap.String("transport", srv.Transport),
-							zap.String("url", safeURLForLog(srv.URL)),
-							zap.Strings("header_keys", sortedStringMapKeys(srv.Headers)),
-							zap.Bool("has_x_api_key", srv.Headers["X-API-Key"] != ""),
-							zap.Bool("has_authorization", srv.Headers["Authorization"] != ""),
+							zap.String("transport", next.Transport),
+							zap.String("url", safeURLForLog(next.URL)),
+							zap.Strings("header_keys", sortedStringMapKeys(next.Headers)),
+							zap.Bool("has_x_api_key", next.Headers["X-API-Key"] != ""),
+							zap.Bool("has_authorization", next.Headers["Authorization"] != ""),
 						)
-						saveMCPServerToDB(ctx, deps.Store, name, srv)
+						saveMCPServerToDB(ctx, deps.Store, name, next)
 					}
 				}
 			}
@@ -365,6 +325,24 @@ func registerConfigMethods(gw *Gateway, deps Deps) {
 						}
 					}
 					deps.Config.Security.ExecRules = *req.Security.ExecRules
+				}
+				if req.Security.PermissionMode != nil {
+					mode := *req.Security.PermissionMode
+					if mode == "" {
+						mode = "minimal"
+					}
+					if mode != "minimal" && mode != "strict" {
+						return nil, errs.New(errs.CodeInvalidArgument, "permission_mode 必须为 minimal 或 strict")
+					}
+					if deps.Store != nil {
+						if err := deps.Store.SetConfig(ctx, "security.permission_mode", mode); err != nil {
+							zap.L().Error("持久化 security.permission_mode 失败", zap.Error(err))
+						}
+					}
+					deps.Config.Security.PermissionMode = mode
+					if deps.Master != nil {
+						deps.Master.UpdatePermissionMode(mode)
+					}
 				}
 				if deps.Master != nil && (req.Security.ExecRules != nil || req.Security.DefaultPolicy != nil) {
 					deps.Master.UpdateSecurityConfig(deps.Config.Security.ExecRules, deps.Config.Security.DefaultPolicy)
@@ -492,8 +470,8 @@ func saveChannelToDB(ctx context.Context, db store.Store, platform string, cfg a
 }
 
 // saveMCPServerToDB 将 MCP 服务端配置写入数据库
-func saveMCPServerToDB(ctx context.Context, db store.Store, name string, srv *MCPServerUpdateReq) {
-	if db == nil || srv == nil {
+func saveMCPServerToDB(ctx context.Context, db store.Store, name string, srv config.MCPServerConfig) {
+	if db == nil {
 		return
 	}
 	argsJSON, _ := json.Marshal(srv.Args)
@@ -531,6 +509,149 @@ func saveMCPServerToDB(ctx context.Context, db store.Store, name string, srv *MC
 		zap.Bool("has_x_api_key", srv.Headers["X-API-Key"] != ""),
 		zap.Bool("has_authorization", srv.Headers["Authorization"] != ""),
 	)
+}
+
+func redactRuntimeConfigView(cfg config.Config) (map[string]any, error) {
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, err
+	}
+	var view map[string]any
+	if err := json.Unmarshal(raw, &view); err != nil {
+		return nil, err
+	}
+	redacted, err := security.RedactSecrets(view)
+	if err != nil {
+		return nil, err
+	}
+	out, ok := redacted.(map[string]any)
+	if !ok {
+		return nil, errs.New(errs.CodeInternal, "运行时配置脱敏结果类型异常")
+	}
+	redactGatewayTokens(out)
+	return out, nil
+}
+
+func redactGatewayTokens(view map[string]any) {
+	gateway, ok := view["gateway"].(map[string]any)
+	if !ok {
+		return
+	}
+	tokens, ok := gateway["tokens"].([]any)
+	if !ok {
+		return
+	}
+	for i, token := range tokens {
+		if s, ok := token.(string); ok && s != "" {
+			tokens[i] = maskedSecretValue
+		}
+	}
+	gateway["tokens"] = tokens
+}
+
+func mergeDingTalkConfig(existing, incoming config.DingTalkConfig) config.DingTalkConfig {
+	incoming.AppSecret = mergeSecretString(existing.AppSecret, incoming.AppSecret)
+	incoming.Token = mergeSecretString(existing.Token, incoming.Token)
+	incoming.AESKey = mergeSecretString(existing.AESKey, incoming.AESKey)
+	return incoming
+}
+
+func mergeFeishuConfig(existing, incoming config.FeishuConfig) config.FeishuConfig {
+	incoming.AppSecret = mergeSecretString(existing.AppSecret, incoming.AppSecret)
+	incoming.VerificationToken = mergeSecretString(existing.VerificationToken, incoming.VerificationToken)
+	incoming.EncryptKey = mergeSecretString(existing.EncryptKey, incoming.EncryptKey)
+	incoming.WebhookURL = mergeSecretString(existing.WebhookURL, incoming.WebhookURL)
+	return incoming
+}
+
+func mergeWeComConfig(existing, incoming config.WeComConfig) config.WeComConfig {
+	incoming.Secret = mergeSecretString(existing.Secret, incoming.Secret)
+	incoming.Token = mergeSecretString(existing.Token, incoming.Token)
+	incoming.EncodingAESKey = mergeSecretString(existing.EncodingAESKey, incoming.EncodingAESKey)
+	return incoming
+}
+
+func mergeWeChatBotConfig(existing, incoming config.WeChatBotConfig) config.WeChatBotConfig {
+	if incoming.BaseURL == "" {
+		incoming.BaseURL = existing.BaseURL
+	} else {
+		incoming.BaseURL = mergeSecretString(existing.BaseURL, incoming.BaseURL)
+	}
+	if incoming.CredRoot == "" {
+		incoming.CredRoot = existing.CredRoot
+	} else {
+		incoming.CredRoot = mergeSecretString(existing.CredRoot, incoming.CredRoot)
+	}
+	if incoming.LogLevel == "" {
+		incoming.LogLevel = existing.LogLevel
+	}
+	return incoming
+}
+
+func mergeMCPServerUpdate(existing config.MCPServerConfig, incoming *MCPServerUpdateReq) config.MCPServerConfig {
+	if incoming == nil {
+		return existing
+	}
+	next := existing
+	if incoming.Command != nil {
+		next.Command = mergeSecretString(existing.Command, *incoming.Command)
+	}
+	if incoming.Args != nil {
+		next.Args = append([]string(nil), (*incoming.Args)...)
+	}
+	if incoming.Env != nil {
+		next.Env = mergeSecretStringMap(existing.Env, incoming.Env)
+	}
+	if incoming.Transport != nil {
+		next.Transport = *incoming.Transport
+	}
+	if incoming.URL != nil {
+		next.URL = mergeSecretString(existing.URL, *incoming.URL)
+	}
+	if incoming.Headers != nil {
+		next.Headers = mergeSecretStringMap(existing.Headers, incoming.Headers)
+	}
+	if incoming.Timeout != nil {
+		next.Timeout = *incoming.Timeout
+	}
+	return next
+}
+
+func mergeSecretString(existing, incoming string) string {
+	if isMaskedSecretString(incoming) {
+		return existing
+	}
+	return incoming
+}
+
+func mergeSecretStringMap(existing, incoming map[string]string) map[string]string {
+	if incoming == nil {
+		return cloneStringMap(existing)
+	}
+	out := make(map[string]string, len(incoming))
+	for k, v := range incoming {
+		if isMaskedSecretString(v) {
+			out[k] = existing[k]
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func isMaskedSecretString(v string) bool {
+	return security.HasRedactedMarker(v)
 }
 
 func sortedStringMapKeys(m map[string]string) []string {

@@ -1,6 +1,6 @@
 import { useId, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { FileText, Check, X, Loader2 } from 'lucide-react';
+import { FileText, Check, X, Loader2, RefreshCw } from 'lucide-react';
 import { useChatStore } from '../../store/chat';
 import { getToolDisplayName } from '../../utils/toolName';
 
@@ -12,6 +12,8 @@ interface ToolExecutionBlockProps {
   status?: 'running' | 'success' | 'error';
   duration?: number;
   isError?: boolean;
+  recoverable?: boolean;
+  errorKind?: string;
 }
 
 export function ToolExecutionBlock({
@@ -22,6 +24,8 @@ export function ToolExecutionBlock({
   status,
   duration,
   isError,
+  recoverable,
+  errorKind,
 }: ToolExecutionBlockProps) {
   const { t } = useTranslation();
   const domId = useId();
@@ -30,6 +34,8 @@ export function ToolExecutionBlock({
   const liveStatus = useChatStore((s) => s.toolCallStatuses?.[id]);
   const resolvedDuration = liveStatus?.duration ?? duration;
   const requiresUserApproval = liveStatus?.requires_user_approval === true;
+  const resolvedErrorKind = liveStatus?.error_kind || errorKind;
+  const isRecoverable = recoverable || liveStatus?.recoverable === true;
 
   const resolvedStatus = useMemo<'running' | 'success' | 'error'>(() => {
     if (liveStatus?.status) return liveStatus.status;
@@ -42,6 +48,7 @@ export function ToolExecutionBlock({
   const displayName = getToolDisplayName(name, t);
   const isRunning = resolvedStatus === 'running';
   const isErrState = resolvedStatus === 'error';
+  const isApprovalRecoverable = isRecoverable && (requiresUserApproval || resolvedErrorKind?.startsWith('approval_'));
 
   const argsFormatted = useMemo(() => {
     if (!args) return '';
@@ -74,13 +81,17 @@ export function ToolExecutionBlock({
   return (
     <div
       className={`rounded-2xl border border-[var(--border-color)] bg-[var(--bg-card)] overflow-hidden${
-        isErrState ? ' ring-1 ring-[var(--danger)]/30' : ''
+        isErrState
+          ? isRecoverable
+            ? ' ring-1 ring-[var(--accent-border)]'
+            : ' ring-1 ring-[var(--danger)]/30'
+          : ''
       }`}
     >
       <div className="flex items-center gap-2 px-3 py-2 min-h-[44px]">
         <FileText
           className="w-4 h-4 shrink-0"
-          style={{ color: isErrState ? 'var(--danger)' : 'var(--accent-600)' }}
+          style={{ color: isErrState && !isRecoverable ? 'var(--danger)' : 'var(--accent-600)' }}
           aria-hidden="true"
         />
         <span className="text-[13px] font-semibold text-[var(--text-primary)] truncate">
@@ -91,9 +102,14 @@ export function ToolExecutionBlock({
             {t('chat.generating')}
           </span>
         )}
-        {isErrState && requiresUserApproval && (
+        {isErrState && isRecoverable && (
+          <span className="text-[11px] font-medium text-[var(--accent-600)] dark:text-[var(--accent-300)] shrink-0">
+            {isApprovalRecoverable ? t('tools.needsApproval', 'Needs approval') : t('tools.recoverable', 'Recoverable')}
+          </span>
+        )}
+        {isErrState && !isRecoverable && requiresUserApproval && (
           <span className="text-[11px] font-medium text-[var(--danger)] shrink-0">
-            Permission required
+            {t('tools.permissionRequired', 'Permission required')}
           </span>
         )}
         <div className="flex items-center gap-2 ml-auto shrink-0">
@@ -111,7 +127,14 @@ export function ToolExecutionBlock({
               aria-hidden="true"
             />
           )}
-          {isErrState && (
+          {isErrState && isRecoverable && (
+            <RefreshCw
+              className="w-3.5 h-3.5"
+              style={{ color: 'var(--accent-600)' }}
+              aria-hidden="true"
+            />
+          )}
+          {isErrState && !isRecoverable && (
             <X
               className="w-3.5 h-3.5"
               style={{ color: 'var(--danger)' }}
@@ -158,9 +181,11 @@ export function ToolExecutionBlock({
           <div>
             <div
               className={`text-[11px] font-semibold mb-1 ${
-                isErrState
+                isErrState && !isRecoverable
                   ? 'text-[var(--danger)]'
-                  : 'text-[var(--success)]'
+                  : isRecoverable
+                    ? 'text-[var(--accent-600)] dark:text-[var(--accent-300)]'
+                    : 'text-[var(--success)]'
               }`}
             >
               {t('tools.output')}

@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chef-guo/agents-hive/internal/agentquality"
@@ -13,6 +15,7 @@ import (
 	"github.com/chef-guo/agents-hive/internal/llm"
 	"github.com/chef-guo/agents-hive/internal/observability"
 	"github.com/chef-guo/agents-hive/internal/router"
+	"github.com/chef-guo/agents-hive/internal/security"
 	"github.com/chef-guo/agents-hive/internal/skills"
 	"github.com/chef-guo/agents-hive/internal/toolctx"
 	"github.com/chef-guo/agents-hive/internal/tools"
@@ -24,6 +27,39 @@ func qualitySessionHash(sessionID string) string {
 	}
 	sum := sha256.Sum256([]byte(sessionID))
 	return "sha256:" + hex.EncodeToString(sum[:8])
+}
+
+var metricStopReasonPattern = regexp.MustCompile(`^[a-z][a-z0-9_:-]{0,63}$`)
+
+type qualityShadowEvalRunner interface {
+	RunShadowEval(ctx context.Context, event agentquality.Event) error
+}
+
+var qualityShadowEvalRunners sync.Map
+
+func (m *Master) SetQualityShadowEvalRunner(runner qualityShadowEvalRunner) {
+	if m == nil {
+		return
+	}
+	if runner == nil {
+		qualityShadowEvalRunners.Delete(m)
+		return
+	}
+	qualityShadowEvalRunners.Store(m, runner)
+}
+
+func qualityMetricStopReason(raw string) string {
+	reason := strings.TrimSpace(strings.ToLower(raw))
+	if reason == "" {
+		return ""
+	}
+	if strings.Contains(reason, "=") || strings.ContainsAny(reason, " \t\r\n") {
+		return "summary"
+	}
+	if !metricStopReasonPattern.MatchString(reason) {
+		return "other"
+	}
+	return reason
 }
 
 func routeFromSession(session *SessionState) string {
@@ -65,10 +101,38 @@ func (m *Master) emitQualityEvent(traceID, spanID, sessionID string, ev agentqua
 	if ev.SessionIDHash == "" {
 		ev.SessionIDHash = qualitySessionHash(sessionID)
 	}
-	raw, _ := json.Marshal(ev)
+	if ev.TraceID == "" {
+		ev.TraceID = traceID
+	}
+	if ev.SpanID == "" {
+		ev.SpanID = spanID
+	}
+	if ev.TurnID == "" {
+		ev.TurnID = traceID
+	}
+	if ev.DomainID == "" {
+		ev.DomainID = inferQualityDomain(ev, routeFromSessionID(sessionID))
+	}
+	if ev.SourceKind == "" {
+		ev.SourceKind = "master"
+	}
+	if ev.SourceName == "" {
+		ev.SourceName = "master"
+	}
+	if ev.UserID == "" || ev.OwnerID == "" || ev.OwnerScope == "" {
+		ev = m.enrichQualityEventOwner(sessionID, ev)
+	}
+	m.runQualityShadowEval(ev)
+	raw, marshalErr := json.Marshal(ev)
+	if marshalErr != nil {
+		raw = nil
+	}
+	redactedRaw := redactQualityEventJSON(ev, raw)
 	labels := agentquality.MetricLabels(ev)
-	if ev.Name == agentquality.EventDelegation && ev.Delegation.StopReason != "" {
-		labels["stop_reason"] = ev.Delegation.StopReason
+	if ev.Name == agentquality.EventDelegation {
+		if stopReason := qualityMetricStopReason(ev.Delegation.StopReason); stopReason != "" {
+			labels["stop_reason"] = stopReason
+		}
 	}
 	m.enqueueMetric(observability.Metric{
 		Name:   string(ev.Name),
@@ -83,11 +147,99 @@ func (m *Master) emitQualityEvent(traceID, spanID, sessionID string, ev agentqua
 		SpanID:    spanID,
 		SessionID: sessionID,
 		Attributes: map[string]any{
-			"quality_event": json.RawMessage(raw),
+			"quality_event": json.RawMessage(redactedRaw),
 		},
 		Ts: ev.Ts,
 	})
-	m.enqueueQualityJournalDecision(sessionID, ev, raw)
+	m.enqueueQualityJournalDecision(sessionID, ev, redactedRaw)
+}
+
+func (m *Master) runQualityShadowEval(ev agentquality.Event) {
+	if m == nil {
+		return
+	}
+	value, ok := qualityShadowEvalRunners.Load(m)
+	if !ok {
+		return
+	}
+	runner, ok := value.(qualityShadowEvalRunner)
+	if !ok || runner == nil {
+		return
+	}
+	defer func() {
+		_ = recover()
+	}()
+	_ = runner.RunShadowEval(context.Background(), ev)
+}
+
+func (m *Master) enrichQualityEventOwner(sessionID string, ev agentquality.Event) agentquality.Event {
+	userID := strings.TrimSpace(ev.UserID)
+	if userID == "" {
+		userID = strings.TrimSpace(qualitySessionUserID(m, sessionID))
+	}
+	if ev.UserID == "" {
+		ev.UserID = userID
+	}
+	if ev.OwnerID == "" {
+		ev.OwnerID = userID
+	}
+	if ev.OwnerScope == "" && ev.OwnerID != "" {
+		ev.OwnerScope = agentquality.OwnerScopeUser
+	}
+	return ev
+}
+
+func qualitySessionUserID(m *Master, sessionID string) string {
+	if m == nil || m.sessionMgr == nil || strings.TrimSpace(sessionID) == "" {
+		return ""
+	}
+	session := m.sessionMgr.GetSession(sessionID)
+	if session == nil {
+		return ""
+	}
+	session.mu.RLock()
+	defer session.mu.RUnlock()
+	return session.UserID
+}
+
+func inferQualityDomain(ev agentquality.Event, route string) string {
+	switch ev.RouteDecision.IntentKind {
+	case string(router.IntentCreateSkill), string(router.IntentModifySkill):
+		return "skill_authoring"
+	case string(router.IntentManageTool):
+		return "mcp_server_building"
+	}
+	switch ev.Name {
+	case agentquality.EventToolRecall, agentquality.EventToolDecision, agentquality.EventPermissionDecision:
+		if ev.ToolDecision.Actual == "skill" || strings.HasPrefix(ev.ToolDecision.Actual, "skill_") {
+			return "skill_authoring"
+		}
+	case agentquality.EventBudgetExit:
+		return "quality_analysis"
+	}
+	return "generic"
+}
+
+func redactQualityEventJSON(ev agentquality.Event, raw []byte) []byte {
+	if len(raw) > 0 {
+		redacted, err := security.RedactJSON(raw)
+		if err == nil {
+			return redacted
+		}
+	}
+	summary := map[string]any{
+		"name":            ev.Name,
+		"route":           ev.Route,
+		"failure_type":    ev.FailureType,
+		"final_status":    ev.FinalStatus,
+		"session_id_hash": ev.SessionIDHash,
+		"redaction_error": true,
+	}
+	out, marshalErr := json.Marshal(summary)
+	if marshalErr != nil {
+		return []byte(`{"redaction_error":true}`)
+	}
+	return out
 }
 
 func (m *Master) recordToolRecall(traceID, spanID string, session *SessionState, recall agentquality.ToolRecall) {
@@ -117,6 +269,7 @@ func (m *Master) recordRouteDecision(traceID, spanID string, session *SessionSta
 	}
 	m.emitQualityEvent(traceID, spanID, sessionID, agentquality.Event{
 		Name:          agentquality.EventRouteDecision,
+		DomainID:      ev.Domain,
 		Route:         routeFromSession(session),
 		FailureType:   agentquality.FailureNone,
 		FinalStatus:   agentquality.StatusPass,
@@ -232,14 +385,14 @@ func reflectionSummary(trigger string) string {
 	}
 }
 
-func (m *Master) enqueueQualityJournalDecision(sessionID string, ev agentquality.Event, raw []byte) {
+func (m *Master) enqueueQualityJournalDecision(sessionID string, ev agentquality.Event, redactedRaw []byte) {
 	if m.journal == nil || m.journalCh == nil || sessionID == "" {
 		return
 	}
 	entry := journal.DecisionEntry{
 		SessionID: sessionID,
 		Decision:  string(ev.Name),
-		Reason:    string(raw),
+		Reason:    string(redactedRaw),
 		AgentID:   "quality",
 		Timestamp: ev.Ts,
 	}

@@ -63,6 +63,11 @@ type GateMetrics struct {
 	RegressionCandidateRate     float64 `json:"regression_candidate_rate"`
 	RequiredZeroToolRegression  int     `json:"required_zero_tool_regression"`
 	DelegationTraceCoverageRate float64 `json:"delegation_trace_coverage_rate"`
+
+	// Phase 2: Semantic Judge metrics
+	SemanticScore       float64  `json:"semantic_score,omitempty"`
+	JudgeMissing        bool     `json:"judge_missing,omitempty"`
+	JudgeRequiredDomain string   `json:"judge_required_domain,omitempty"`
 }
 
 type GateThresholds struct {
@@ -71,6 +76,10 @@ type GateThresholds struct {
 	ReplayLocatableRateMin         float64 `json:"replay_locatable_rate_min"`
 	RegressionCandidateRateMin     float64 `json:"regression_candidate_rate_min"`
 	DelegationTraceCoverageRateMin float64 `json:"delegation_trace_coverage_rate_min"`
+
+	// Phase 2: Semantic Judge thresholds
+	SemanticScoreMin         float64  `json:"semantic_score_min,omitempty"`
+	JudgeRequiredForDomains  []string `json:"judge_required_for_domains,omitempty"`
 }
 
 func DefaultGateThresholds() GateThresholds {
@@ -109,6 +118,21 @@ func EvaluateGate(m GateMetrics, th GateThresholds) error {
 	if m.DelegationTraceCoverageRate < th.DelegationTraceCoverageRateMin {
 		failed = append(failed, "delegation_trace")
 	}
+
+	// Phase 2: Semantic Judge checks
+	if m.JudgeMissing && len(th.JudgeRequiredForDomains) > 0 && m.JudgeRequiredDomain != "" {
+		// 检查是否在必需 judge 的域列表中
+		for _, domain := range th.JudgeRequiredForDomains {
+			if domain == m.JudgeRequiredDomain {
+				failed = append(failed, "judge_missing")
+				break
+			}
+		}
+	}
+	if th.SemanticScoreMin > 0 && m.SemanticScore < th.SemanticScoreMin {
+		failed = append(failed, "semantic_score")
+	}
+
 	if len(failed) > 0 {
 		return fmt.Errorf("agent quality gate failed: %v", failed)
 	}

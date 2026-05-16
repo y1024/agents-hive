@@ -3,6 +3,8 @@ package airouter
 import (
 	"context"
 	"encoding/json"
+	"net/url"
+	"strings"
 	"sync"
 
 	"go.uber.org/zap"
@@ -58,7 +60,7 @@ type Router struct {
 	llmPool   *llm.ClientPool
 	models    []ModelScore     // 所有可用 LLM 模型（含评分）
 	providers []ProviderConfig // 所有非 LLM provider 配置
-	userModel string           // 用户选定的主对话模型名称
+	userModel string           // 默认主对话模型名称；会话级选择由 Master 传入
 
 	// 默认配置（用于没有 DB 时的 fallback）
 	defaultCfg RouterConfig
@@ -129,9 +131,19 @@ func (r *Router) Execute(ctx context.Context, req ServiceRequest) (*ServiceRespo
 	return adapter.Execute(ctx, req)
 }
 
-// GetLLMClient 根据任务类型获取最优 LLM 客户端
+// GetLLMClient 根据任务类型获取最优 LLM 客户端。
 func (r *Router) GetLLMClient(task LLMTaskType) *llm.Client {
-	model := r.selectBestModel(task)
+	return r.getLLMClient(task, "")
+}
+
+// GetLLMClientForModel 根据模型配置 ID 获取 LLM 客户端。
+// 这里只接受后端已加载的模型配置名，不接受 base_url/api_key 等运行时配置字段。
+func (r *Router) GetLLMClientForModel(task LLMTaskType, modelName string) *llm.Client {
+	return r.getLLMClient(task, modelName)
+}
+
+func (r *Router) getLLMClient(task LLMTaskType, modelName string) *llm.Client {
+	model := r.selectBestModelWithUserModel(task, modelName)
 	if model == nil {
 		r.logger.Error("无可用 LLM 模型", zap.String("task", string(task)))
 		return nil
@@ -184,37 +196,48 @@ func (r *Router) SupportsAutoReasoningEffort(task LLMTaskType) bool {
 	return model != nil && model.SupportsAutoReasoningEffort()
 }
 
-// SwitchUserModel 切换用户选定的主对话模型（由前端触发）
-func (r *Router) SwitchUserModel(modelName, model, baseURL, provider, apiFormat string) {
+func (r *Router) SupportsAutoReasoningEffortForModel(task LLMTaskType, modelName string) bool {
+	model := r.selectBestModelWithUserModel(task, modelName)
+	return model != nil && model.SupportsAutoReasoningEffort()
+}
+
+// HasModel 检查模型配置 ID 是否已加载且可用。
+func (r *Router) HasModel(modelName string) bool {
+	modelName = strings.TrimSpace(modelName)
+	if modelName == "" {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.findModelLocked(modelName) != nil
+}
+
+// SwitchUserModel 切换用户选定的主对话模型。
+// 这里只接受模型配置 ID，不接受 base_url/api_key 等配置字段；运行时配置只来自 Reload 后的 DB 权威数据。
+func (r *Router) SwitchUserModel(modelName string) bool {
+	modelName = strings.TrimSpace(modelName)
+	if modelName == "" {
+		return false
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.userModel = modelName
-
-	// 更新模型列表中对应模型的配置
-	for i := range r.models {
-		if r.models[i].Name == modelName {
-			if model != "" {
-				r.models[i].Model = model
-			}
-			if baseURL != "" {
-				r.models[i].BaseURL = baseURL
-			}
-			if provider != "" {
-				r.models[i].Provider = provider
-			}
-			if apiFormat != "" {
-				r.models[i].APIFormat = apiFormat
-			}
-			break
-		}
+	model := r.findModelLocked(modelName)
+	if model != nil {
+		r.userModel = modelName
+		r.logger.Info("默认主模型已切换",
+			zap.String("name", modelName),
+			zap.String("model", model.Model),
+			zap.String("provider", model.Provider),
+		)
+		return true
 	}
 
-	r.logger.Info("用户切换主模型",
+	r.logger.Warn("用户切换主模型失败：模型未加载",
 		zap.String("name", modelName),
-		zap.String("model", model),
-		zap.String("provider", provider),
 	)
+	return false
 }
 
 // Reload 从 DB 重新加载所有 AI 服务配置
@@ -292,14 +315,46 @@ func (r *Router) Reload(ctx context.Context) error {
 			effectiveST = string(ServiceLLM)
 		}
 
-		// 确定 API key 和 base URL（model 级覆盖 > provider 级）
-		apiKey := p.APIKey
-		if m.APIKey != "" {
-			apiKey = m.APIKey
+		// 确定 API key 和 base URL（model 级覆盖 > provider 级）。
+		// 历史配置可能已写入脱敏 key 或非法 URL；运行时必须防御，避免坏覆盖污染调用链路。
+		apiKey := strings.TrimSpace(p.APIKey)
+		if !validLLMAPIKey(apiKey) {
+			r.logger.Warn("跳过 LLM 模型：provider API key 无效",
+				zap.String("model_name", m.Name),
+				zap.String("provider", p.Name),
+			)
+			continue
 		}
-		baseURL := p.BaseURL
-		if m.BaseURL != "" {
-			baseURL = m.BaseURL
+		if modelKey := strings.TrimSpace(m.APIKey); modelKey != "" {
+			if validLLMAPIKey(modelKey) {
+				apiKey = modelKey
+			} else {
+				r.logger.Warn("忽略无效的 model 级 API key 覆盖",
+					zap.String("model_name", m.Name),
+					zap.String("provider", p.Name),
+					zap.Int("api_key_len", len(modelKey)),
+				)
+			}
+		}
+		baseURL := strings.TrimSpace(p.BaseURL)
+		if baseURL != "" && !validLLMBaseURL(baseURL) {
+			r.logger.Warn("跳过 LLM 模型：provider base_url 非法",
+				zap.String("model_name", m.Name),
+				zap.String("provider", p.Name),
+				zap.String("base_url", baseURL),
+			)
+			continue
+		}
+		if modelBaseURL := strings.TrimSpace(m.BaseURL); modelBaseURL != "" {
+			if validLLMBaseURL(modelBaseURL) {
+				baseURL = modelBaseURL
+			} else {
+				r.logger.Warn("忽略非法的 model 级 base_url 覆盖",
+					zap.String("model_name", m.Name),
+					zap.String("provider", p.Name),
+					zap.String("base_url", modelBaseURL),
+				)
+			}
 		}
 
 		if effectiveST != string(ServiceLLM) {
@@ -441,6 +496,16 @@ func (r *Router) Reload(ctx context.Context) error {
 	return nil
 }
 
+func validLLMAPIKey(apiKey string) bool {
+	apiKey = strings.TrimSpace(apiKey)
+	return len(apiKey) >= 8 && !strings.Contains(apiKey, "****")
+}
+
+func validLLMBaseURL(baseURL string) bool {
+	u, err := url.Parse(strings.TrimSpace(baseURL))
+	return err == nil && u.Host != "" && (u.Scheme == "http" || u.Scheme == "https")
+}
+
 // GetProviders 获取指定服务类型的 provider 配置
 func (r *Router) GetProviders(st ServiceType) []ProviderConfig {
 	r.mu.RLock()
@@ -460,7 +525,7 @@ func (r *Router) ActiveModel() string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	m := r.userSelectedModel()
+	m := r.userSelectedModelLocked("")
 	if m != nil {
 		return m.Model
 	}

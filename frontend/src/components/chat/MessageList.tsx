@@ -46,6 +46,7 @@ interface Props {
   loading?: boolean;
   streamingStatus?: string | null;
   onRegenerate?: () => void;
+  sessionId?: string;
 }
 
 function isIntegratedToolResult(msg: Message, assistantToolCallIds: Set<string>): boolean {
@@ -67,7 +68,7 @@ function shouldShowMessageRole(messages: Message[], index: number, assistantTool
   return true;
 }
 
-export function MessageList({ messages, loading, streamingStatus, onRegenerate }: Props) {
+export function MessageList({ messages, loading, streamingStatus, onRegenerate, sessionId }: Props) {
   const { t } = useTranslation();
   const inlineApprovals = useChatStore((s) => s.inlineApprovals);
   const { submitApproval } = useHITLSubmit();
@@ -176,9 +177,11 @@ export function MessageList({ messages, loading, streamingStatus, onRegenerate }
 
   // 预处理：将 role='tool' 消息的 content 按 tool_call_id 关联到 ToolCallCard
   // 注意：必须在所有条件返回之前调用，保证 hooks 调用顺序一致
-  const { toolResults, toolErrors, toolNames, assistantToolCallIds } = useMemo(() => {
+  const { toolResults, toolErrors, toolRecoverable, toolErrorKinds, toolNames, assistantToolCallIds } = useMemo(() => {
     const results = new Map<string, string>();
     const errors = new Map<string, boolean>();
+    const recoverable = new Map<string, boolean>();
+    const errorKinds = new Map<string, string>();
     const names = new Map<string, string>();
     const assistantIds = new Set<string>();
     for (const msg of messages) {
@@ -186,6 +189,12 @@ export function MessageList({ messages, loading, streamingStatus, onRegenerate }
         results.set(msg.tool_call_id, msg.content);
         if (msg.is_error) {
           errors.set(msg.tool_call_id, true);
+        }
+        if (msg.recoverable) {
+          recoverable.set(msg.tool_call_id, true);
+        }
+        if (msg.error_kind) {
+          errorKinds.set(msg.tool_call_id, msg.error_kind);
         }
       }
       if (msg.role === 'assistant' && msg.tool_calls) {
@@ -195,7 +204,7 @@ export function MessageList({ messages, loading, streamingStatus, onRegenerate }
         }
       }
     }
-    return { toolResults: results, toolErrors: errors, toolNames: names, assistantToolCallIds: assistantIds };
+    return { toolResults: results, toolErrors: errors, toolRecoverable: recoverable, toolErrorKinds: errorKinds, toolNames: names, assistantToolCallIds: assistantIds };
   }, [messages]);
 
   // 空状态
@@ -254,7 +263,10 @@ export function MessageList({ messages, loading, streamingStatus, onRegenerate }
                   onRegenerate={onRegenerate}
                   toolResults={toolResults}
                   toolErrors={toolErrors}
+                  toolRecoverable={toolRecoverable}
+                  toolErrorKinds={toolErrorKinds}
                   toolNames={toolNames}
+                  sessionId={sessionId}
                 />
               </MessageBubbleBoundary>
               {/* 内联审批卡片：紧跟对应的消息渲染 */}

@@ -1,14 +1,16 @@
 package agentquality
 
 type GateInput struct {
-	Cases              []LoadedCase        `json:"-"`
-	Results            []Result            `json:"results"`
-	Events             []Event             `json:"quality_events,omitempty"`
-	Candidates         []GateCandidateRef  `json:"candidates,omitempty"`
-	EventsByCase       map[string][]Event  `json:"events_by_case"`
-	CandidateByCaseID  map[string]bool     `json:"candidate_by_case_id"`
-	ToolActualByCaseID map[string][]string `json:"tool_actual_by_case_id"`
-	ReplayRefByCaseID  map[string]string   `json:"replay_ref_by_case_id"`
+	Cases               []LoadedCase            `json:"-"`
+	Results             []Result                `json:"results"`
+	Events              []Event                 `json:"quality_events,omitempty"`
+	JudgeVerdicts       map[string]JudgeVerdict `json:"judge_verdicts,omitempty"`
+	Candidates          []GateCandidateRef      `json:"candidates,omitempty"`
+	EventsByCase        map[string][]Event      `json:"events_by_case"`
+	CandidateByCaseID   map[string]bool         `json:"candidate_by_case_id"`
+	ToolActualByCaseID  map[string][]string     `json:"tool_actual_by_case_id"`
+	ReplayRefByCaseID   map[string]string       `json:"replay_ref_by_case_id"`
+	FinalOutputByCaseID map[string]string       `json:"final_output_by_case_id,omitempty"`
 }
 
 type GateCandidateRef struct {
@@ -66,6 +68,15 @@ func ComputeGateMetrics(input GateInput) GateMetrics {
 	m.ReplayLocatableRate = ratio(replayHit, replayNeeded)
 	m.RegressionCandidateRate = ratio(candidateHit, candidateNeeded)
 	m.DelegationTraceCoverageRate = ratio(delegationHit, delegationCases)
+	if len(input.JudgeVerdicts) > 0 {
+		var totalScore float64
+		var count int
+		for _, verdict := range input.JudgeVerdicts {
+			totalScore += float64(verdict.Score)
+			count++
+		}
+		m.SemanticScore = ratioFloat(totalScore, count)
+	}
 	return m
 }
 
@@ -81,6 +92,9 @@ func NormalizeEvalGateInput(input GateInput) GateInput {
 	}
 	if input.ReplayRefByCaseID == nil {
 		input.ReplayRefByCaseID = make(map[string]string)
+	}
+	if input.FinalOutputByCaseID == nil {
+		input.FinalOutputByCaseID = make(map[string]string)
 	}
 	for _, ev := range input.Events {
 		if ev.CaseID == "" {
@@ -205,4 +219,11 @@ func ratio(num, den int) float64 {
 		return 1
 	}
 	return float64(num) / float64(den)
+}
+
+func ratioFloat(num float64, den int) float64 {
+	if den == 0 {
+		return 0
+	}
+	return num / float64(den)
 }

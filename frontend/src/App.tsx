@@ -72,6 +72,7 @@ export default function App() {
             <Route element={<AuthGuard><Outlet /></AuthGuard>}>
               <Route element={<AppShell />}>
                 <Route path="/" element={<ChatLanding />} />
+                <Route path="/sessions" element={<Navigate to="/" replace />} />
                 <Route path="/sessions/:id" element={<Chat />} />
                 <Route path="/replay" element={<ReplayGallery />} />
                 <Route path="/guide" element={<Guide key="user-guide" variant="user" />} />
@@ -86,25 +87,26 @@ export default function App() {
               <Route path="/skills" element={<Navigate to="/admin/skills" replace />} />
 
               {/* 管理后台路由 */}
-              <Route element={<AdminShell />}>
+              <Route element={<AdminGuard><AdminShell /></AdminGuard>}>
                 <Route path="/admin" element={<Dashboard />} />
                 <Route path="/admin/agents" element={<Agents />} />
                 <Route path="/admin/scheduled-tasks" element={<ScheduledTasks />} />
-                <Route path="/admin/skills" element={<AdminGuard><Skills /></AdminGuard>} />
-                <Route path="/admin/settings" element={<AdminGuard><AdminSettings /></AdminGuard>} />
+                <Route path="/admin/skills" element={<Skills />} />
+                <Route path="/admin/settings" element={<AdminSettings />} />
                 <Route path="/admin/guide" element={<Guide key="admin-guide" variant="admin" />} />
                 {/* Admin-only 页面 */}
-                <Route path="/admin/users" element={<AdminGuard><UserList /></AdminGuard>} />
-                <Route path="/admin/usage" element={<AdminGuard><UsageStats /></AdminGuard>} />
-                <Route path="/admin/auth-providers" element={<AdminGuard><AuthProviders /></AdminGuard>} />
-                <Route path="/admin/prompts" element={<AdminGuard><PromptManager /></AdminGuard>} />
-                <Route path="/admin/quality-candidates" element={<AdminGuard><QualityCandidates /></AdminGuard>} />
-                <Route path="/admin/quality-workbench" element={<AdminGuard><QualityWorkbench /></AdminGuard>} />
-                <Route path="/admin/memory-governance" element={<AdminGuard><MemoryGovernance /></AdminGuard>} />
-                <Route path="/admin/auto-optimization" element={<AdminGuard><AutoOptimization /></AdminGuard>} />
-                <Route path="/admin/multi-agent" element={<AdminGuard><MultiAgentEcosystem /></AdminGuard>} />
-                <Route path="/admin/llm" element={<AdminGuard><LLMProviders /></AdminGuard>} />
+                <Route path="/admin/users" element={<UserList />} />
+                <Route path="/admin/usage" element={<UsageStats />} />
+                <Route path="/admin/auth-providers" element={<AuthProviders />} />
+                <Route path="/admin/prompts" element={<PromptManager />} />
+                <Route path="/admin/quality-candidates" element={<QualityCandidates />} />
+                <Route path="/admin/quality-workbench" element={<QualityWorkbench />} />
+                <Route path="/admin/memory-governance" element={<MemoryGovernance />} />
+                <Route path="/admin/auto-optimization" element={<AutoOptimization />} />
+                <Route path="/admin/multi-agent" element={<MultiAgentEcosystem />} />
+                <Route path="/admin/llm" element={<LLMProviders />} />
               </Route>
+              <Route path="*" element={<Navigate to="/" replace />} />
             </Route>
           </Routes>
         </Suspense>

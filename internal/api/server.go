@@ -100,6 +100,7 @@ type Server struct {
 	skillStore                    skillStoreInterface   // Skill CRUD 存储（可选）
 	qualityCandidateStore         qualityCandidateStore
 	qualityEvalRunner             agentquality.EvalRunner
+	qualityShadowEvalStore        agentquality.ShadowEvalResultStore
 	memoryStore                   memory.MemoryStore
 	memoryEmbeddingBacklog        memory.EmbeddingBacklog
 	optimizationStore             agentquality.OptimizationSuggestionStore
@@ -197,11 +198,13 @@ func NewServer(
 	s.workbenchReplayStore = qualityworkbench.NewMemoryReplayJobStore(time.Now)
 	s.workbenchBatchEvalStore = qualityworkbench.NewMemoryBatchEvalRunStore(time.Now)
 	s.workbenchReportStore = qualityworkbench.NewMemoryWeeklyReportStore(time.Now)
+	s.qualityShadowEvalStore = agentquality.NewInMemoryShadowEvalResultStore()
 	if pgStore, ok := db.(*store.PostgresStore); ok && pgStore.Pool() != nil {
 		s.workbenchReplayStore = qualityworkbench.NewPGReplayJobStore(pgStore.Pool())
 		s.workbenchGroupingRuleStore = qualityworkbench.NewPGGroupingRuleStore(pgStore.Pool())
 		s.workbenchBatchEvalStore = qualityworkbench.NewPGBatchEvalRunStore(pgStore.Pool())
 		s.workbenchReportStore = qualityworkbench.NewPGWeeklyReportStore(pgStore.Pool())
+		s.qualityShadowEvalStore = agentquality.NewPGShadowEvalResultStore(pgStore.Pool())
 		s.memoryEmbeddingBacklog = memory.NewInstrumentedEmbeddingBacklog(
 			memory.NewPGEmbeddingBacklog(pgStore.Pool()),
 			memory.NewExternalMetricRecorder(memoryobs.NewWriter(observability.NewPgMetricsWriter(pgStore.Pool(), logger))),
@@ -371,6 +374,17 @@ func (s *Server) SetQualityCandidateStore(store qualityCandidateStore) {
 
 func (s *Server) SetQualityEvalRunner(runner agentquality.EvalRunner) {
 	s.qualityEvalRunner = runner
+}
+
+func (s *Server) SetQualityShadowEvalStore(store agentquality.ShadowEvalResultStore) {
+	s.qualityShadowEvalStore = store
+}
+
+func (s *Server) QualityShadowEvalStore() agentquality.ShadowEvalResultStore {
+	if s.qualityShadowEvalStore == nil {
+		s.qualityShadowEvalStore = agentquality.NewInMemoryShadowEvalResultStore()
+	}
+	return s.qualityShadowEvalStore
 }
 
 func (s *Server) SetOptimizationSuggestionStore(store agentquality.OptimizationSuggestionStore) {

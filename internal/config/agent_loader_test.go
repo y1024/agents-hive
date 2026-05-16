@@ -155,7 +155,7 @@ func TestLoadAgentDefinitions(t *testing.T) {
 name: research
 description: 研究 Agent
 mode: subagent
-model: gpt-4o
+model: gpt-5
 temperature: 0.3
 max_steps: 10
 tools:
@@ -191,7 +191,7 @@ mode: primary
 		require.NotNil(t, research)
 		assert.Equal(t, "研究 Agent", research.Description)
 		assert.Equal(t, "subagent", research.Mode)
-		assert.Equal(t, "gpt-4o", research.Model)
+		assert.Equal(t, "gpt-5", research.Model)
 		assert.InDelta(t, 0.3, research.Temperature, 0.001)
 		assert.Equal(t, 10, research.MaxSteps)
 		assert.Equal(t, []string{"read_file", "grep"}, research.Tools)

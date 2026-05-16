@@ -4,8 +4,10 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
+	"github.com/chef-guo/agents-hive/internal/airouter"
 	"github.com/chef-guo/agents-hive/internal/llm"
 )
 
@@ -108,4 +110,74 @@ func TestAgentModelBinding(t *testing.T) {
 		sessionLLM2 := m.getSessionLLM(session)
 		assert.Equal(t, sessionLLM1, sessionLLM2, "应该返回缓存的 Client")
 	})
+}
+
+func TestSessionSelectedModelRoutesThroughAIRouter(t *testing.T) {
+	logger := zap.NewNop()
+	router := airouter.NewRouter(airouter.RouterConfig{
+		DefaultModel:    "gpt-5",
+		DefaultProvider: "openai",
+		DefaultAPIKey:   "default-key",
+		Logger:          logger,
+	})
+
+	m := &Master{
+		config: Config{
+			Router: router,
+		},
+		router:  router,
+		llmPool: llm.NewClientPool(logger),
+		logger:  logger,
+	}
+
+	sessionA := &SessionState{ID: "session-a", SelectedModel: "default"}
+	sessionB := &SessionState{ID: "session-b"}
+
+	llmA := m.getSessionLLM(sessionA)
+	llmB := m.getSessionLLM(sessionB)
+
+	require.NotNil(t, llmA)
+	require.NotNil(t, llmB)
+	assert.Equal(t, "gpt-5", llmA.Model())
+	assert.Equal(t, "gpt-5", llmB.Model())
+	assert.Equal(t, "gpt-5", sessionA.activeModel)
+	assert.Equal(t, "gpt-5", sessionB.activeModel)
+}
+
+func TestResolveModelReasoningEffortUsesActualSessionModel(t *testing.T) {
+	m := &Master{config: Config{}}
+
+	input := "Design the migration plan and compare tradeoffs."
+
+	assert.Equal(t, "high", m.resolveModelReasoningEffort("", input, "o3-mini"))
+	assert.Empty(t, m.resolveModelReasoningEffort("", input, "gpt-5"))
+}
+
+func TestModelOverrideUsesRouterModelConfigName(t *testing.T) {
+	logger := zap.NewNop()
+	router := airouter.NewRouter(airouter.RouterConfig{
+		DefaultModel:    "gpt-5",
+		DefaultProvider: "openai",
+		DefaultAPIKey:   "default-key",
+		Logger:          logger,
+	})
+	m := &Master{
+		config: Config{
+			Router:   router,
+			Model:    "gpt-4o",
+			APIKey:   "stale-global-key",
+			BaseURL:  "https://stale.invalid",
+			Provider: "openai",
+		},
+		router:  router,
+		llmPool: llm.NewClientPool(logger),
+		logger:  logger,
+	}
+
+	override := m.getModelOverrideLLM("default")
+	require.NotNil(t, override)
+	assert.Equal(t, "gpt-5", override.Model())
+
+	assert.Nil(t, m.getModelOverrideLLM("gpt-5"),
+		"Router 模式下 model override 必须是后端已加载的模型配置名，不能用裸 API model id 拼全局 base_url/api_key")
 }

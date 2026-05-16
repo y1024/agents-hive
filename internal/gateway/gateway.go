@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"sync"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/chef-guo/agents-hive/internal/auth"
+	"github.com/chef-guo/agents-hive/internal/errs"
 )
 
 // RPCRequest JSON-RPC 风格请求
@@ -189,7 +191,7 @@ func (g *Gateway) dispatch(ctx context.Context, req RPCRequest, authToken *AuthT
 		return RPCResponse{ID: req.ID, Error: &RPCError{Code: 404, Message: "方法未找到: " + req.Method}}
 	}
 
-	if method.AuthScope != "" && !g.auth.HasScope(authToken, method.AuthScope) {
+	if method.AuthScope != "" && !g.hasScope(ctx, authToken, method.AuthScope) {
 		return RPCResponse{ID: req.ID, Error: &RPCError{Code: 401, Message: "未授权"}}
 	}
 
@@ -212,9 +214,46 @@ func (g *Gateway) dispatch(ctx context.Context, req RPCRequest, authToken *AuthT
 			zap.String("method", req.Method),
 			zap.String("request_id", req.ID),
 			zap.Error(err))
-		return RPCResponse{ID: req.ID, Error: &RPCError{Code: 500, Message: "内部服务错误"}}
+		return RPCResponse{ID: req.ID, Error: rpcErrorFromError(err)}
 	}
 	return RPCResponse{ID: req.ID, Result: result}
+}
+
+func (g *Gateway) hasScope(ctx context.Context, authToken *AuthToken, scope string) bool {
+	// 明确的 Gateway 机器令牌始终按 gateway.tokens scope 判定。
+	if authToken != nil && g.auth.HasScope(authToken, scope) {
+		return true
+	}
+
+	user := auth.UserFrom(ctx)
+	if user != nil && user.Status == "active" {
+		if user.Role == "admin" {
+			return true
+		}
+		return scope == "read"
+	}
+
+	// 只有整个 HTTP auth 未启用时，才允许 Gateway 的无 token 本地开放模式。
+	// 若 WebUI/JWT auth 已启用，即使 gateway.tokens 为空，也不能让 RPC 管理方法匿名开放。
+	if auth.IsAuthEnabled(ctx) {
+		return false
+	}
+	return g.auth.HasScope(authToken, scope)
+}
+
+func rpcErrorFromError(err error) *RPCError {
+	var appErr *errs.Error
+	if errors.As(err, &appErr) {
+		switch appErr.Code {
+		case errs.CodeInvalidInput, errs.CodeInvalidArgument, errs.CodeBadRequest, errs.CodeInvalidRequest:
+			return &RPCError{Code: 400, Message: appErr.Message}
+		case errs.CodeNotFound:
+			return &RPCError{Code: 404, Message: appErr.Message}
+		case errs.CodePermissionDenied:
+			return &RPCError{Code: 403, Message: appErr.Message}
+		}
+	}
+	return &RPCError{Code: 500, Message: "内部服务错误"}
 }
 
 func writeRPCError(w http.ResponseWriter, id string, code int, msg string) {

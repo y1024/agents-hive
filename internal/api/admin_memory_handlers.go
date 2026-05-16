@@ -188,14 +188,21 @@ func (s *Server) handleAdminMemoryInjectionExplain(w http.ResponseWriter, r *htt
 		limit = 100
 	}
 	if s.memoryInjectionExplainReader != nil {
-		events, err := s.memoryInjectionExplainReader.RecentMemoryInjectionEvents(r.Context(), limit)
+		events, err := s.memoryInjectionExplainReader.RecentMemoryInjectionEvents(r.Context(), limit*3)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: err.Error(), Code: errs.CodeInternal})
 			return
 		}
-		items := make([]memoryInjectionExplainItem, 0, len(events))
+		rctx := memory.RuntimeContextFromContext(r.Context())
+		items := make([]memoryInjectionExplainItem, 0, min(limit, len(events)))
 		for _, ev := range events {
+			if !memoryInjectionExplainEventMatchesRuntime(ev, rctx) {
+				continue
+			}
 			items = append(items, memoryInjectionExplainItemFromEvent(ev))
+			if len(items) >= limit {
+				break
+			}
 		}
 		writeJSON(w, http.StatusOK, memoryInjectionExplainResponse{
 			Items:  items,
@@ -225,6 +232,9 @@ func (s *Server) handleAdminMemoryPromotionCandidates(w http.ResponseWriter, r *
 	if err != nil {
 		writeMemoryPromotionError(w, err)
 		return
+	}
+	if candidates == nil {
+		candidates = []memory.MemoryPromotionCandidate{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items": candidates,
@@ -390,6 +400,9 @@ func (s *Server) handleAdminMemoryBacklogStats(w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: err.Error(), Code: errs.CodeInternal})
 		return
 	}
+	if stats.ByState == nil {
+		stats.ByState = map[memory.EmbeddingBacklogStatus]int{}
+	}
 	writeJSON(w, http.StatusOK, stats)
 }
 
@@ -428,6 +441,7 @@ func (s *Server) handleAdminMemoryProductionMetrics(w http.ResponseWriter, r *ht
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "读取 memory 生产指标失败", Code: errs.CodeStoreReadFailed})
 		return
 	}
+	metrics = memoryobs.NormalizeProductionMetrics(metrics, since, until, bucketSize)
 	writeJSON(w, http.StatusOK, metrics)
 }
 
@@ -610,6 +624,49 @@ func adminMemoryFilterFromRequest(r *http.Request) adminMemoryFilter {
 	}
 }
 
+func memoryInjectionExplainEventMatchesRuntime(ev agentquality.Event, rctx memory.RuntimeContext) bool {
+	if rctx.UserID == "" && rctx.DomainID == "" {
+		return true
+	}
+	ctx := ev.ContextBuild
+	eventUserID := strings.TrimSpace(ev.UserID)
+	ownerScope := strings.TrimSpace(ctx.MemoryOwnerScope)
+	if ownerScope == "" {
+		ownerScope = strings.TrimSpace(string(ev.OwnerScope))
+	}
+	ownerID := strings.TrimSpace(ctx.MemoryOwnerID)
+	if ownerID == "" {
+		ownerID = strings.TrimSpace(ev.OwnerID)
+	}
+	eventDomainID := strings.TrimSpace(ctx.MemoryDomainID)
+	if eventDomainID == "" {
+		eventDomainID = strings.TrimSpace(ev.DomainID)
+	}
+	if ownerScope == string(memory.TargetScopeUser) && eventUserID == "" {
+		eventUserID = ownerID
+	}
+	if rctx.UserID != "" {
+		switch {
+		case eventUserID != "":
+			if eventUserID != rctx.UserID {
+				return false
+			}
+		case ownerScope == string(memory.TargetScopeUser):
+			return false
+		}
+	}
+	if rctx.DomainID != "" {
+		if eventDomainID != "" {
+			return eventDomainID == rctx.DomainID
+		}
+		if ownerScope == string(memory.TargetScopeDomain) {
+			return ownerID == rctx.DomainID
+		}
+		return false
+	}
+	return true
+}
+
 func (f adminMemoryFilter) searchOptions(limit int) memory.SearchOptions {
 	return memory.SearchOptions{
 		UserID: f.UserID,
@@ -727,14 +784,19 @@ type memoryInjectionExplainItem struct {
 	Timestamp            time.Time         `json:"timestamp,omitempty"`
 	SessionIDHash        string            `json:"session_id_hash,omitempty"`
 	Route                string            `json:"route,omitempty"`
-	PromptVersions       []string          `json:"prompt_versions,omitempty"`
-	MemoryIDs            []int64           `json:"memory_ids,omitempty"`
-	SkippedMemoryIDs     []int64           `json:"skipped_memory_ids,omitempty"`
+	PromptVersions       []string          `json:"prompt_versions"`
+	MemoryIDs            []int64           `json:"memory_ids"`
+	SkippedMemoryIDs     []int64           `json:"skipped_memory_ids"`
 	SkipCounts           map[string]int    `json:"skip_counts"`
 	EstimatedTokens      int               `json:"estimated_tokens,omitempty"`
 	MemoryInjected       bool              `json:"memory_injected"`
 	FeedbackMemoryCount  int               `json:"feedback_memory_count,omitempty"`
 	RegularMemoryCount   int               `json:"regular_memory_count,omitempty"`
+	MemoryDomainID       string            `json:"memory_domain_id,omitempty"`
+	MemorySourceKind     string            `json:"memory_source_kind,omitempty"`
+	MemorySourceName     string            `json:"memory_source_name,omitempty"`
+	MemoryOwnerScope     string            `json:"memory_owner_scope,omitempty"`
+	MemoryOwnerID        string            `json:"memory_owner_id,omitempty"`
 	ContaminationCheck   string            `json:"contamination_check,omitempty"`
 	AdditionalAttributes map[string]string `json:"additional_attributes,omitempty"`
 }
@@ -745,14 +807,19 @@ func memoryInjectionExplainItemFromEvent(ev agentquality.Event) memoryInjectionE
 		Timestamp:           ev.Ts,
 		SessionIDHash:       ev.SessionIDHash,
 		Route:               ev.Route,
-		PromptVersions:      append([]string(nil), ctx.PromptVersions...),
-		MemoryIDs:           append([]int64(nil), ctx.MemoryIDs...),
-		SkippedMemoryIDs:    append([]int64(nil), ctx.SkippedMemoryIDs...),
+		PromptVersions:      append([]string{}, ctx.PromptVersions...),
+		MemoryIDs:           append([]int64{}, ctx.MemoryIDs...),
+		SkippedMemoryIDs:    append([]int64{}, ctx.SkippedMemoryIDs...),
 		SkipCounts:          memoryInjectionSkipCounts(ctx),
 		EstimatedTokens:     ctx.EstimatedTokens,
 		MemoryInjected:      ctx.MemoryInjected,
 		FeedbackMemoryCount: ctx.FeedbackMemoryCount,
 		RegularMemoryCount:  ctx.RegularMemoryCount,
+		MemoryDomainID:      ctx.MemoryDomainID,
+		MemorySourceKind:    ctx.MemorySourceKind,
+		MemorySourceName:    ctx.MemorySourceName,
+		MemoryOwnerScope:    ctx.MemoryOwnerScope,
+		MemoryOwnerID:       ctx.MemoryOwnerID,
 		ContaminationCheck:  ctx.ContaminationCheck,
 	}
 }

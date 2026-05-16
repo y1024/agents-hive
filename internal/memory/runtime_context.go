@@ -18,6 +18,9 @@ type RuntimeContext struct {
 	SessionID    string
 	AgentName    string
 	SkillName    string
+	DomainID     string
+	SourceKind   string
+	SourceName   string
 	TaskType     string
 	CurrentFiles []string
 	ToolIntent   string
@@ -70,6 +73,15 @@ func MergeRuntimeContext(base RuntimeContext, override RuntimeContext) RuntimeCo
 	}
 	if override.SkillName != "" {
 		base.SkillName = override.SkillName
+	}
+	if override.DomainID != "" {
+		base.DomainID = override.DomainID
+	}
+	if override.SourceKind != "" {
+		base.SourceKind = override.SourceKind
+	}
+	if override.SourceName != "" {
+		base.SourceName = override.SourceName
 	}
 	if override.TaskType != "" {
 		base.TaskType = override.TaskType

@@ -12,6 +12,12 @@ type InjectedMemory struct {
 // InjectionResult 让质量系统能解释 memory/context 的构成与过滤原因。
 type InjectionResult struct {
 	Text                  string           `json:"text"`
+	Target                MemoryTarget     `json:"target,omitempty"`
+	DomainID              string           `json:"domain_id,omitempty"`
+	SourceKind            string           `json:"source_kind,omitempty"`
+	SourceName            string           `json:"source_name,omitempty"`
+	OwnerScope            TargetScope      `json:"owner_scope,omitempty"`
+	OwnerID               string           `json:"owner_id,omitempty"`
 	Memories              []InjectedMemory `json:"memories"`
 	EstimatedTokens       int              `json:"estimated_tokens"`
 	FeedbackCount         int              `json:"feedback_count"`

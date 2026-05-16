@@ -25,6 +25,7 @@ export function MCPServersSettings() {
 
   const [mcpTimeout, setMcpTimeout] = useState('30s');
   const [mcpServers, setMcpServers] = useState<MCPServerEntry[]>([]);
+  const [originalServerNames, setOriginalServerNames] = useState<string[]>([]);
   const [envTexts, setEnvTexts] = useState<Record<number, string>>({});
   const [headerTexts, setHeaderTexts] = useState<Record<number, string>>({});
   const [argsTexts, setArgsTexts] = useState<Record<number, string>>({});
@@ -61,6 +62,7 @@ export function MCPServersSettings() {
           ...srv,
         }));
         setMcpServers(entries);
+        setOriginalServerNames(entries.map((srv) => srv.name).filter(Boolean));
         const eTexts: Record<number, string> = {};
         const hTexts: Record<number, string> = {};
         const aTexts: Record<number, string> = {};
@@ -98,6 +100,12 @@ export function MCPServersSettings() {
 
   const buildMcpPayload = () => {
     const servers: Record<string, MCPServerConfig | null> = {};
+    const currentNames = new Set(mcpServers.map((srv) => srv.name).filter(Boolean));
+    originalServerNames.forEach((name) => {
+      if (!currentNames.has(name)) {
+        servers[name] = null;
+      }
+    });
     mcpServers.forEach((srv, i) => {
       if (!srv.name) return;
       const env = envTexts[i] !== undefined ? parseKeyValueText(envTexts[i]) : srv.env;
@@ -125,6 +133,7 @@ export function MCPServersSettings() {
       const catalog = await client.listMCPTools();
       setToolCatalog(catalog);
       setToolCatalogError('');
+      setOriginalServerNames(mcpServers.map((srv) => srv.name).filter(Boolean));
       addToast('success', t('runtimeConfig.applySuccess'));
     } catch (e) {
       const msg = e instanceof Error ? e.message : t('runtimeConfig.applyFailed');
@@ -345,6 +354,9 @@ function MCPRuntimeStatus({ catalog, error }: { catalog: MCPToolsListResponse | 
   }
 
   const servers = catalog.servers || [];
+  const requiresApprovalLabel = t('runtimeConfig.requiresApproval', 'Requires approval');
+  const mayRequireApprovalLabel = t('runtimeConfig.mayRequireApproval', 'Contains high-risk actions');
+  const unavailableLabel = t('runtimeConfig.toolUnavailable', 'Unavailable');
   return (
     <div className="mb-4 rounded-lg border border-[var(--border-color)] bg-[var(--bg-primary)] px-3 py-3">
       <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -378,21 +390,42 @@ function MCPRuntimeStatus({ catalog, error }: { catalog: MCPToolsListResponse | 
                 </div>
                 {previewTools.length > 0 && (
                   <div className="mt-2 flex flex-wrap gap-1.5">
-                    {previewTools.map((tool) => (
-                      <span
-                        key={tool.name}
-                        title={`${tool.name}${tool.risk ? ` · ${tool.risk}` : ''}`}
-                        className={`rounded px-1.5 py-0.5 text-[11px] ${
-                          tool.requires_approval
-                            ? 'bg-amber-500/10 text-amber-700 dark:text-amber-300'
-                            : tool.trusted
-                              ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
-                              : 'bg-[var(--bg-secondary)] text-[var(--text-secondary)]'
-                        }`}
-                      >
-                        <code>{tool.name}</code>
-                      </span>
-                    ))}
+                    {previewTools.map((tool) => {
+                      const unavailable = tool.callable_now === false && (
+                        tool.route_status === 'blocked_unknown' ||
+                        tool.route_status === 'blocked_dangerous' ||
+                        tool.route_status === 'discovery_only'
+                      );
+                      const statusLabel = unavailable
+                        ? unavailableLabel
+                        : tool.requires_approval
+                          ? requiresApprovalLabel
+                          : tool.may_require_approval
+                            ? mayRequireApprovalLabel
+                            : '';
+                      return (
+                        <span
+                          key={tool.name}
+                          title={`${tool.name}${tool.risk ? ` · ${tool.risk}` : ''}${tool.route_status ? ` · ${tool.route_status}` : ''}${statusLabel ? ` · ${statusLabel}` : ''}${tool.block_reason ? ` · ${tool.block_reason}` : ''}`}
+                          className={`rounded px-1.5 py-0.5 text-[11px] ${
+                            unavailable
+                              ? 'bg-[var(--bg-secondary)] text-[var(--text-secondary)]'
+                              : tool.requires_approval
+                                ? 'bg-amber-500/10 text-amber-700 dark:text-amber-300'
+                                : tool.may_require_approval
+                                  ? 'bg-rose-500/10 text-rose-700 dark:text-rose-300'
+                                  : tool.trusted
+                                    ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+                                    : 'bg-[var(--bg-secondary)] text-[var(--text-secondary)]'
+                          }`}
+                        >
+                          <code>{tool.name}</code>
+                          {statusLabel && (
+                            <span className="ml-1 font-sans">{statusLabel}</span>
+                          )}
+                        </span>
+                      );
+                    })}
                     {hidden > 0 && (
                       <span className="rounded bg-[var(--bg-secondary)] px-1.5 py-0.5 text-[11px] text-[var(--text-secondary)]">
                         +{hidden}

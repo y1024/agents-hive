@@ -83,7 +83,7 @@ func loadLLMConfigFromDB(t *testing.T, logger *zap.Logger) (apiKey, baseURL, mod
 				}
 			}
 			if model == "" {
-				model = "gpt-4o-mini" // fallback
+				model = "gpt-5-mini" // fallback
 			}
 			return
 		}

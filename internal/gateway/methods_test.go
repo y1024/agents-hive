@@ -9,6 +9,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -64,17 +65,65 @@ func doRPC(t *testing.T, gw *Gateway, method string, params interface{}, token s
 
 type configChannelStore struct {
 	store.Store
-	records map[string]*store.ChannelConfigRecord
+	records   map[string]*store.ChannelConfigRecord
+	configs   map[string]string
+	mcp       map[string]*store.MCPServerRecord
+	resources map[string]*store.ExternalResourceRecord
 }
 
 func newConfigChannelStore() *configChannelStore {
-	return &configChannelStore{records: make(map[string]*store.ChannelConfigRecord)}
+	return &configChannelStore{
+		records:   make(map[string]*store.ChannelConfigRecord),
+		configs:   make(map[string]string),
+		mcp:       make(map[string]*store.MCPServerRecord),
+		resources: make(map[string]*store.ExternalResourceRecord),
+	}
 }
 
 func (s *configChannelStore) SaveChannelConfig(_ context.Context, rec *store.ChannelConfigRecord) error {
 	cp := *rec
 	s.records[rec.Platform] = &cp
 	return nil
+}
+
+func (s *configChannelStore) SetConfig(_ context.Context, key, value string) error {
+	s.configs[key] = value
+	return nil
+}
+
+func (s *configChannelStore) SaveMCPServer(_ context.Context, rec *store.MCPServerRecord) error {
+	cp := *rec
+	s.mcp[rec.Name] = &cp
+	return nil
+}
+
+func (s *configChannelStore) DeleteMCPServer(_ context.Context, name string) error {
+	delete(s.mcp, name)
+	return nil
+}
+
+func (s *configChannelStore) SaveExternalResource(_ context.Context, rec *store.ExternalResourceRecord) error {
+	cp := *rec
+	s.resources[rec.Name] = &cp
+	return nil
+}
+
+func (s *configChannelStore) GetExternalResource(_ context.Context, name string) (*store.ExternalResourceRecord, error) {
+	rec, ok := s.resources[name]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	cp := *rec
+	return &cp, nil
+}
+
+func (s *configChannelStore) ListExternalResources(_ context.Context) ([]*store.ExternalResourceRecord, error) {
+	out := make([]*store.ExternalResourceRecord, 0, len(s.resources))
+	for _, rec := range s.resources {
+		cp := *rec
+		out = append(out, &cp)
+	}
+	return out, nil
 }
 
 // ─────────────────────────────────────────────
@@ -228,6 +277,52 @@ func TestConfigSave_RequiresAdminScope(t *testing.T) {
 	assert.Equal(t, 401, resp.Error.Code)
 }
 
+func TestConfigGet_RequiresAdminAndRedactsSecrets(t *testing.T) {
+	cfg := config.Default()
+	cfg.LLM.APIKey = "sk-root-secret"
+	cfg.Gateway.Tokens = []string{"gateway-token"}
+	cfg.HITL.WebSocketToken = "hitl-token"
+	cfg.Channel.Feishu = config.FeishuConfig{
+		Enabled:           true,
+		AppID:             "cli_xxx",
+		AppSecret:         "feishu-secret",
+		VerificationToken: "verify-token",
+		EncryptKey:        "encrypt-key",
+	}
+	cfg.MCP.Servers = map[string]config.MCPServerConfig{
+		"metamcp": {
+			Transport: "http",
+			URL:       "https://mcp.example.com/mcp",
+			Headers: map[string]string{
+				"X-API-Key":     "mcp-api-key",
+				"Authorization": "Bearer mcp-token",
+				"Accept":        "application/json",
+			},
+			Env: map[string]string{
+				"METAMCP_API_KEY": "env-api-key",
+			},
+		},
+	}
+	var mu sync.RWMutex
+
+	gw, token := newTestGateway(t)
+	registerConfigMethods(gw, Deps{Config: cfg, ConfigMu: &mu})
+
+	unauthorized := doRPC(t, gw, "config.get", map[string]interface{}{}, "")
+	require.NotNil(t, unauthorized.Error)
+	assert.Equal(t, 401, unauthorized.Error.Code)
+
+	resp := doRPC(t, gw, "config.get", map[string]interface{}{}, token)
+	require.Nil(t, resp.Error, "config.get should succeed: %v", resp.Error)
+	body := string(resp.Result)
+	for _, leaked := range []string{"sk-root-secret", "gateway-token", "hitl-token", "feishu-secret", "verify-token", "encrypt-key", "mcp-api-key", "mcp-token", "env-api-key"} {
+		assert.NotContains(t, body, leaked)
+	}
+	assert.Contains(t, body, "application/json")
+	assert.Contains(t, body, maskedSecretValue)
+	assert.Equal(t, []string{"gateway-token"}, cfg.Gateway.Tokens, "config.get 脱敏不能污染内存中的真实配置")
+}
+
 // TestConfigReload_EmptyPath 验证 config.reload 在路径为空时返回错误
 func TestConfigReload_EmptyPath(t *testing.T) {
 	cfg := &config.Config{}
@@ -311,6 +406,465 @@ func TestConfigUpdatePersistsWechatbotChannel(t *testing.T) {
 	require.NotNil(t, rec)
 	assert.True(t, rec.Enabled)
 	assert.JSONEq(t, `{"enabled":true}`, rec.ConfigJSON)
+}
+
+func TestConfigUpdatePreservesMaskedChannelSecrets(t *testing.T) {
+	cfg := config.Default()
+	cfg.Channel.Feishu = config.FeishuConfig{
+		Enabled:           true,
+		AppID:             "cli_old",
+		AppSecret:         "real-app-secret",
+		VerificationToken: "real-verify-token",
+		EncryptKey:        "real-encrypt-key",
+	}
+	var mu sync.RWMutex
+	db := newConfigChannelStore()
+
+	gw, token := newTestGateway(t)
+	registerConfigMethods(gw, Deps{Config: cfg, ConfigMu: &mu, Store: db})
+
+	resp := doRPC(t, gw, "config.update", map[string]interface{}{
+		"channel": map[string]interface{}{
+			"feishu": map[string]interface{}{
+				"enabled":            true,
+				"app_id":             "cli_new",
+				"app_secret":         maskedSecretValue,
+				"verification_token": maskedSecretValue,
+				"encrypt_key":        maskedSecretValue,
+			},
+		},
+	}, token)
+	require.Nil(t, resp.Error, "config.update should preserve masked secrets: %v", resp.Error)
+	assert.Equal(t, "cli_new", cfg.Channel.Feishu.AppID)
+	assert.Equal(t, "real-app-secret", cfg.Channel.Feishu.AppSecret)
+	assert.Equal(t, "real-verify-token", cfg.Channel.Feishu.VerificationToken)
+	assert.Equal(t, "real-encrypt-key", cfg.Channel.Feishu.EncryptKey)
+	require.NotNil(t, db.records["feishu"])
+	assert.Contains(t, db.records["feishu"].ConfigJSON, `"app_secret":"real-app-secret"`)
+	assert.Contains(t, db.records["feishu"].ConfigJSON, `"verification_token":"real-verify-token"`)
+	assert.Contains(t, db.records["feishu"].ConfigJSON, `"encrypt_key":"real-encrypt-key"`)
+	assert.NotContains(t, db.records["feishu"].ConfigJSON, maskedSecretValue)
+}
+
+func TestConfigUpdatePreservesInlineRedactedFeishuWebhookURL(t *testing.T) {
+	cfg := config.Default()
+	cfg.Channel.Feishu = config.FeishuConfig{
+		Enabled:    true,
+		WebhookURL: "https://callback.example.com/feishu?token=real-token",
+	}
+	var mu sync.RWMutex
+	db := newConfigChannelStore()
+
+	gw, token := newTestGateway(t)
+	registerConfigMethods(gw, Deps{Config: cfg, ConfigMu: &mu, Store: db})
+
+	resp := doRPC(t, gw, "config.update", map[string]interface{}{
+		"channel": map[string]interface{}{
+			"feishu": map[string]interface{}{
+				"enabled":     true,
+				"webhook_url": "https://callback.example.com/feishu?token=[REDACTED]",
+			},
+		},
+	}, token)
+	require.Nil(t, resp.Error, "config.update should preserve inline-redacted URL values: %v", resp.Error)
+	assert.Equal(t, "https://callback.example.com/feishu?token=real-token", cfg.Channel.Feishu.WebhookURL)
+	require.NotNil(t, db.records["feishu"])
+	assert.Contains(t, db.records["feishu"].ConfigJSON, `"webhook_url":"https://callback.example.com/feishu?token=real-token"`)
+	assert.NotContains(t, db.records["feishu"].ConfigJSON, maskedSecretValue)
+}
+
+func TestConfigUpdatePreservesWechatbotOmittedFields(t *testing.T) {
+	cfg := config.Default()
+	cfg.Channel.WeChatBot = config.WeChatBotConfig{
+		Enabled:  true,
+		BaseURL:  "http://wechatbot.internal",
+		CredRoot: "/var/lib/wechatbot",
+		LogLevel: "debug",
+	}
+	var mu sync.RWMutex
+	db := newConfigChannelStore()
+
+	gw, token := newTestGateway(t)
+	registerConfigMethods(gw, Deps{Config: cfg, ConfigMu: &mu, Store: db})
+
+	resp := doRPC(t, gw, "config.update", map[string]interface{}{
+		"channel": map[string]interface{}{
+			"wechatbot": map[string]interface{}{
+				"enabled": false,
+			},
+		},
+	}, token)
+	require.Nil(t, resp.Error, "config.update should preserve omitted wechatbot fields: %v", resp.Error)
+	assert.False(t, cfg.Channel.WeChatBot.Enabled)
+	assert.Equal(t, "http://wechatbot.internal", cfg.Channel.WeChatBot.BaseURL)
+	assert.Equal(t, "/var/lib/wechatbot", cfg.Channel.WeChatBot.CredRoot)
+	assert.Equal(t, "debug", cfg.Channel.WeChatBot.LogLevel)
+	require.NotNil(t, db.records["wechatbot"])
+	assert.Contains(t, db.records["wechatbot"].ConfigJSON, `"base_url":"http://wechatbot.internal"`)
+}
+
+func TestConfigUpdatePreservesMaskedMCPSecrets(t *testing.T) {
+	cfg := config.Default()
+	cfg.MCP.Servers = map[string]config.MCPServerConfig{
+		"metamcp": {
+			Transport: "http",
+			URL:       "https://old.example.com/mcp",
+			Headers: map[string]string{
+				"X-API-Key": "real-header-key",
+				"Accept":    "application/json",
+			},
+			Env: map[string]string{
+				"METAMCP_API_KEY": "real-env-key",
+			},
+		},
+	}
+	var mu sync.RWMutex
+	db := newConfigChannelStore()
+
+	gw, token := newTestGateway(t)
+	registerConfigMethods(gw, Deps{Config: cfg, ConfigMu: &mu, Store: db})
+
+	resp := doRPC(t, gw, "config.update", map[string]interface{}{
+		"mcp": map[string]interface{}{
+			"servers": map[string]interface{}{
+				"metamcp": map[string]interface{}{
+					"transport": "http",
+					"url":       "https://new.example.com/mcp",
+					"headers": map[string]string{
+						"X-API-Key": maskedSecretValue,
+						"Accept":    "text/event-stream",
+					},
+					"env": map[string]string{
+						"METAMCP_API_KEY": maskedSecretValue,
+					},
+				},
+			},
+		},
+	}, token)
+	require.Nil(t, resp.Error, "config.update should preserve masked MCP secrets: %v", resp.Error)
+	got := cfg.MCP.Servers["metamcp"]
+	assert.Equal(t, "https://new.example.com/mcp", got.URL)
+	assert.Equal(t, "real-header-key", got.Headers["X-API-Key"])
+	assert.Equal(t, "text/event-stream", got.Headers["Accept"])
+	assert.Equal(t, "real-env-key", got.Env["METAMCP_API_KEY"])
+	require.NotNil(t, db.mcp["metamcp"])
+	assert.JSONEq(t, `{"X-API-Key":"real-header-key","Accept":"text/event-stream"}`, db.mcp["metamcp"].Headers)
+	assert.JSONEq(t, `{"METAMCP_API_KEY":"real-env-key"}`, db.mcp["metamcp"].Env)
+}
+
+func TestConfigUpdatePreservesInlineRedactedMCPURL(t *testing.T) {
+	cfg := config.Default()
+	cfg.MCP.Servers = map[string]config.MCPServerConfig{
+		"metamcp": {
+			Transport: "http",
+			URL:       "https://metamcp.example.com/mcp?api_key=real-key",
+		},
+	}
+	var mu sync.RWMutex
+	db := newConfigChannelStore()
+
+	gw, token := newTestGateway(t)
+	registerConfigMethods(gw, Deps{Config: cfg, ConfigMu: &mu, Store: db})
+
+	resp := doRPC(t, gw, "config.update", map[string]interface{}{
+		"mcp": map[string]interface{}{
+			"servers": map[string]interface{}{
+				"metamcp": map[string]interface{}{
+					"transport": "http",
+					"url":       "https://metamcp.example.com/mcp?api_key=[REDACTED]",
+				},
+			},
+		},
+	}, token)
+	require.Nil(t, resp.Error, "config.update should preserve inline-redacted MCP URL: %v", resp.Error)
+	got := cfg.MCP.Servers["metamcp"]
+	assert.Equal(t, "https://metamcp.example.com/mcp?api_key=real-key", got.URL)
+	require.NotNil(t, db.mcp["metamcp"])
+	assert.Equal(t, "https://metamcp.example.com/mcp?api_key=real-key", db.mcp["metamcp"].URL)
+}
+
+func TestConfigUpdatePreservesOmittedMCPEnvAndHeaders(t *testing.T) {
+	cfg := config.Default()
+	cfg.MCP.Servers = map[string]config.MCPServerConfig{
+		"metamcp": {
+			Transport: "http",
+			URL:       "https://old.example.com/mcp",
+			Headers: map[string]string{
+				"X-API-Key": "real-header-key",
+				"Accept":    "application/json",
+			},
+			Env: map[string]string{
+				"METAMCP_API_KEY": "real-env-key",
+			},
+		},
+	}
+	var mu sync.RWMutex
+	db := newConfigChannelStore()
+
+	gw, token := newTestGateway(t)
+	registerConfigMethods(gw, Deps{Config: cfg, ConfigMu: &mu, Store: db})
+
+	resp := doRPC(t, gw, "config.update", map[string]interface{}{
+		"mcp": map[string]interface{}{
+			"servers": map[string]interface{}{
+				"metamcp": map[string]interface{}{
+					"transport": "http",
+					"url":       "https://new.example.com/mcp",
+				},
+			},
+		},
+	}, token)
+	require.Nil(t, resp.Error, "config.update should preserve omitted MCP env/headers: %v", resp.Error)
+	got := cfg.MCP.Servers["metamcp"]
+	assert.Equal(t, "https://new.example.com/mcp", got.URL)
+	assert.Equal(t, "real-header-key", got.Headers["X-API-Key"])
+	assert.Equal(t, "application/json", got.Headers["Accept"])
+	assert.Equal(t, "real-env-key", got.Env["METAMCP_API_KEY"])
+	require.NotNil(t, db.mcp["metamcp"])
+	assert.JSONEq(t, `{"X-API-Key":"real-header-key","Accept":"application/json"}`, db.mcp["metamcp"].Headers)
+	assert.JSONEq(t, `{"METAMCP_API_KEY":"real-env-key"}`, db.mcp["metamcp"].Env)
+}
+
+func TestConfigUpdatePreservesOmittedMCPScalarFieldsAndPersistsTimeout(t *testing.T) {
+	cfg := config.Default()
+	cfg.MCP.Servers = map[string]config.MCPServerConfig{
+		"metamcp": {
+			Transport: "http",
+			URL:       "https://old.example.com/mcp",
+			Timeout:   "45s",
+		},
+	}
+	var mu sync.RWMutex
+	db := newConfigChannelStore()
+
+	gw, token := newTestGateway(t)
+	registerConfigMethods(gw, Deps{Config: cfg, ConfigMu: &mu, Store: db})
+
+	resp := doRPC(t, gw, "config.update", map[string]interface{}{
+		"mcp": map[string]interface{}{
+			"timeout": "60s",
+			"servers": map[string]interface{}{
+				"metamcp": map[string]interface{}{
+					"headers": map[string]string{"Accept": "application/json"},
+				},
+			},
+		},
+	}, token)
+	require.Nil(t, resp.Error, "config.update should preserve omitted MCP scalar fields: %v", resp.Error)
+	got := cfg.MCP.Servers["metamcp"]
+	assert.Equal(t, "http", got.Transport)
+	assert.Equal(t, "https://old.example.com/mcp", got.URL)
+	assert.Equal(t, "45s", got.Timeout)
+	assert.Equal(t, 60*time.Second, cfg.MCP.Timeout)
+	assert.Equal(t, "60s", db.configs["mcp.timeout"])
+	require.NotNil(t, db.mcp["metamcp"])
+	assert.Equal(t, "https://old.example.com/mcp", db.mcp["metamcp"].URL)
+}
+
+func TestConfigUpdatePersistsPermissionMode(t *testing.T) {
+	cfg := config.Default()
+	var mu sync.RWMutex
+	db := newConfigChannelStore()
+
+	gw, token := newTestGateway(t)
+	registerConfigMethods(gw, Deps{
+		Config:   cfg,
+		ConfigMu: &mu,
+		Store:    db,
+	})
+
+	resp := doRPC(t, gw, "config.update", map[string]interface{}{
+		"security": map[string]interface{}{
+			"permission_mode": "strict",
+		},
+	}, token)
+	assert.Nil(t, resp.Error, "config.update should save permission_mode: %v", resp.Error)
+	assert.Equal(t, "strict", cfg.Security.PermissionMode)
+	assert.Equal(t, "strict", db.configs["security.permission_mode"])
+}
+
+func TestConfigUpdateRejectsInvalidPermissionMode(t *testing.T) {
+	cfg := config.Default()
+	var mu sync.RWMutex
+
+	gw, token := newTestGateway(t)
+	registerConfigMethods(gw, Deps{
+		Config:   cfg,
+		ConfigMu: &mu,
+	})
+
+	resp := doRPC(t, gw, "config.update", map[string]interface{}{
+		"security": map[string]interface{}{
+			"permission_mode": "legacy",
+		},
+	}, token)
+	require.NotNil(t, resp.Error)
+	assert.Equal(t, 400, resp.Error.Code)
+}
+
+func TestExternalResourcesRequireAdminAndRedactCredentials(t *testing.T) {
+	db := newConfigChannelStore()
+	db.resources["prod-db"] = &store.ExternalResourceRecord{
+		Name:        "prod-db",
+		Type:        "database",
+		Environment: "production",
+		Description: "readonly prod db",
+		Connection:  "psql",
+		Credentials: `{"password":"raw-db-password"}`,
+		ReadOnly:    true,
+		Enabled:     true,
+	}
+	gw, token := newTestGateway(t)
+	registerResourceMethods(gw, Deps{Store: db})
+
+	unauthorized := doRPC(t, gw, "resources.list", map[string]interface{}{}, "")
+	require.NotNil(t, unauthorized.Error)
+	assert.Equal(t, 401, unauthorized.Error.Code)
+
+	resp := doRPC(t, gw, "resources.list", map[string]interface{}{}, token)
+	require.Nil(t, resp.Error, "resources.list should succeed: %v", resp.Error)
+	body := string(resp.Result)
+	assert.NotContains(t, body, "raw-db-password")
+	assert.Contains(t, body, maskedSecretValue)
+
+	getResp := doRPC(t, gw, "resources.get", map[string]string{"name": "prod-db"}, token)
+	require.Nil(t, getResp.Error, "resources.get should succeed: %v", getResp.Error)
+	assert.NotContains(t, string(getResp.Result), "raw-db-password")
+	assert.Contains(t, string(getResp.Result), maskedSecretValue)
+}
+
+func TestExternalResourceSavePreservesMaskedCredentials(t *testing.T) {
+	db := newConfigChannelStore()
+	db.resources["prod-db"] = &store.ExternalResourceRecord{
+		Name:        "prod-db",
+		Type:        "database",
+		Environment: "production",
+		Description: "old",
+		Connection:  "psql-old",
+		Credentials: `{"password":"raw-db-password"}`,
+		ReadOnly:    true,
+		Enabled:     true,
+	}
+	gw, token := newTestGateway(t)
+	registerResourceMethods(gw, Deps{Store: db})
+
+	resp := doRPC(t, gw, "resources.save", map[string]interface{}{
+		"name":        "prod-db",
+		"type":        "database",
+		"environment": "production",
+		"description": "new",
+		"connection":  "psql-new",
+		"credentials": maskedSecretValue,
+		"read_only":   true,
+		"enabled":     true,
+	}, token)
+	require.Nil(t, resp.Error, "resources.save should preserve masked credentials: %v", resp.Error)
+	require.NotNil(t, db.resources["prod-db"])
+	assert.Equal(t, `{"password":"raw-db-password"}`, db.resources["prod-db"].Credentials)
+	assert.Equal(t, "new", db.resources["prod-db"].Description)
+	assert.Equal(t, "psql-new", db.resources["prod-db"].Connection)
+}
+
+func TestExternalResourceSavePreservesNestedMaskedCredentials(t *testing.T) {
+	db := newConfigChannelStore()
+	db.resources["prod-db"] = &store.ExternalResourceRecord{
+		Name:        "prod-db",
+		Type:        "database",
+		Environment: "production",
+		Credentials: `{"username":"reader","password":"raw-db-password","nested":{"token":"raw-token"}}`,
+		ReadOnly:    true,
+		Enabled:     true,
+	}
+	gw, token := newTestGateway(t)
+	registerResourceMethods(gw, Deps{Store: db})
+
+	resp := doRPC(t, gw, "resources.save", map[string]interface{}{
+		"name":        "prod-db",
+		"type":        "database",
+		"environment": "production",
+		"credentials": `{"username":"reader2","password":"[REDACTED]","nested":{"token":"[REDACTED]"}}`,
+		"read_only":   true,
+		"enabled":     true,
+	}, token)
+	require.Nil(t, resp.Error, "resources.save should preserve nested masked credentials: %v", resp.Error)
+	require.NotNil(t, db.resources["prod-db"])
+	assert.JSONEq(t, `{"username":"reader2","password":"raw-db-password","nested":{"token":"raw-token"}}`, db.resources["prod-db"].Credentials)
+	assert.NotContains(t, db.resources["prod-db"].Credentials, maskedSecretValue)
+}
+
+func TestExternalResourceSaveRejectsMaskedCredentialsOnCreate(t *testing.T) {
+	db := newConfigChannelStore()
+	gw, token := newTestGateway(t)
+	registerResourceMethods(gw, Deps{Store: db})
+
+	resp := doRPC(t, gw, "resources.save", map[string]interface{}{
+		"name":        "prod-db",
+		"type":        "database",
+		"environment": "production",
+		"credentials": `{"password":"[REDACTED]"}`,
+		"read_only":   true,
+		"enabled":     true,
+	}, token)
+	require.NotNil(t, resp.Error)
+	assert.Equal(t, 400, resp.Error.Code)
+	assert.Nil(t, db.resources["prod-db"])
+}
+
+func TestExternalResourceSavePreservesMissingCredentialsOnUpdate(t *testing.T) {
+	db := newConfigChannelStore()
+	db.resources["prod-db"] = &store.ExternalResourceRecord{
+		Name:        "prod-db",
+		Type:        "database",
+		Environment: "production",
+		Description: "old",
+		Connection:  "psql-old",
+		Credentials: `{"password":"raw-db-password"}`,
+		ReadOnly:    true,
+		Enabled:     true,
+	}
+	gw, token := newTestGateway(t)
+	registerResourceMethods(gw, Deps{Store: db})
+
+	resp := doRPC(t, gw, "resources.save", map[string]interface{}{
+		"name":        "prod-db",
+		"type":        "database",
+		"environment": "production",
+		"description": "new",
+		"connection":  "psql-new",
+		"read_only":   true,
+		"enabled":     true,
+	}, token)
+	require.Nil(t, resp.Error, "resources.save should preserve omitted credentials on update: %v", resp.Error)
+	require.NotNil(t, db.resources["prod-db"])
+	assert.Equal(t, `{"password":"raw-db-password"}`, db.resources["prod-db"].Credentials)
+	assert.Equal(t, "new", db.resources["prod-db"].Description)
+	assert.Equal(t, "psql-new", db.resources["prod-db"].Connection)
+}
+
+func TestExternalResourceSaveAllowsExplicitCredentialsClear(t *testing.T) {
+	db := newConfigChannelStore()
+	db.resources["prod-db"] = &store.ExternalResourceRecord{
+		Name:        "prod-db",
+		Type:        "database",
+		Environment: "production",
+		Credentials: `{"password":"raw-db-password"}`,
+		ReadOnly:    true,
+		Enabled:     true,
+	}
+	gw, token := newTestGateway(t)
+	registerResourceMethods(gw, Deps{Store: db})
+
+	resp := doRPC(t, gw, "resources.save", map[string]interface{}{
+		"name":        "prod-db",
+		"type":        "database",
+		"environment": "production",
+		"credentials": "",
+		"read_only":   true,
+		"enabled":     true,
+	}, token)
+	require.Nil(t, resp.Error, "resources.save should allow explicit credentials clear: %v", resp.Error)
+	require.NotNil(t, db.resources["prod-db"])
+	assert.Empty(t, db.resources["prod-db"].Credentials)
 }
 
 func TestChannelReloadIncludesWechatbotByDefault(t *testing.T) {
@@ -801,6 +1355,7 @@ func TestMCPTools_List_GroupsRemoteTools(t *testing.T) {
 	gw, token := newTestGateway(t)
 	host := mcphost.NewHost(zap.NewNop())
 	host.RegisterTool(mcphost.ToolDefinition{Name: "read_file", Core: true}, nil)
+	host.RegisterTool(mcphost.ToolDefinition{Name: "memory", Core: true}, nil)
 	host.RegisterTool(mcphost.ToolDefinition{
 		Name:              "metamcp__grafana__query_prometheus",
 		Description:       "[metamcp] query prometheus",
@@ -811,6 +1366,12 @@ func TestMCPTools_List_GroupsRemoteTools(t *testing.T) {
 	host.RegisterTool(mcphost.ToolDefinition{
 		Name:         "metamcp__dbhub__execute_sql",
 		Description:  "[metamcp] execute sql",
+		SourceServer: "metamcp",
+		Trusted:      true,
+	}, nil)
+	host.RegisterTool(mcphost.ToolDefinition{
+		Name:         "metamcp__delete_dashboard",
+		Description:  "[metamcp] delete dashboard",
 		SourceServer: "metamcp",
 		Trusted:      true,
 	}, nil)
@@ -830,20 +1391,44 @@ func TestMCPTools_List_GroupsRemoteTools(t *testing.T) {
 
 	var got mcpToolsListResponse
 	require.NoError(t, json.Unmarshal(resp.Result, &got))
-	assert.Equal(t, 3, got.Total)
-	assert.Equal(t, 2, got.MCPCount)
-	assert.Equal(t, 1, got.LocalCount)
+	assert.Equal(t, 5, got.Total)
+	assert.Equal(t, 3, got.MCPCount)
+	assert.Equal(t, 2, got.LocalCount)
 	require.Len(t, got.Servers, 1)
 	assert.Equal(t, "metamcp", got.Servers[0].Name)
-	assert.Equal(t, 2, got.Servers[0].Count)
+	assert.Equal(t, 3, got.Servers[0].Count)
 	assert.Equal(t, 1, got.Servers[0].Resources)
 	assert.Equal(t, 1, got.Servers[0].Prompts)
 	assert.Equal(t, "metamcp__dbhub__execute_sql", got.Servers[0].Tools[0].Name)
-	assert.Equal(t, "metamcp__grafana__query_prometheus", got.Servers[0].Tools[1].Name)
-	assert.True(t, got.Servers[0].Tools[1].Trusted)
-	assert.Equal(t, "read_only", got.Servers[0].Tools[1].Risk)
-	assert.True(t, got.Servers[0].Tools[1].ReadOnly)
+	assert.Equal(t, "metamcp__delete_dashboard", got.Servers[0].Tools[1].Name)
+	assert.Equal(t, "metamcp__grafana__query_prometheus", got.Servers[0].Tools[2].Name)
+	assert.True(t, got.Servers[0].Tools[2].Trusted)
+	assert.Equal(t, "read_only", got.Servers[0].Tools[2].Risk)
+	assert.True(t, got.Servers[0].Tools[2].ReadOnly)
+	assert.False(t, got.Servers[0].Tools[2].RequiresApproval)
+	assert.False(t, got.Servers[0].Tools[2].MayRequireApproval)
+	assert.True(t, got.Servers[0].Tools[2].CallableNow)
+	assert.Equal(t, "callable_read_only", got.Servers[0].Tools[2].RouteStatus)
+	assert.Empty(t, got.Servers[0].Tools[2].BlockReason)
+
+	assert.False(t, got.Servers[0].Tools[1].CallableNow)
+	assert.Equal(t, "blocked_dangerous", got.Servers[0].Tools[1].RouteStatus)
 	assert.False(t, got.Servers[0].Tools[1].RequiresApproval)
+	assert.True(t, got.Servers[0].Tools[1].MayRequireApproval)
+	assert.NotEmpty(t, got.Servers[0].Tools[1].BlockReason)
+
+	var memoryTool mcpToolSummary
+	for _, tool := range got.Tools {
+		if tool.Name == "memory" {
+			memoryTool = tool
+			break
+		}
+	}
+	require.Equal(t, "memory", memoryTool.Name)
+	assert.False(t, memoryTool.RequiresApproval)
+	assert.True(t, memoryTool.MayRequireApproval)
+	assert.True(t, memoryTool.CallableNow)
+	assert.Equal(t, "callable_with_action_constraints", memoryTool.RouteStatus)
 }
 
 // TestMCPResources_List_Empty 验证空 MCP Host 返回空资源列表

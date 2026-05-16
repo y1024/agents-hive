@@ -15,6 +15,14 @@ import (
 	"github.com/chef-guo/agents-hive/internal/store"
 )
 
+func authorizedSuggestionRunnerInfo() agentquality.RunnerInfo {
+	return agentquality.RunnerInfo{
+		Name:          "agent_run",
+		Version:       "test",
+		EvidenceLevel: agentquality.EvidenceRealRunner,
+	}
+}
+
 func TestAdminOptimizationGenerateSuggestionsFromCandidate(t *testing.T) {
 	store := newFakeQualityCandidateStore()
 	rec := agentquality.CandidateFromFailure("session-1", "定位权限", "session-1:step-1", agentquality.Event{
@@ -143,8 +151,11 @@ func TestAdminOptimizationEvalDiffApprovalAndRollbackAlertEndpoints(t *testing.T
 func TestAdminOptimizationApproveSuggestion(t *testing.T) {
 	srv := newQualityCandidateTestServer(newFakeQualityCandidateStore())
 	suggestion := agentquality.OptimizationReviewSuggestion{
-		ID:        "sug-1",
-		Status:    agentquality.SuggestionPending,
+		ID:     "sug-1",
+		Status: agentquality.SuggestionPending,
+		RunnerInfo: agentquality.RunnerInfo{
+			EvidenceLevel: agentquality.EvidenceRealRunner,
+		},
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 		ExpiresAt: time.Now().Add(time.Hour),
@@ -166,8 +177,189 @@ func TestAdminOptimizationApproveSuggestion(t *testing.T) {
 	require.Equal(t, agentquality.SuggestionApplyUnapplied, got.ApplyStatus)
 }
 
-func TestAdminOptimizationRejectSuggestion(t *testing.T) {
+func TestAdminOptimizationApproveSuggestionRejectsStaticEvalDiffEvidence(t *testing.T) {
 	srv := newQualityCandidateTestServer(newFakeQualityCandidateStore())
+	srv.optimizationStore = agentquality.NewInMemoryOptimizationSuggestionStore()
+	now := time.Now()
+	_, err := srv.optimizationStore.UpsertSuggestion(context.Background(), agentquality.OptimizationReviewSuggestion{
+		ID:               "sug-static",
+		Status:           agentquality.SuggestionPending,
+		SourceEvalDiffID: "diff-static",
+		RunnerInfo: agentquality.RunnerInfo{
+			Name:          "static",
+			Version:       "1.0",
+			EvidenceLevel: agentquality.EvidenceStaticSchema,
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+		ExpiresAt: now.Add(time.Hour),
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/optimization/suggestions/sug-static/approve", strings.NewReader(`{"note":"人工确认"}`))
+	req.SetPathValue("id", "sug-static")
+	out := httptest.NewRecorder()
+	srv.handleAdminOptimizationApproveSuggestion(out, req)
+
+	require.Equal(t, http.StatusPreconditionRequired, out.Code, out.Body.String())
+	require.Contains(t, out.Body.String(), "requires real_runner, production_shadow, or human_verified evidence")
+}
+
+func TestAdminOptimizationApproveSuggestionRejectsCandidateWithoutEvidence(t *testing.T) {
+	srv := newQualityCandidateTestServer(newFakeQualityCandidateStore())
+	srv.optimizationStore = agentquality.NewInMemoryOptimizationSuggestionStore()
+	now := time.Now()
+	_, err := srv.optimizationStore.UpsertSuggestion(context.Background(), agentquality.OptimizationReviewSuggestion{
+		ID:                "sug-candidate-empty-evidence",
+		Status:            agentquality.SuggestionPending,
+		SourceCandidateID: "candidate-1",
+		CreatedAt:         now,
+		UpdatedAt:         now,
+		ExpiresAt:         now.Add(time.Hour),
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/optimization/suggestions/sug-candidate-empty-evidence/approve", strings.NewReader(`{"note":"人工确认"}`))
+	req.SetPathValue("id", "sug-candidate-empty-evidence")
+	out := httptest.NewRecorder()
+	srv.handleAdminOptimizationApproveSuggestion(out, req)
+
+	require.Equal(t, http.StatusPreconditionRequired, out.Code, out.Body.String())
+	require.Contains(t, out.Body.String(), "requires real_runner, production_shadow, or human_verified evidence")
+	got, ok, err := srv.optimizationStore.GetSuggestion(context.Background(), "sug-candidate-empty-evidence")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, agentquality.SuggestionPending, got.Status)
+}
+
+func TestAdminOptimizationApproveSuggestionRejectsCandidateWithStaticEvidence(t *testing.T) {
+	srv := newQualityCandidateTestServer(newFakeQualityCandidateStore())
+	srv.optimizationStore = agentquality.NewInMemoryOptimizationSuggestionStore()
+	now := time.Now()
+	_, err := srv.optimizationStore.UpsertSuggestion(context.Background(), agentquality.OptimizationReviewSuggestion{
+		ID:                "sug-candidate-static-evidence",
+		Status:            agentquality.SuggestionPending,
+		SourceCandidateID: "candidate-1",
+		RunnerInfo: agentquality.RunnerInfo{
+			Name:          "static",
+			Version:       "1.0",
+			EvidenceLevel: agentquality.EvidenceStaticSchema,
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+		ExpiresAt: now.Add(time.Hour),
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/optimization/suggestions/sug-candidate-static-evidence/approve", strings.NewReader(`{"note":"人工确认"}`))
+	req.SetPathValue("id", "sug-candidate-static-evidence")
+	out := httptest.NewRecorder()
+	srv.handleAdminOptimizationApproveSuggestion(out, req)
+
+	require.Equal(t, http.StatusPreconditionRequired, out.Code, out.Body.String())
+	require.Contains(t, out.Body.String(), "requires real_runner, production_shadow, or human_verified evidence")
+	got, ok, err := srv.optimizationStore.GetSuggestion(context.Background(), "sug-candidate-static-evidence")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, agentquality.SuggestionPending, got.Status)
+}
+
+func TestAdminOptimizationCreateSuggestionApprovalRejectsMissingEvidence(t *testing.T) {
+	srv := newQualityCandidateTestServer(newFakeQualityCandidateStore())
+	srv.optimizationStore = agentquality.NewInMemoryOptimizationSuggestionStore()
+	srv.optimizationApprovalStore = agentquality.NewInMemoryApprovalStore()
+	now := time.Now()
+	_, err := srv.optimizationStore.UpsertSuggestion(context.Background(), agentquality.OptimizationReviewSuggestion{
+		ID:                "sug-approval-empty-evidence",
+		Status:            agentquality.SuggestionPending,
+		SourceCandidateID: "candidate-1",
+		CreatedAt:         now,
+		UpdatedAt:         now,
+		ExpiresAt:         now.Add(time.Hour),
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/optimization/approvals", strings.NewReader(`{
+		"subject_id":"sug-approval-empty-evidence",
+		"subject_type":"suggestion",
+		"action":"approve",
+		"reviewer_role":"lead",
+		"note":"人工确认"
+	}`))
+	out := httptest.NewRecorder()
+	srv.handleAdminOptimizationCreateApproval(out, req)
+
+	require.Equal(t, http.StatusPreconditionRequired, out.Code, out.Body.String())
+	require.Contains(t, out.Body.String(), "requires real_runner, production_shadow, or human_verified evidence")
+}
+
+func TestAdminOptimizationCreateSuggestionApprovalAllowsHumanVerified(t *testing.T) {
+	srv := newQualityCandidateTestServer(newFakeQualityCandidateStore())
+	srv.optimizationStore = agentquality.NewInMemoryOptimizationSuggestionStore()
+	srv.optimizationApprovalStore = agentquality.NewInMemoryApprovalStore()
+	now := time.Now()
+	_, err := srv.optimizationStore.UpsertSuggestion(context.Background(), agentquality.OptimizationReviewSuggestion{
+		ID:                "sug-approval-human-verified",
+		Status:            agentquality.SuggestionPending,
+		SourceCandidateID: "candidate-1",
+		RunnerInfo: agentquality.RunnerInfo{
+			Name:          "manual-review",
+			Version:       "1.0",
+			EvidenceLevel: agentquality.EvidenceHumanVerified,
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+		ExpiresAt: now.Add(time.Hour),
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/optimization/approvals", strings.NewReader(`{
+		"subject_id":"sug-approval-human-verified",
+		"subject_type":"suggestion",
+		"action":"approve",
+		"reviewer_role":"lead",
+		"note":"人工确认"
+	}`))
+	out := httptest.NewRecorder()
+	srv.handleAdminOptimizationCreateApproval(out, req)
+
+	require.Equal(t, http.StatusCreated, out.Code, out.Body.String())
+}
+
+func TestAdminOptimizationApproveSuggestionAllowsHumanVerifiedCandidateEvidence(t *testing.T) {
+	srv := newQualityCandidateTestServer(newFakeQualityCandidateStore())
+	srv.optimizationStore = agentquality.NewInMemoryOptimizationSuggestionStore()
+	now := time.Now()
+	_, err := srv.optimizationStore.UpsertSuggestion(context.Background(), agentquality.OptimizationReviewSuggestion{
+		ID:                "sug-candidate-human-verified",
+		Status:            agentquality.SuggestionPending,
+		SourceCandidateID: "candidate-1",
+		RunnerInfo: agentquality.RunnerInfo{
+			Name:          "manual-review",
+			Version:       "1.0",
+			EvidenceLevel: agentquality.EvidenceHumanVerified,
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+		ExpiresAt: now.Add(time.Hour),
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/optimization/suggestions/sug-candidate-human-verified/approve", strings.NewReader(`{"note":"人工确认"}`))
+	req.SetPathValue("id", "sug-candidate-human-verified")
+	out := httptest.NewRecorder()
+	srv.handleAdminOptimizationApproveSuggestion(out, req)
+
+	require.Equal(t, http.StatusOK, out.Code, out.Body.String())
+	var got agentquality.OptimizationReviewSuggestion
+	require.NoError(t, json.NewDecoder(out.Body).Decode(&got))
+	require.Equal(t, agentquality.SuggestionApproved, got.Status)
+	require.Equal(t, agentquality.EvidenceHumanVerified, got.RunnerInfo.EvidenceLevel)
+}
+
+func TestAdminOptimizationRejectSuggestion(t *testing.T) {
+	candidateStore := newFakeQualityCandidateStore()
+	srv := newQualityCandidateTestServer(candidateStore)
 	srv.optimizationStore = agentquality.NewInMemoryOptimizationSuggestionStore()
 	_, err := srv.optimizationStore.UpsertSuggestion(context.Background(), agentquality.OptimizationReviewSuggestion{
 		ID:        "sug-2",
@@ -184,10 +376,43 @@ func TestAdminOptimizationRejectSuggestion(t *testing.T) {
 	srv.handleAdminOptimizationRejectSuggestion(out, req)
 
 	require.Equal(t, http.StatusOK, out.Code, out.Body.String())
-	var got agentquality.OptimizationReviewSuggestion
+	var got struct {
+		Suggestion agentquality.OptimizationReviewSuggestion `json:"suggestion"`
+		Candidate  agentquality.CandidateRecord              `json:"candidate"`
+	}
 	require.NoError(t, json.NewDecoder(out.Body).Decode(&got))
-	require.Equal(t, agentquality.SuggestionRejected, got.Status)
-	require.Equal(t, "不适用", got.ApprovalNote)
+	require.Equal(t, agentquality.SuggestionRejected, got.Suggestion.Status)
+	require.Equal(t, "不适用", got.Suggestion.ApprovalNote)
+	require.NotEmpty(t, got.Candidate.ID)
+	require.Contains(t, got.Candidate.Input, "Approval rejection")
+	require.Len(t, candidateStore.records, 1)
+}
+
+func TestAdminOptimizationRejectedApprovalCreatesRegressionCandidate(t *testing.T) {
+	candidateStore := newFakeQualityCandidateStore()
+	srv := newQualityCandidateTestServer(candidateStore)
+	srv.optimizationApprovalStore = agentquality.NewInMemoryApprovalStore()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/optimization/approvals", strings.NewReader(`{
+		"subject_id":"diff-1",
+		"subject_type":"eval_diff",
+		"action":"reject",
+		"reviewer_role":"lead",
+		"note":"语义回归"
+	}`))
+	out := httptest.NewRecorder()
+	srv.handleAdminOptimizationCreateApproval(out, req)
+
+	require.Equal(t, http.StatusCreated, out.Code, out.Body.String())
+	var got struct {
+		Approval  agentquality.ApprovalRecord  `json:"approval"`
+		Candidate agentquality.CandidateRecord `json:"candidate"`
+	}
+	require.NoError(t, json.NewDecoder(out.Body).Decode(&got))
+	require.Equal(t, agentquality.ApprovalActionReject, got.Approval.Action)
+	require.NotEmpty(t, got.Candidate.ID)
+	require.Equal(t, agentquality.FailurePermission, got.Candidate.FailureType)
+	require.Len(t, candidateStore.records, 1)
 }
 
 func TestAdminOptimizationApplySuggestion_RejectsNonApprovedSuggestions(t *testing.T) {
@@ -271,6 +496,7 @@ func TestAdminOptimizationApplySuggestion_ApprovedPromptUpsertsAndInvalidatesCac
 		Target:        agentquality.TargetPrompt,
 		ProposedValue: "new prompt content",
 		SourceEvent:   agentquality.Event{Prompt: agentquality.PromptRef{Key: "system/base", Language: "zh-CN"}},
+		RunnerInfo:    authorizedSuggestionRunnerInfo(),
 		CreatedAt:     now,
 		UpdatedAt:     now,
 		ExpiresAt:     now.Add(time.Hour),
@@ -293,7 +519,8 @@ func TestAdminOptimizationApplySuggestion_ApprovedPromptUpsertsAndInvalidatesCac
 }
 
 func TestAdminOptimizationRollbackSuggestion_RestoresPromptPreviousValue(t *testing.T) {
-	srv := newQualityCandidateTestServer(newFakeQualityCandidateStore())
+	candidateStore := newFakeQualityCandidateStore()
+	srv := newQualityCandidateTestServer(candidateStore)
 	srv.optimizationStore = agentquality.NewInMemoryOptimizationSuggestionStore()
 	srv.optimizationRolloutStore = agentquality.NewInMemoryOptimizationRolloutStore()
 	prompts := &fakePromptStore{records: map[string]string{"system/base|zh-CN": "old prompt content"}}
@@ -305,6 +532,7 @@ func TestAdminOptimizationRollbackSuggestion_RestoresPromptPreviousValue(t *test
 		Target:        agentquality.TargetPrompt,
 		ProposedValue: "new prompt content",
 		SourceEvent:   agentquality.Event{Prompt: agentquality.PromptRef{Key: "system/base", Language: "zh-CN"}},
+		RunnerInfo:    authorizedSuggestionRunnerInfo(),
 		CreatedAt:     now,
 		UpdatedAt:     now,
 		ExpiresAt:     now.Add(time.Hour),
@@ -326,9 +554,15 @@ func TestAdminOptimizationRollbackSuggestion_RestoresPromptPreviousValue(t *test
 	require.Len(t, prompts.upserts, 2)
 	require.Equal(t, "new prompt content", prompts.upserts[0].content)
 	require.Equal(t, "old prompt content", prompts.upserts[1].content)
-	var rollout agentquality.OptimizationRollout
-	require.NoError(t, json.NewDecoder(rollbackOut.Body).Decode(&rollout))
-	require.Equal(t, agentquality.RolloutRolledBack, rollout.Status)
+	var got struct {
+		Rollout   agentquality.OptimizationRollout `json:"rollout"`
+		Candidate agentquality.CandidateRecord     `json:"candidate"`
+	}
+	require.NoError(t, json.NewDecoder(rollbackOut.Body).Decode(&got))
+	require.Equal(t, agentquality.RolloutRolledBack, got.Rollout.Status)
+	require.NotEmpty(t, got.Candidate.ID)
+	require.Contains(t, got.Candidate.Input, "Rollback incident")
+	require.Len(t, candidateStore.records, 1)
 }
 
 func TestAdminOptimizationRollbackSuggestion_RestoresWritableTargets(t *testing.T) {
@@ -347,6 +581,7 @@ func TestAdminOptimizationRollbackSuggestion_RestoresWritableTargets(t *testing.
 			Target:        agentquality.TargetSkillContent,
 			CurrentValue:  "candidate-skill",
 			ProposedValue: "new skill body",
+			RunnerInfo:    authorizedSuggestionRunnerInfo(),
 			CreatedAt:     now,
 			UpdatedAt:     now,
 			ExpiresAt:     now.Add(time.Hour),
@@ -382,6 +617,7 @@ func TestAdminOptimizationRollbackSuggestion_RestoresWritableTargets(t *testing.
 			Target:        agentquality.TargetToolDescription,
 			CurrentValue:  "grep",
 			ProposedValue: "new grep description",
+			RunnerInfo:    authorizedSuggestionRunnerInfo(),
 			CreatedAt:     now,
 			UpdatedAt:     now,
 			ExpiresAt:     now.Add(time.Hour),
@@ -417,6 +653,7 @@ func TestAdminOptimizationRollbackSuggestion_RestoresWritableTargets(t *testing.
 			Target:        agentquality.TargetMemoryGovernance,
 			CurrentValue:  "default",
 			ProposedValue: `{"min_confidence":0.7,"max_memories":50}`,
+			RunnerInfo:    authorizedSuggestionRunnerInfo(),
 			CreatedAt:     now,
 			UpdatedAt:     now,
 			ExpiresAt:     now.Add(time.Hour),
@@ -448,6 +685,7 @@ func TestAdminOptimizationApplySuggestion_PromptWithoutKeyReturnsClearError(t *t
 		Status:        agentquality.SuggestionApproved,
 		Target:        agentquality.TargetPrompt,
 		ProposedValue: "new prompt content",
+		RunnerInfo:    authorizedSuggestionRunnerInfo(),
 		CreatedAt:     now,
 		UpdatedAt:     now,
 		ExpiresAt:     now.Add(time.Hour),
@@ -479,6 +717,7 @@ func TestAdminOptimizationApplySuggestion_ApprovedSkillUpserts(t *testing.T) {
 		Target:        agentquality.TargetSkillContent,
 		CurrentValue:  "candidate-skill",
 		ProposedValue: "---\nname: candidate-skill\ndescription: test\n---\n\nbody",
+		RunnerInfo:    authorizedSuggestionRunnerInfo(),
 		CreatedAt:     now,
 		UpdatedAt:     now,
 		ExpiresAt:     now.Add(time.Hour),
@@ -510,6 +749,7 @@ func TestAdminOptimizationApplySuggestion_ToolDescriptionPersistsOverride(t *tes
 		Target:        agentquality.TargetToolDescription,
 		CurrentValue:  "grep",
 		ProposedValue: "new tool description",
+		RunnerInfo:    authorizedSuggestionRunnerInfo(),
 		CreatedAt:     now,
 		UpdatedAt:     now,
 		ExpiresAt:     now.Add(time.Hour),
@@ -541,6 +781,7 @@ func TestAdminOptimizationApplySuggestion_MemoryGovernancePersistsPolicy(t *test
 		Target:        agentquality.TargetMemoryGovernance,
 		CurrentValue:  "default",
 		ProposedValue: `{"min_confidence":0.6,"max_memories":250}`,
+		RunnerInfo:    authorizedSuggestionRunnerInfo(),
 		CreatedAt:     now,
 		UpdatedAt:     now,
 		ExpiresAt:     now.Add(time.Hour),

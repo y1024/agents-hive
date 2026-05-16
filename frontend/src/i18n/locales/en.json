@@ -585,16 +585,16 @@
       },
       "runtimeSecurity": {
         "title": "Runtime and Security",
-        "desc": "Manage node info, permissions, command rules, MCP, external resources, and IM settings.",
+        "desc": "Manage node info, legacy HITL rollback rules, command rules, MCP, external resources, and IM settings.",
         "systemSettings": {
           "title": "1. Settings structure",
           "desc": "Admin Settings has System, Security, and Integrations tabs.",
-          "detail": "## System\n\nShows node ID, mode, health, version, uptime, and Agent timeout settings.\n\n## Security\n\nContains permission rules and command execution rules.\n\n## Integrations\n\nContains IM channels, MCP servers, external resources, and remote agents."
+          "detail": "## System\n\nShows node ID, mode, health, version, uptime, and Agent timeout settings.\n\n## Security\n\nContains legacy HITL rollback rules and command execution rules.\n\n## Integrations\n\nContains IM channels, MCP servers, external resources, and remote agents."
         },
         "permissionRules": {
-          "title": "2. Permission rules",
-          "desc": "Permission rules decide whether tool actions are allowed, asked, or denied.",
-          "detail": "## Rule meaning\n\nRules usually include tool name, action, pattern, and policy. Policies are allow, ask, and deny.\n\n## Recommendation\n\nBe permissive with read-only tools and conservative with writes, deletes, shell commands, and external sends.\n\n## Applying changes\n\nClick Apply to submit runtime config updates to the backend."
+          "title": "2. Legacy HITL rollback rules",
+          "desc": "These rules are only for the HITL execution channel and strict rollback, not the unified tool policy entry point.",
+          "detail": "## Rule meaning\n\nRules usually include tool name, action, and pattern. Policies are allow, ask, and deny.\n\n## Scope\n\nIn minimal mode, the unified ToolPolicy decides whether routine tools are callable; these rules cannot downgrade a unified allow into ask or deny. In strict mode, they act as production rollback and tightening rules.\n\n## Recommendation\n\nDo not trust MCP or unknown tools here. Capability grants, route recall, and dangerous-action decisions belong in the unified policy layer. Click Apply to submit runtime config updates to the backend."
         },
         "execRules": {
           "title": "3. Exec rules",
@@ -714,8 +714,8 @@
   },
   "runtimeConfig": {
     "title": "Runtime Config",
-    "permissionRules": "Tool Permission Rules",
-    "hitlEnabled": "Enable HITL",
+    "permissionRules": "Legacy HITL Rollback Rules",
+    "hitlEnabled": "Enable HITL Channel",
     "toolName": "Tool Name",
     "action": "Permission",
     "pattern": "Pattern",
@@ -733,9 +733,12 @@
     "taskTimeout": "Task Timeout",
     "shellTimeout": "Shell Timeout",
     "planApproval": "Plan Requires Approval",
-    "permissionRulesHint": "Rules are matched in order; the first match wins. Tool names support wildcard *",
+    "permissionRulesHint": "These rules only apply to the HITL execution channel and strict rollback. In minimal mode, unified ToolPolicy is the primary authorization source; legacy rules cannot downgrade routine allow decisions to ask/deny or trust MCP/unknown tools.",
     "execRules": "Command Execution Rules",
     "execRulesHint": "Define regex patterns to allow, ask, or deny command execution. Rules are evaluated in order; first match wins.",
+    "permissionMode": "Permission mode",
+    "permissionModeMinimal": "minimal: unified ToolPolicy primary",
+    "permissionModeStrict": "strict: legacy HITL rollback",
     "defaultPolicy": "Default policy (when no rule matches)",
     "description": "Description",
     "allow": "Allow",
@@ -760,6 +763,9 @@
     "mcpNoRuntimeTools": "No remote MCP tools are currently registered at runtime.",
     "mcpToolsLoadFailed": "Failed to load MCP tool catalog",
     "mcpServerRuntimeCounts": "{{tools}} tools / {{resources}} resources / {{prompts}} prompts",
+    "requiresApproval": "Requires approval",
+    "mayRequireApproval": "Contains high-risk actions",
+    "toolUnavailable": "Unavailable",
     "addMcpServer": "Add Server",
     "deleteMcpServer": "Delete",
     "mcpNeedRestart": "MCP changes require saving to file and restart",

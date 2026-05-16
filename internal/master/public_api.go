@@ -15,6 +15,7 @@ import (
 	"github.com/chef-guo/agents-hive/internal/mcphost"
 	"github.com/chef-guo/agents-hive/internal/store"
 	"github.com/chef-guo/agents-hive/internal/toolctx"
+	"github.com/chef-guo/agents-hive/internal/toolruntime"
 )
 
 // MessageOption ProcessMessage 的可选参数
@@ -131,9 +132,6 @@ func (m *Master) ProcessMessageWithOptions(ctx context.Context, sessionID string
 	for _, opt := range opts {
 		opt(&req)
 	}
-	if req.ReasoningEffort == "" {
-		req.ReasoningEffort = m.resolveRequestReasoningEffort(req.Input)
-	}
 
 	// 权限检查通过后、进入 SessionManager 之前广播 input_received：
 	// renderer 据此在 IM 侧做 ack 表情（飞书 GET/KEYBOARD 等），
@@ -231,6 +229,7 @@ func (m *Master) ForkSessionFromSnapshotMessages(ctx context.Context, source *st
 		CreatedAt:      now.Format(time.RFC3339),
 		UpdatedAt:      now.Format(time.RFC3339),
 		LastAccessedAt: now.Format(time.RFC3339),
+		SelectedModel:  source.SelectedModel,
 		MessageCount:   len(messages),
 		Tags:           append([]string{}, source.Tags...),
 		ParentID:       source.ID,
@@ -248,15 +247,16 @@ func (m *Master) ForkSessionFromSnapshotMessages(ctx context.Context, source *st
 	sessionMessages := make([]llm.MessageWithTools, len(messages))
 	copy(sessionMessages, messages)
 	session := &SessionState{
-		ID:           forkID,
-		Name:         forkName,
-		Messages:     sessionMessages,
-		Metadata:     map[string]any{},
-		Tags:         append([]string{}, source.Tags...),
-		UserID:       userID,
-		Created:      now,
-		LastAccessed: now,
-		Stats:        SessionStats{MessageCount: len(messages)},
+		ID:            forkID,
+		Name:          forkName,
+		Messages:      sessionMessages,
+		Metadata:      map[string]any{},
+		Tags:          append([]string{}, source.Tags...),
+		UserID:        userID,
+		SelectedModel: source.SelectedModel,
+		Created:       now,
+		LastAccessed:  now,
+		Stats:         SessionStats{MessageCount: len(messages)},
 	}
 	m.sessionMgr.SetSession(session)
 	m.sessionMgr.SetActiveSessionID(forkID)
@@ -323,6 +323,7 @@ func (m *Master) UpdateSession(ctx context.Context, record *store.SessionRecord)
 		session.Name = record.Name
 		session.Tags = record.Tags
 		session.UserID = record.UserID
+		session.SelectedModel = record.SelectedModel
 		if t, err := time.Parse(time.RFC3339, record.LastAccessedAt); err == nil {
 			session.LastAccessed = t
 		}
@@ -388,8 +389,11 @@ func (m *Master) AskQuestion(ctx context.Context, question string, options []str
 		taskID = "unknown"
 	}
 
-	// 创建输入请求
-	req := m.hitlBroker.RequestInput(taskID, "", InputClarification, question, options)
+	reqType := InputClarification
+	if len(options) > 0 {
+		reqType = InputChoice
+	}
+	req := m.hitlBroker.RequestInput(taskID, "", reqType, question, options)
 
 	// 如果提供了自定义超时，覆盖默认值
 	if timeout > 0 {
@@ -409,13 +413,13 @@ func (m *Master) AskQuestion(ctx context.Context, question string, options []str
 	return resp.Action, nil
 }
 
-// InvokeTool 直接调用 MCP 工具并返回结果文本（供预览 API 等内部使用，不经过权限审批）
-// 调用方应自行限制可调用的工具范围（白名单）
+// InvokeTool 直接调用工具并返回结果文本（供预览 API 等内部使用，不经过权限审批）。
+// 调用方必须先完成白名单或系统内部只读约束；普通会话执行必须走 guardToolExecution。
 func (m *Master) InvokeTool(ctx context.Context, toolName string, args json.RawMessage) (string, error) {
 	if m.mcpHost == nil {
 		return "", errors.New("MCP host not initialized")
 	}
-	result, err := m.mcpHost.ExecuteTool(ctx, toolName, args)
+	result, err := toolruntime.InvokeHostTool(ctx, m.mcpHost, toolName, args)
 	if err != nil {
 		return "", err
 	}

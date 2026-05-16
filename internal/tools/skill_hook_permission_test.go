@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/chef-guo/agents-hive/internal/errs"
+	"github.com/chef-guo/agents-hive/internal/toolruntime"
 )
 
 type recordingShellExecutor struct {
@@ -127,8 +128,11 @@ func TestApprovalGuardedShellExecutor_UnwrappedDenyWinsOverWrappedAllow(t *testi
 	if err == nil {
 		t.Fatal("unwrapped deny should fail")
 	}
-	if !errs.IsCode(err, errs.CodeExecDenied) {
-		t.Fatalf("error code = %v, want CodeExecDenied", err)
+	if !errs.IsCode(err, errs.CodePermissionDenied) {
+		t.Fatalf("error code = %v, want CodePermissionDenied", err)
+	}
+	if !strings.Contains(err.Error(), toolruntime.RecoverableToolCallErrorMarker) {
+		t.Fatalf("error should be recoverable when approval bridge is missing, got %q", err.Error())
 	}
 	if len(inner.calls) != 0 {
 		t.Fatalf("denied command should not execute, calls=%#v", inner.calls)
@@ -165,11 +169,31 @@ func TestApprovalGuardedShellExecutor_DenySkipsCommand(t *testing.T) {
 	if err == nil {
 		t.Fatal("deny policy should fail")
 	}
-	if !errs.IsCode(err, errs.CodeExecDenied) {
-		t.Fatalf("error code = %v, want CodeExecDenied", err)
+	if !errs.IsCode(err, errs.CodePermissionDenied) {
+		t.Fatalf("error code = %v, want CodePermissionDenied", err)
+	}
+	if !strings.Contains(err.Error(), toolruntime.RecoverableToolCallErrorMarker) {
+		t.Fatalf("error should be recoverable when approval bridge is missing, got %q", err.Error())
 	}
 	if len(inner.calls) != 0 {
 		t.Fatalf("denied command should not execute, calls=%#v", inner.calls)
+	}
+}
+
+func TestApprovalGuardedShellExecutor_DenyApprovedExecutesCommand(t *testing.T) {
+	inner := &recordingShellExecutor{}
+	bridge := &recordingApprovalBridge{approved: true}
+	withSkillShellPermissionGlobals(t, staticSafeExecChecker{policy: "deny"}, bridge)
+
+	exec := newApprovalGuardedShellExecutor(context.Background(), inner)
+	if _, _, err := exec.Execute("rm -rf /tmp/hook"); err != nil {
+		t.Fatalf("approved deny policy should execute command: %v", err)
+	}
+	if !bridge.called {
+		t.Fatal("deny policy should request approval")
+	}
+	if len(inner.calls) != 1 || inner.calls[0] != "rm -rf /tmp/hook" {
+		t.Fatalf("inner calls = %#v", inner.calls)
 	}
 }
 
@@ -184,6 +208,9 @@ func TestApprovalGuardedShellExecutor_AskWithoutBridgeFailsClosed(t *testing.T) 
 	}
 	if !errs.IsCode(err, errs.CodePermissionDenied) {
 		t.Fatalf("error code = %v, want CodePermissionDenied", err)
+	}
+	if !strings.Contains(err.Error(), toolruntime.RecoverableToolCallErrorMarker) {
+		t.Fatalf("error should be recoverable when approval bridge is missing, got %q", err.Error())
 	}
 	if len(inner.calls) != 0 {
 		t.Fatalf("command should not execute without approval bridge, calls=%#v", inner.calls)
@@ -202,6 +229,9 @@ func TestApprovalGuardedShellExecutor_ApprovalErrorSkipsCommand(t *testing.T) {
 	}
 	if !errs.IsCode(err, errs.CodeExecApprovalTimeout) {
 		t.Fatalf("error code = %v, want CodeExecApprovalTimeout", err)
+	}
+	if !strings.Contains(err.Error(), toolruntime.RecoverableToolCallErrorMarker) {
+		t.Fatalf("approval error should be recoverable, got %q", err.Error())
 	}
 	if len(inner.calls) != 0 {
 		t.Fatalf("command should not execute after approval error, calls=%#v", inner.calls)

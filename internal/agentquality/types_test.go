@@ -13,6 +13,16 @@ func TestQualityEvent_JSONStable(t *testing.T) {
 		Name:          EventAgentTurn,
 		CaseID:        "aq01",
 		SessionIDHash: "sha256:abc",
+		RunID:         "run-1",
+		TraceID:       "trace-1",
+		SpanID:        "span-1",
+		TurnID:        "turn-1",
+		DomainID:      "generic",
+		SourceKind:    "master",
+		SourceName:    "react_loop",
+		OwnerScope:    OwnerScopeUser,
+		OwnerID:       "user-1",
+		UserID:        "user-1",
 		Route:         "web",
 		Prompt: PromptRef{
 			Key:     "system/base",
@@ -29,6 +39,9 @@ func TestQualityEvent_JSONStable(t *testing.T) {
 	assert.Contains(t, string(b), `"name":"quality.agent_turn"`)
 	assert.Contains(t, string(b), `"failure_type":"tool"`)
 	assert.Contains(t, string(b), `"final_status":"fail"`)
+	assert.Contains(t, string(b), `"trace_id":"trace-1"`)
+	assert.Contains(t, string(b), `"owner_scope":"user"`)
+	assert.Contains(t, string(b), `"domain_id":"generic"`)
 }
 
 func TestToolRecall_JSONStable(t *testing.T) {
@@ -58,19 +71,33 @@ func TestToolRecall_JSONStable(t *testing.T) {
 
 func TestMetricLabels_AreLowCardinality(t *testing.T) {
 	labels := MetricLabels(Event{
-		Name:         EventToolDecision,
-		Route:        "im",
-		ToolDecision: ToolDecision{Actual: "grep", Decision: DecisionExpected},
-		FailureType:  FailureNone,
-		FinalStatus:  StatusPass,
+		Name:          EventToolDecision,
+		Route:         "im",
+		SessionIDHash: "sha256:abc",
+		RunID:         "run-1",
+		TraceID:       "trace-1",
+		SpanID:        "span-1",
+		TurnID:        "turn-1",
+		OwnerScope:    OwnerScopeUser,
+		OwnerID:       "user-1",
+		UserID:        "user-1",
+		ToolDecision:  ToolDecision{Actual: "grep", Decision: DecisionExpected},
+		FailureType:   FailureNone,
+		FinalStatus:   StatusPass,
 	})
 
 	assert.Equal(t, "im", labels["route"])
 	assert.Equal(t, "grep", labels["tool_name"])
 	assert.Equal(t, DecisionExpected, labels["decision"])
 	assert.NotContains(t, labels, "session_id")
+	assert.NotContains(t, labels, "session_id_hash")
+	assert.NotContains(t, labels, "run_id")
 	assert.NotContains(t, labels, "user_id")
+	assert.NotContains(t, labels, "owner_id")
+	assert.NotContains(t, labels, "owner_scope")
 	assert.NotContains(t, labels, "trace_id")
+	assert.NotContains(t, labels, "span_id")
+	assert.NotContains(t, labels, "turn_id")
 }
 
 func TestReflectionMetricLabelsPreserveStatus(t *testing.T) {

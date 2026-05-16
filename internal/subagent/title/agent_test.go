@@ -349,11 +349,11 @@ func getAPIKey(t *testing.T) string {
 	return apiKey
 }
 
-// getModel 从环境变量获取模型名称，默认使用 gpt-4o-mini
+// getModel 从环境变量获取模型名称，默认使用 gpt-5-mini
 func getModel(t *testing.T) string {
 	model := os.Getenv("OPENAI_MODEL")
 	if model == "" {
-		return "gpt-4o-mini" // 默认使用便宜的模型
+		return "gpt-5-mini" // 默认使用便宜的模型
 	}
 	return model
 }

@@ -16,7 +16,9 @@ type ReplayCandidateStore interface {
 type ReplayRunner struct {
 	Store          ReplayCandidateStore
 	EvalRunner     agentquality.EvalRunner
+	JudgeEvaluator agentquality.JudgeEvaluator
 	GateThresholds agentquality.GateThresholds
+	UserID         string
 }
 
 func (r ReplayRunner) Run(ctx context.Context, job ReplayJob) (ReplayJobResult, error) {
@@ -33,9 +35,9 @@ func (r ReplayRunner) Run(ctx context.Context, job ReplayJob) (ReplayJobResult, 
 	runner := r.EvalRunner
 	if runner == nil {
 		gateInput := agentquality.GateInput{Cases: cases}
-		result := replayResultFromGate(cases, gateInput.Results)
+		result := replayResultFromGate(cases, gateInput.Results, agentquality.RunnerInfo{})
 		thresholds := r.GateThresholds
-		if thresholds == (agentquality.GateThresholds{}) {
+		if isZeroGateThresholds(thresholds) {
 			thresholds = agentquality.DefaultGateThresholds()
 		}
 		metrics := agentquality.ComputeGateMetrics(gateInput)
@@ -45,17 +47,26 @@ func (r ReplayRunner) Run(ctx context.Context, job ReplayJob) (ReplayJobResult, 
 		}
 		return result, fmt.Errorf("eval runner not configured")
 	}
-	gateInput, err := runner.Run(cases)
+	gateInput, err := runEvalRunner(ctx, runner, cases)
 	if err != nil {
 		return ReplayJobResult{}, err
 	}
 	gateInput.Cases = cases
-	result := replayResultFromGate(cases, gateInput.Results)
+	judgeReasons := applyJudgeEvaluator(ctx, r.JudgeEvaluator, cases, &gateInput)
+	var runnerInfo agentquality.RunnerInfo
+	if dr, ok := runner.(agentquality.DescribedEvalRunner); ok {
+		runnerInfo = dr.Info()
+	}
+	result := replayResultFromGate(cases, gateInput.Results, runnerInfo)
+	result.Reasons = append(result.Reasons, judgeReasons...)
 	thresholds := r.GateThresholds
-	if thresholds == (agentquality.GateThresholds{}) {
+	if isZeroGateThresholds(thresholds) {
 		thresholds = agentquality.DefaultGateThresholds()
 	}
 	metrics := agentquality.ComputeGateMetrics(gateInput)
+	markJudgeMissing(&metrics, cases, gateInput.JudgeVerdicts, thresholds)
+	result.GateMetrics = metrics
+	result.JudgeVerdict = aggregateJudgeVerdict(gateInput.JudgeVerdicts, metrics)
 	if err := agentquality.EvaluateGate(metrics, thresholds); err != nil {
 		result.Reasons = append(result.Reasons, "gate failed: "+err.Error())
 		return result, err
@@ -86,7 +97,7 @@ func (r ReplayRunner) loadCases(ctx context.Context, job ReplayJob) ([]agentqual
 	case ReplayJobKindCluster:
 		out := make([]agentquality.LoadedCase, 0)
 		for _, clusterID := range job.TargetIDs {
-			candidates, _, err := r.Store.ListCandidates(ctx, agentquality.CandidateFilter{Limit: 100})
+			candidates, _, err := r.Store.ListCandidates(ctx, agentquality.CandidateFilter{UserID: r.UserID, Limit: 100})
 			if err != nil {
 				return nil, err
 			}
@@ -136,12 +147,12 @@ func loadedCaseFromCandidate(rec agentquality.CandidateRecord) (agentquality.Loa
 	return agentquality.LoadedCase{Path: "candidate:" + rec.ID, Case: c}, nil
 }
 
-func replayResultFromGate(cases []agentquality.LoadedCase, results []agentquality.Result) ReplayJobResult {
+func replayResultFromGate(cases []agentquality.LoadedCase, results []agentquality.Result, runnerInfo agentquality.RunnerInfo) ReplayJobResult {
 	byID := make(map[string]agentquality.Result, len(results))
 	for _, result := range results {
 		byID[result.CaseID] = result
 	}
-	out := ReplayJobResult{Total: len(cases)}
+	out := ReplayJobResult{Total: len(cases), RunnerInfo: runnerInfo}
 	for _, lc := range cases {
 		out.CaseIDs = append(out.CaseIDs, lc.Case.ID)
 		result, ok := byID[lc.Case.ID]

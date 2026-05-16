@@ -19,9 +19,10 @@ const (
 )
 
 type EvalRun struct {
-	ID        string           `json:"id"`
-	Results   []EvalCaseResult `json:"results"`
-	CreatedAt time.Time        `json:"created_at,omitempty"`
+	ID         string           `json:"id"`
+	RunnerInfo RunnerInfo       `json:"runner_info,omitempty"`
+	Results    []EvalCaseResult `json:"results"`
+	CreatedAt  time.Time        `json:"created_at,omitempty"`
 }
 
 type EvalCaseResult struct {
@@ -64,6 +65,8 @@ type EvalDiff struct {
 	Status                EvalDiffStatus `json:"status"`
 	BaselineRunID         string         `json:"baseline_run_id"`
 	TreatmentRunID        string         `json:"treatment_run_id"`
+	BaselineRunnerInfo    RunnerInfo     `json:"baseline_runner_info,omitempty"`
+	TreatmentRunnerInfo   RunnerInfo     `json:"treatment_runner_info,omitempty"`
 	Baseline              EvalRunSummary `json:"baseline"`
 	Treatment             EvalRunSummary `json:"treatment"`
 	SuccessRateDelta      float64        `json:"success_rate_delta"`
@@ -126,6 +129,8 @@ func ComputeEvalDiff(baseline, treatment EvalRun) (EvalDiff, error) {
 		Status:                EvalDiffDone,
 		BaselineRunID:         baseline.ID,
 		TreatmentRunID:        treatment.ID,
+		BaselineRunnerInfo:    baseline.RunnerInfo,
+		TreatmentRunnerInfo:   treatment.RunnerInfo,
 		Baseline:              baseSummary,
 		Treatment:             treatSummary,
 		SuccessRateDelta:      treatSummary.SuccessRate - baseSummary.SuccessRate,

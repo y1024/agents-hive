@@ -46,3 +46,28 @@ func TestGroupingRuleStoreRejectsInvalidRule(t *testing.T) {
 
 	require.Error(t, err)
 }
+
+func TestValidateGroupingRuleAcceptsSourceAttributionFields(t *testing.T) {
+	err := ValidateGroupingRule(GroupingRule{
+		ID:         "source_rule",
+		Name:       "Source Rule",
+		Enabled:    true,
+		Match:      GroupingMatch{DomainID: "sales", SourceKind: "master", SourceName: "react_loop"},
+		KeyVersion: "v2",
+		KeyFields:  []string{"failure_type", "domain_id", "source_kind", "source_name"},
+	})
+
+	require.NoError(t, err)
+}
+
+func TestValidateGroupingRuleRejectsUnknownKeyVersion(t *testing.T) {
+	err := ValidateGroupingRule(GroupingRule{
+		ID:         "source_rule",
+		Name:       "Source Rule",
+		Enabled:    true,
+		KeyVersion: "v9",
+		KeyFields:  []string{"failure_type"},
+	})
+
+	require.Error(t, err)
+}

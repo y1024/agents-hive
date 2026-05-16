@@ -37,7 +37,7 @@ func TestModelMatcher_Match(t *testing.T) {
 		{
 			name:            "前缀匹配 - gpt",
 			input:           "gpt",
-			wantSuggestions: 5, // gpt4, gpt-4o, gpt4o, gpt4-turbo, gpt-4-turbo, gpt-3.5, gpt3.5, gpt-5, gpt5
+			wantSuggestions: 5, // gpt4, gpt-5, gpt4o, gpt4-turbo, gpt-4-turbo, gpt-3.5, gpt3.5, gpt-5, gpt5
 		},
 		{
 			name:            "前缀匹配 - claude",
@@ -138,7 +138,7 @@ func TestModelMatcher_AllAliases(t *testing.T) {
 	// 测试所有预定义别名都能精确匹配
 	testAliases := []string{
 		"gpt4",
-		"gpt-4o",
+		"gpt-5",
 		"sonnet",
 		"opus",
 		"haiku",

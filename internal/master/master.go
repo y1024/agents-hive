@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,6 +26,7 @@ import (
 	"github.com/chef-guo/agents-hive/internal/memory"
 	"github.com/chef-guo/agents-hive/internal/observability"
 	"github.com/chef-guo/agents-hive/internal/plugin"
+	"github.com/chef-guo/agents-hive/internal/router"
 	"github.com/chef-guo/agents-hive/internal/runtimepolicy"
 	"github.com/chef-guo/agents-hive/internal/security"
 	"github.com/chef-guo/agents-hive/internal/sessiontodo"
@@ -179,6 +181,9 @@ type ToolCallEvent struct {
 	FailureType          string `json:"failure_type,omitempty"`
 	RequiresUserApproval bool   `json:"requires_user_approval,omitempty"`
 	SuggestedAction      string `json:"suggested_action,omitempty"`
+	Recoverable          bool   `json:"recoverable,omitempty"`
+	Terminal             bool   `json:"terminal,omitempty"`
+	ErrorKind            string `json:"error_kind,omitempty"`
 	SessionID            string `json:"session_id,omitempty"` // 关联会话 ID，用于前端过滤
 }
 
@@ -319,6 +324,35 @@ type Master struct {
 	autoContinueRuns map[string]int
 }
 
+func (m *Master) evaluatePermissionPolicy(ctx context.Context, toolName string, input json.RawMessage) router.ToolPolicyDecision {
+	toolName = strings.TrimSpace(toolName)
+	if toolName == "" {
+		return router.ToolPolicyDecision{Action: router.ToolPolicyDeny, Reason: "empty_tool_name", Source: "tool_policy"}
+	}
+	if router.IsShellCommandTool(toolName) {
+		return router.ToolPolicyDecision{
+			Action:             router.ToolPolicyAsk,
+			RouteStatus:        router.ToolRouteRequiresMatchingIntent,
+			CallableNow:        true,
+			RequiresApproval:   true,
+			MayRequireApproval: true,
+			RiskClass:          router.ToolRiskRuntimeExec,
+			Reason:             "runtime_exec_permission_prompt",
+			Source:             "tool_policy",
+			SideEffect:         true,
+		}
+	}
+	def := m.actionGuardToolDefinition(toolName)
+	descriptor, ok := actionGuardDescriptor(strings.ToLower(toolName), def)
+	if !ok {
+		return router.ToolPolicyDecision{Action: router.ToolPolicyDeny, Reason: "unknown_tool", Source: "tool_policy"}
+	}
+	return router.EvaluateToolPolicy(descriptor.Profile, router.ToolPolicyContext{
+		Input:     input,
+		ForAction: true,
+	})
+}
+
 // NewMaster 创建一个新的 Master agent
 func NewMaster(cfg Config, hitlCfg config.HITLConfig, registry *subagent.Registry, skillReg SkillRegistryProvider, st store.SessionStore, logger *zap.Logger) *Master {
 	cfg.RuntimePolicy = cfg.RuntimePolicy.WithDefaults()
@@ -448,9 +482,19 @@ func NewMaster(cfg Config, hitlCfg config.HITLConfig, registry *subagent.Registr
 	}
 
 	if hitlCfg.Enabled {
-		m.permMgr = skills.NewPermissionManager(hitlCfg.PermissionRules, m.createPermissionPromptFn())
+		m.permMgr = skills.NewPermissionManager(
+			hitlCfg.PermissionRules,
+			m.createPermissionPromptFn(),
+			skills.WithPermissionPolicyEvaluatorFunc(m.evaluatePermissionPolicy),
+			skills.WithUnifiedPolicyPrimary(cfg.SecurityPermissionMode != "strict"),
+		)
 	} else {
-		m.permMgr = skills.NewPermissionManager(hitlCfg.PermissionRules, nil)
+		m.permMgr = skills.NewPermissionManager(
+			hitlCfg.PermissionRules,
+			nil,
+			skills.WithPermissionPolicyEvaluatorFunc(m.evaluatePermissionPolicy),
+			skills.WithUnifiedPolicyPrimary(cfg.SecurityPermissionMode != "strict"),
+		)
 	}
 
 	// 设置插件管理器到权限管理器（用于 PermissionAsk hook）
@@ -1175,14 +1219,86 @@ func parseTime(s string) time.Time {
 	return t
 }
 
-// SwitchModel 在运行时切换 LLM 模型（由前端 PUT /api/v1/model 触发）
+// SelectModel 只按模型配置 ID 切换默认模型。
+// WebUI 会话内选择模型应调用 SelectSessionModel，避免污染其他会话。
+func (m *Master) SelectModel(name string) bool {
+	m.llmMu.Lock()
+	defer m.llmMu.Unlock()
+
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	if m.router != nil {
+		ok := m.router.SwitchUserModel(name)
+		if ok {
+			m.logger.Info("模型已选择", zap.String("name", name))
+		}
+		return ok
+	}
+	if m.llmClient != nil {
+		m.config.Model = name
+		m.llmClient.SetModel(name)
+		m.logger.Info("模型已选择", zap.String("name", name))
+		return true
+	}
+	return false
+}
+
+// SelectSessionModel 只为指定会话绑定主对话模型配置 ID。
+// 运行时配置仍由 AIRouter 从 DB 权威数据解析，不接受前端传入 base_url/api_key。
+func (m *Master) SelectSessionModel(ctx context.Context, sessionID, name string) error {
+	name = strings.TrimSpace(name)
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return errs.New(errs.CodeBadRequest, "需要会话 ID")
+	}
+	if name == "" {
+		return errs.New(errs.CodeBadRequest, "需要模型名称")
+	}
+	if _, err := m.checkSessionAccess(ctx, sessionID); err != nil {
+		return err
+	}
+	if m.router != nil && !m.router.HasModel(name) {
+		return errs.New(errs.CodeNotFound, "模型未加载: "+name)
+	}
+
+	session := m.sessionMgr.GetSession(sessionID)
+	if session != nil {
+		session.mu.Lock()
+		session.SelectedModel = name
+		session.activeLLM = nil
+		session.activeModel = ""
+		session.mu.Unlock()
+	}
+
+	if m.store != nil {
+		record, err := m.store.LoadSession(ctx, sessionID)
+		if err != nil {
+			return err
+		}
+		record.SelectedModel = name
+		if record.UpdatedAt == "" {
+			record.UpdatedAt = time.Now().Format(time.RFC3339)
+		}
+		if err := m.store.SaveSession(ctx, record); err != nil {
+			return err
+		}
+	}
+
+	m.logger.Info("会话模型已选择", zap.String("session_id", sessionID), zap.String("name", name))
+	return nil
+}
+
+// SwitchModel 在运行时切换完整 LLM profile。
+// 仅供 CLI/无 DB fallback 或明确的配置重载路径使用；WebUI 切换模型应调用 SelectModel。
 func (m *Master) SwitchModel(name, model, baseURL, provider, apiFormat string) {
 	m.llmMu.Lock()
 	defer m.llmMu.Unlock()
 
 	// 优先使用 Router（运行时配置由 DB + Router 管理）
 	if m.router != nil {
-		m.router.SwitchUserModel(name, model, baseURL, provider, apiFormat)
+		m.router.SwitchUserModel(name)
 	} else if m.llmClient != nil {
 		// Fallback: 无 Router 场景（如无 DB），直接重配置 LLM Client
 		// 更新 m.config 作为 fallback 路径的状态（getSessionLLM/prompt_builder 依赖它）
@@ -1215,6 +1331,35 @@ func (m *Master) ActiveModel() string {
 	}
 	m.llmMu.RLock()
 	defer m.llmMu.RUnlock()
+	return m.config.Model
+}
+
+// ActiveModelNameForSession 返回指定会话选定的模型配置名；空表示使用全局默认。
+func (m *Master) ActiveModelNameForSession(ctx context.Context, sessionID string) string {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		if m.router != nil {
+			return m.router.ActiveModelName()
+		}
+		return m.config.Model
+	}
+	if session := m.sessionMgr.GetSession(sessionID); session != nil {
+		session.mu.RLock()
+		selected := session.SelectedModel
+		session.mu.RUnlock()
+		if selected != "" {
+			return selected
+		}
+	}
+	if m.store != nil {
+		record, err := m.checkSessionAccess(ctx, sessionID)
+		if err == nil && record != nil && record.SelectedModel != "" {
+			return record.SelectedModel
+		}
+	}
+	if m.router != nil {
+		return m.router.ActiveModelName()
+	}
 	return m.config.Model
 }
 
@@ -1378,10 +1523,17 @@ func (m *Master) UpdateSessionTags(ctx context.Context, sessionID string, tags [
 func (m *Master) getSessionLLM(session *SessionState) *llm.Client {
 	// 使用 Router 时，每次都获取最新的客户端（支持热切换）
 	if m.router != nil {
-		client := m.router.GetLLMClient(airouter.TaskChat)
+		session.mu.RLock()
+		selectedModel := session.SelectedModel
+		session.mu.RUnlock()
+		client := m.router.GetLLMClientForModel(airouter.TaskChat, selectedModel)
 		session.mu.Lock()
 		session.activeLLM = client
-		session.activeModel = m.router.ActiveModel()
+		if client != nil {
+			session.activeModel = client.Model()
+		} else {
+			session.activeModel = ""
+		}
 		session.mu.Unlock()
 		return client
 	}
@@ -1524,6 +1676,21 @@ func (m *Master) UpdateSecurityConfig(rules []config.ExecRuleConfig, defaultPoli
 	m.logger.Info("安全执行规则已热更新",
 		zap.Int("user_rules", len(userRules)),
 		zap.String("default_policy", defaultPolicy),
+	)
+}
+
+// UpdatePermissionMode 热更新 minimal/strict 权限模式。
+func (m *Master) UpdatePermissionMode(mode string) {
+	if mode == "" {
+		mode = "minimal"
+	}
+	m.config.SecurityPermissionMode = mode
+	if m.permMgr != nil {
+		m.permMgr.SetUnifiedPolicyPrimary(mode != "strict")
+	}
+	m.logger.Info("权限模式已热更新",
+		zap.String("permission_mode", mode),
+		zap.Bool("unified_policy_primary", mode != "strict"),
 	)
 }
 

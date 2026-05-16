@@ -2,12 +2,15 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"go.uber.org/zap"
 
 	"github.com/chef-guo/agents-hive/internal/errs"
+	"github.com/chef-guo/agents-hive/internal/security"
 	"github.com/chef-guo/agents-hive/internal/store"
 )
 
@@ -34,7 +37,7 @@ func (s *Server) handleAdminListLLMProviders(w http.ResponseWriter, r *http.Requ
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "查询失败", Code: errs.CodeStoreReadFailed})
 		return
 	}
-	// 脱敏 api_key
+	// 密钥只允许写入，不允许从列表接口泄露原文。
 	type providerItem struct {
 		Name         string `json:"name"`
 		ProviderType string `json:"provider_type"`
@@ -59,7 +62,7 @@ func (s *Server) handleAdminListLLMProviders(w http.ResponseWriter, r *http.Requ
 			Enabled:      p.Enabled,
 			APIFormat:    p.APIFormat,
 			ServiceType:  p.ServiceType,
-			ConfigJSON:   p.ConfigJSON,
+			ConfigJSON:   redactConfigJSONStringForView(p.ConfigJSON),
 			CreatedAt:    p.CreatedAt,
 			UpdatedAt:    p.UpdatedAt,
 		})
@@ -96,6 +99,21 @@ func (s *Server) handleAdminCreateLLMProvider(w http.ResponseWriter, r *http.Req
 	if req.ConfigJSON == "" {
 		req.ConfigJSON = "{}"
 	}
+	configJSON, err := normalizeConfigJSONStringInput(req.ConfigJSON)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error(), Code: errs.CodeInvalidInput})
+		return
+	}
+	baseURL, err := normalizeLLMBaseURLInput(req.BaseURL)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error(), Code: errs.CodeInvalidInput})
+		return
+	}
+	apiKey, err := normalizeNewLLMAPIKey(req.APIKey)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error(), Code: errs.CodeInvalidInput})
+		return
+	}
 	serviceType := req.ServiceType
 	if serviceType == "" {
 		serviceType = "llm"
@@ -121,13 +139,13 @@ func (s *Server) handleAdminCreateLLMProvider(w http.ResponseWriter, r *http.Req
 	rec := &store.LLMProviderRecord{
 		Name:         req.Name,
 		ProviderType: req.ProviderType,
-		APIKey:       req.APIKey,
-		BaseURL:      req.BaseURL,
+		APIKey:       apiKey,
+		BaseURL:      baseURL,
 		IsDefault:    req.IsDefault,
 		Enabled:      req.Enabled,
 		APIFormat:    req.APIFormat,
 		ServiceType:  serviceType,
-		ConfigJSON:   req.ConfigJSON,
+		ConfigJSON:   configJSON,
 	}
 	if err := s.store.SaveLLMProvider(ctx, rec); err != nil {
 		s.logger.Error("保存 LLM Provider 失败", zap.Error(err))
@@ -176,11 +194,21 @@ func (s *Server) handleAdminUpdateLLMProvider(w http.ResponseWriter, r *http.Req
 	if req.ProviderType != nil {
 		existing.ProviderType = *req.ProviderType
 	}
-	if req.APIKey != nil && *req.APIKey != "" && *req.APIKey != "****" {
-		existing.APIKey = *req.APIKey
+	if req.APIKey != nil {
+		apiKey, err := mergeProviderAPIKeyUpdate(existing.APIKey, *req.APIKey)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error(), Code: errs.CodeInvalidInput})
+			return
+		}
+		existing.APIKey = apiKey
 	}
 	if req.BaseURL != nil {
-		existing.BaseURL = *req.BaseURL
+		baseURL, err := normalizeLLMBaseURLInput(*req.BaseURL)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error(), Code: errs.CodeInvalidInput})
+			return
+		}
+		existing.BaseURL = baseURL
 	}
 	if req.IsDefault != nil {
 		if *req.IsDefault {
@@ -202,7 +230,12 @@ func (s *Server) handleAdminUpdateLLMProvider(w http.ResponseWriter, r *http.Req
 		existing.ServiceType = *req.ServiceType
 	}
 	if req.ConfigJSON != nil {
-		existing.ConfigJSON = *req.ConfigJSON
+		configJSON, err := mergeConfigJSONStringUpdate(existing.ConfigJSON, *req.ConfigJSON)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error(), Code: errs.CodeInvalidInput})
+			return
+		}
+		existing.ConfigJSON = configJSON
 	}
 
 	if err := s.store.SaveLLMProvider(ctx, existing); err != nil {
@@ -241,7 +274,6 @@ func (s *Server) handleAdminDeleteLLMProvider(w http.ResponseWriter, r *http.Req
 // ── LLM Model 管理 ────────────────────────────────────────────────────────────
 
 // handleAdminListLLMModels GET /api/v1/admin/llm/models
-// 注意：api_key 暂未脱敏（admin-only 接口，用户知悉）。如需脱敏请参照 handleAdminListLLMProviders。
 func (s *Server) handleAdminListLLMModels(w http.ResponseWriter, r *http.Request) {
 	if !s.requireStore(w) {
 		return
@@ -252,7 +284,36 @@ func (s *Server) handleAdminListLLMModels(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "查询失败", Code: errs.CodeStoreReadFailed})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"models": models})
+	type modelItem struct {
+		Name         string `json:"name"`
+		ProviderName string `json:"provider_name"`
+		Model        string `json:"model"`
+		BaseURL      string `json:"base_url"`
+		APIKey       string `json:"api_key"` // masked
+		IsDefault    bool   `json:"is_default"`
+		Enabled      bool   `json:"enabled"`
+		ServiceType  string `json:"service_type"`
+		ConfigJSON   string `json:"config_json"`
+		CreatedAt    string `json:"created_at"`
+		UpdatedAt    string `json:"updated_at"`
+	}
+	items := make([]modelItem, 0, len(models))
+	for _, m := range models {
+		items = append(items, modelItem{
+			Name:         m.Name,
+			ProviderName: m.ProviderName,
+			Model:        m.Model,
+			BaseURL:      m.BaseURL,
+			APIKey:       maskAPIKey(m.APIKey),
+			IsDefault:    m.IsDefault,
+			Enabled:      m.Enabled,
+			ServiceType:  m.ServiceType,
+			ConfigJSON:   redactConfigJSONStringForView(m.ConfigJSON),
+			CreatedAt:    m.CreatedAt,
+			UpdatedAt:    m.UpdatedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"models": items})
 }
 
 // handleAdminCreateLLMModel POST /api/v1/admin/llm/models
@@ -283,6 +344,21 @@ func (s *Server) handleAdminCreateLLMModel(w http.ResponseWriter, r *http.Reques
 	if req.ConfigJSON == "" {
 		req.ConfigJSON = "{}"
 	}
+	configJSON, err := normalizeConfigJSONStringInput(req.ConfigJSON)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error(), Code: errs.CodeInvalidInput})
+		return
+	}
+	baseURL, err := normalizeLLMBaseURLInput(req.BaseURL)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error(), Code: errs.CodeInvalidInput})
+		return
+	}
+	apiKey, err := normalizeNewLLMAPIKey(req.APIKey)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error(), Code: errs.CodeInvalidInput})
+		return
+	}
 
 	ctx := r.Context()
 
@@ -305,11 +381,11 @@ func (s *Server) handleAdminCreateLLMModel(w http.ResponseWriter, r *http.Reques
 		Name:         req.Name,
 		ProviderName: req.ProviderName,
 		Model:        req.Model,
-		BaseURL:      req.BaseURL,
-		APIKey:       req.APIKey,
+		BaseURL:      baseURL,
+		APIKey:       apiKey,
 		IsDefault:    req.IsDefault,
 		Enabled:      req.Enabled,
-		ConfigJSON:   req.ConfigJSON,
+		ConfigJSON:   configJSON,
 	}
 	if err := s.store.SaveLLMModel(ctx, rec); err != nil {
 		s.logger.Error("保存 LLM Model 失败", zap.Error(err))
@@ -384,10 +460,20 @@ func (s *Server) handleAdminUpdateLLMModel(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	if req.BaseURL != nil {
-		existing.BaseURL = *req.BaseURL
+		baseURL, err := normalizeLLMBaseURLInput(*req.BaseURL)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error(), Code: errs.CodeInvalidInput})
+			return
+		}
+		existing.BaseURL = baseURL
 	}
-	if req.APIKey != nil && *req.APIKey != "" && *req.APIKey != "****" {
-		existing.APIKey = *req.APIKey
+	if req.APIKey != nil {
+		apiKey, err := mergeModelAPIKeyUpdate(existing.APIKey, *req.APIKey)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error(), Code: errs.CodeInvalidInput})
+			return
+		}
+		existing.APIKey = apiKey
 	}
 	if req.IsDefault != nil {
 		existing.IsDefault = *req.IsDefault
@@ -396,7 +482,12 @@ func (s *Server) handleAdminUpdateLLMModel(w http.ResponseWriter, r *http.Reques
 		existing.Enabled = *req.Enabled
 	}
 	if req.ConfigJSON != nil {
-		existing.ConfigJSON = *req.ConfigJSON
+		configJSON, err := mergeConfigJSONStringUpdate(existing.ConfigJSON, *req.ConfigJSON)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error(), Code: errs.CodeInvalidInput})
+			return
+		}
+		existing.ConfigJSON = configJSON
 	}
 
 	if err := s.store.UpdateLLMModel(ctx, name, existing); err != nil {
@@ -451,4 +542,121 @@ func maskAPIKey(key string) string {
 		return "****"
 	}
 	return ""
+}
+
+func normalizeLLMBaseURLInput(raw string) (string, error) {
+	baseURL := strings.TrimSpace(raw)
+	if baseURL == "" {
+		return "", nil
+	}
+	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("base_url 必须是完整的 http(s) URL")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("base_url 仅支持 http 或 https")
+	}
+	return baseURL, nil
+}
+
+func normalizeNewLLMAPIKey(raw string) (string, error) {
+	apiKey := strings.TrimSpace(raw)
+	if apiKey == "" {
+		return "", nil
+	}
+	if isMaskedAPIKey(apiKey) {
+		return "", fmt.Errorf("api_key 不能使用脱敏值，请输入完整密钥或留空")
+	}
+	if len(apiKey) < 8 {
+		return "", fmt.Errorf("api_key 长度过短，请输入完整密钥或留空")
+	}
+	return apiKey, nil
+}
+
+func mergeProviderAPIKeyUpdate(existing, raw string) (string, error) {
+	apiKey := strings.TrimSpace(raw)
+	if apiKey == "" || isMaskedAPIKey(apiKey) {
+		return existing, nil
+	}
+	if len(apiKey) < 8 {
+		return "", fmt.Errorf("api_key 长度过短，请输入完整密钥或留空保持不变")
+	}
+	return apiKey, nil
+}
+
+func mergeModelAPIKeyUpdate(existing, raw string) (string, error) {
+	apiKey := strings.TrimSpace(raw)
+	if apiKey == "" {
+		if isInvalidStoredAPIKey(existing) {
+			return "", nil
+		}
+		return existing, nil
+	}
+	if isMaskedAPIKey(apiKey) {
+		return existing, nil
+	}
+	if len(apiKey) < 8 {
+		return "", fmt.Errorf("api_key 长度过短，请输入完整密钥或留空继承 Provider")
+	}
+	return apiKey, nil
+}
+
+func isMaskedAPIKey(apiKey string) bool {
+	return strings.Contains(apiKey, "****")
+}
+
+func isInvalidStoredAPIKey(apiKey string) bool {
+	apiKey = strings.TrimSpace(apiKey)
+	return apiKey != "" && (isMaskedAPIKey(apiKey) || len(apiKey) < 8)
+}
+
+func redactConfigJSONStringForView(raw string) string {
+	normalized, err := normalizeConfigJSONStringInput(raw)
+	if err != nil {
+		return "{}"
+	}
+	redacted, err := security.RedactJSON([]byte(normalized))
+	if err != nil {
+		return "{}"
+	}
+	return string(redacted)
+}
+
+func normalizeConfigJSONStringInput(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "{}", nil
+	}
+	if !json.Valid([]byte(raw)) {
+		return "", fmt.Errorf("config_json 必须是合法 JSON")
+	}
+	return raw, nil
+}
+
+func mergeConfigJSONStringUpdate(existing, incoming string) (string, error) {
+	normalizedIncoming, err := normalizeConfigJSONStringInput(incoming)
+	if err != nil {
+		return "", err
+	}
+
+	normalizedExisting, err := normalizeConfigJSONStringInput(existing)
+	if err != nil {
+		normalizedExisting = "{}"
+	}
+
+	var incomingValue any
+	if err := json.Unmarshal([]byte(normalizedIncoming), &incomingValue); err != nil {
+		return "", err
+	}
+	var existingValue any
+	if err := json.Unmarshal([]byte(normalizedExisting), &existingValue); err != nil {
+		return "", err
+	}
+
+	merged := security.PreserveRedactedValues(incomingValue, existingValue)
+	out, err := json.Marshal(merged)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
 }

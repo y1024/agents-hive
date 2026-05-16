@@ -145,6 +145,19 @@ func TestPruneGovernanceForStoreFallbackDryRunAndExecute(t *testing.T) {
 	assert.False(t, executed.DryRun)
 }
 
+func TestPruneGovernanceForStoreNormalizesEmptyCollections(t *testing.T) {
+	result, err := PruneGovernanceForStore(context.Background(), &governanceFallbackStore{}, GovernancePrunePlan{}, true)
+
+	assert.NoError(t, err)
+	assert.NotNil(t, result.DeleteIDs)
+	assert.NotNil(t, result.Reasons)
+
+	encoded, err := json.Marshal(result)
+	assert.NoError(t, err)
+	assert.Contains(t, string(encoded), `"delete_ids":[]`)
+	assert.Contains(t, string(encoded), `"reasons":{}`)
+}
+
 type governanceFallbackStore struct {
 	records      []MemoryRecord
 	lastListOpts SearchOptions

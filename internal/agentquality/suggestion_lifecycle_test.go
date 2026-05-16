@@ -35,9 +35,10 @@ func TestNewOptimizationSuggestionFromDraftCreatesReviewableEntity(t *testing.T)
 func TestSuggestionApprovalStateMachine(t *testing.T) {
 	now := time.Now()
 	s := OptimizationReviewSuggestion{
-		ID:        "suggestion-1",
-		Status:    SuggestionPending,
-		ExpiresAt: now.Add(time.Hour),
+		ID:         "suggestion-1",
+		Status:     SuggestionPending,
+		RunnerInfo: RunnerInfo{EvidenceLevel: EvidenceRealRunner},
+		ExpiresAt:  now.Add(time.Hour),
 	}
 
 	approved, err := s.Approve("reviewer-1", "人工确认", now)

@@ -16,6 +16,13 @@ const (
 	EventBudgetExit         EventName = "quality.budget_exit"
 )
 
+const (
+	MetricPolicyDecisionTotal      = "policy_decision_total"
+	MetricActionGuardAskTotal      = "action_guard_ask_total"
+	MetricExternalSendRoutineTotal = "external_send_routine_total"
+	MetricPolicySchemaDriftTotal   = "policy_schema_drift_total"
+)
+
 type FailureType string
 
 const (
@@ -46,6 +53,12 @@ const (
 	DecisionAllowed    Decision = "allowed"
 	DecisionUnexpected Decision = "unexpected"
 	DecisionRejected   Decision = "rejected"
+)
+
+type OwnerScope string
+
+const (
+	OwnerScopeUser OwnerScope = "user"
 )
 
 type PromptRef struct {
@@ -119,6 +132,11 @@ type ContextBuild struct {
 	SkippedMemoryTotal    int      `json:"skipped_memory_total,omitempty"`
 	FeedbackMemoryCount   int      `json:"feedback_memory_count,omitempty"`
 	RegularMemoryCount    int      `json:"regular_memory_count,omitempty"`
+	MemoryDomainID        string   `json:"memory_domain_id,omitempty"`
+	MemorySourceKind      string   `json:"memory_source_kind,omitempty"`
+	MemorySourceName      string   `json:"memory_source_name,omitempty"`
+	MemoryOwnerScope      string   `json:"memory_owner_scope,omitempty"`
+	MemoryOwnerID         string   `json:"memory_owner_id,omitempty"`
 	AttachmentCount       int      `json:"attachment_count"`
 	PromptVersions        []string `json:"prompt_versions,omitempty"`
 	EstimatedTokens       int      `json:"estimated_tokens,omitempty"`
@@ -129,6 +147,16 @@ type Event struct {
 	Name          EventName          `json:"name"`
 	CaseID        string             `json:"case_id,omitempty"`
 	SessionIDHash string             `json:"session_id_hash,omitempty"`
+	RunID         string             `json:"run_id,omitempty"`
+	TraceID       string             `json:"trace_id,omitempty"`
+	SpanID        string             `json:"span_id,omitempty"`
+	TurnID        string             `json:"turn_id,omitempty"`
+	DomainID      string             `json:"domain_id,omitempty"`
+	SourceKind    string             `json:"source_kind,omitempty"`
+	SourceName    string             `json:"source_name,omitempty"`
+	OwnerScope    OwnerScope         `json:"owner_scope,omitempty"`
+	OwnerID       string             `json:"owner_id,omitempty"`
+	UserID        string             `json:"user_id,omitempty"`
 	Route         string             `json:"route,omitempty"`
 	Prompt        PromptRef          `json:"prompt,omitempty"`
 	ToolDecision  ToolDecision       `json:"tool_decision,omitempty"`

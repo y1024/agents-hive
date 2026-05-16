@@ -31,8 +31,8 @@ const (
 type CostTier int
 
 const (
-	TierCheap     CostTier = 1 // mini/small 级别（gpt-4o-mini, deepseek-chat 等）
-	TierMedium    CostTier = 2 // 标准级别（gpt-4o, claude-3-sonnet 等）
+	TierCheap     CostTier = 1 // mini/small 级别（gpt-5-mini, deepseek-chat 等）
+	TierMedium    CostTier = 2 // 标准级别（gpt-5, claude-3-sonnet 等）
 	TierExpensive CostTier = 3 // 旗舰级别（o1, o3, claude-3-opus 等）
 )
 

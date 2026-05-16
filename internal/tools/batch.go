@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/chef-guo/agents-hive/internal/mcphost"
+	"github.com/chef-guo/agents-hive/internal/toolruntime"
 )
 
 // NestedToolGate 是 batch 等工具执行子工具前调用的统一执行层 gate。
@@ -164,10 +165,12 @@ func validateBatchParallelSafety(host *mcphost.Host, operations []batchOperation
 	for i, op := range operations {
 		def, err := host.GetTool(op.Tool)
 		if err != nil {
-			return fmt.Errorf("操作 #%d: 工具不存在: %s", i+1, op.Tool)
+			return fmt.Errorf("%s", toolruntime.RecoverableToolCallErrorContent("batch_tool_not_found",
+				fmt.Sprintf("操作 #%d 的工具 %q 不存在，batch 当前调用未执行。请重新选择已注册工具。", i+1, op.Tool)))
 		}
 		if !def.IsConcurrencySafe {
-			return fmt.Errorf("操作 #%d: 工具 %q 不允许并发执行非只读工具，请改用串行 batch", i+1, op.Tool)
+			return fmt.Errorf("%s", toolruntime.RecoverableToolCallErrorContent("batch_parallel_not_safe",
+				fmt.Sprintf("操作 #%d 的工具 %q 不允许并发执行，batch 当前调用未执行。请把 parallel 改为 false 或拆分为串行调用。", i+1, op.Tool)))
 		}
 	}
 	return nil
@@ -248,7 +251,8 @@ func executeOperation(ctx context.Context, host *mcphost.Host, logger *zap.Logge
 	_, err := host.GetTool(op.Tool)
 	if err != nil {
 		result.Success = false
-		result.Error = fmt.Sprintf("工具不存在: %s", op.Tool)
+		result.Error = toolruntime.RecoverableToolCallErrorContent("batch_tool_not_found",
+			fmt.Sprintf("工具 %q 不存在，当前子调用未执行。请重新选择已注册工具。", op.Tool))
 		logger.Warn("批量操作失败：工具不存在",
 			zap.Int("index", index),
 			zap.String("tool", op.Tool))

@@ -97,10 +97,10 @@ func (s *PGReplayJobStore) Create(input ReplayJobCreate) (ReplayJob, error) {
 	}
 	var job ReplayJob
 	row := s.pool.QueryRow(context.Background(), `
-INSERT INTO qualityworkbench_replay_jobs (batch_id, kind, target_ids, status, max_attempt, attempt)
-VALUES ($1,$2,$3,$4,$5,0)
-RETURNING id, batch_id, kind, target_ids, status, max_attempt, attempt, result, error, created_at, updated_at`,
-		input.BatchID, input.Kind, targetIDs, ReplayJobQueued, input.MaxAttempt,
+INSERT INTO qualityworkbench_replay_jobs (batch_id, kind, target_ids, domain_id, source_kind, source_name, status, max_attempt, attempt)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,0)
+RETURNING id, batch_id, kind, target_ids, domain_id, source_kind, source_name, status, max_attempt, attempt, result, error, created_at, updated_at`,
+		input.BatchID, input.Kind, targetIDs, strings.TrimSpace(input.DomainID), strings.TrimSpace(input.SourceKind), strings.TrimSpace(input.SourceName), ReplayJobQueued, input.MaxAttempt,
 	)
 	if err := scanReplayJob(row, &job); err != nil {
 		return ReplayJob{}, err
@@ -146,7 +146,7 @@ func (s *PGReplayJobStore) Cancel(id string) (ReplayJob, error) {
 UPDATE qualityworkbench_replay_jobs
 SET status=$2, updated_at=NOW()
 WHERE id=$1 AND status=$3
-RETURNING id, batch_id, kind, target_ids, status, max_attempt, attempt, result, error, created_at, updated_at`,
+RETURNING id, batch_id, kind, target_ids, domain_id, source_kind, source_name, status, max_attempt, attempt, result, error, created_at, updated_at`,
 		id, ReplayJobCancelled, current.Status,
 	)
 	if err := scanReplayJob(row, &job); err != nil {
@@ -168,7 +168,7 @@ func (s *PGReplayJobStore) MarkRunning(id string) (ReplayJob, error) {
 UPDATE qualityworkbench_replay_jobs
 SET status=$2, attempt=attempt+1, error='', updated_at=NOW()
 WHERE id=$1 AND status=$3
-RETURNING id, batch_id, kind, target_ids, status, max_attempt, attempt, result, error, created_at, updated_at`,
+RETURNING id, batch_id, kind, target_ids, domain_id, source_kind, source_name, status, max_attempt, attempt, result, error, created_at, updated_at`,
 		id, ReplayJobRunning, current.Status,
 	)
 	if err := scanReplayJob(row, &job); err != nil {
@@ -197,7 +197,7 @@ func (s *PGReplayJobStore) Finish(id string, status ReplayJobStatus, result Repl
 UPDATE qualityworkbench_replay_jobs
 SET status=$2, result=$3, error=$4, updated_at=NOW()
 WHERE id=$1 AND status=$5
-RETURNING id, batch_id, kind, target_ids, status, max_attempt, attempt, result, error, created_at, updated_at`,
+RETURNING id, batch_id, kind, target_ids, domain_id, source_kind, source_name, status, max_attempt, attempt, result, error, created_at, updated_at`,
 		id, status, resultJSON, strings.TrimSpace(errorMessage), current.Status,
 	)
 	if err := scanReplayJob(row, &job); err != nil {
@@ -224,11 +224,8 @@ func (s *PGBatchEvalRunStore) Start(input BatchEvalStart) (BatchEvalRun, error) 
 	if err := ValidateBatchEvalKind(input.Kind); err != nil {
 		return BatchEvalRun{}, err
 	}
-	summary, diff, caseResults := summarizeBatchEvalWithGolden(input)
-	status := BatchEvalSucceeded
-	if summary.Total == 0 || summary.Failed > 0 || summary.Unknown > 0 {
-		status = BatchEvalFailed
-	}
+	summary, diff, caseResults, runnerInfo, gateMetrics, judgeVerdict := summarizeBatchEvalWithGolden(input)
+	status := batchEvalStatusFromSummary(summary)
 	summaryJSON, err := json.Marshal(summary)
 	if err != nil {
 		return BatchEvalRun{}, err
@@ -241,12 +238,37 @@ func (s *PGBatchEvalRunStore) Start(input BatchEvalStart) (BatchEvalRun, error) 
 	if err != nil {
 		return BatchEvalRun{}, err
 	}
+	runnerInfoJSON, err := json.Marshal(runnerInfo)
+	if err != nil {
+		return BatchEvalRun{}, err
+	}
+	gateMetricsJSON, err := json.Marshal(gateMetrics)
+	if err != nil {
+		return BatchEvalRun{}, err
+	}
+	judgeVerdictJSON, err := json.Marshal(judgeVerdict)
+	if err != nil {
+		return BatchEvalRun{}, err
+	}
+	shadowMetrics, domainRegressions := summarizeShadowEvidence(input, runnerInfo)
+	shadowMetricsJSON, err := json.Marshal(shadowMetrics)
+	if err != nil {
+		return BatchEvalRun{}, err
+	}
+	shadowResultsJSON, err := json.Marshal(input.ShadowResults)
+	if err != nil {
+		return BatchEvalRun{}, err
+	}
+	domainRegressionsJSON, err := json.Marshal(domainRegressions)
+	if err != nil {
+		return BatchEvalRun{}, err
+	}
 	var run BatchEvalRun
 	row := s.pool.QueryRow(context.Background(), `
-INSERT INTO qualityworkbench_batch_eval_runs (batch_id, kind, status, summary, diff, case_results)
-VALUES ($1,$2,$3,$4,$5,$6)
-RETURNING id, batch_id, kind, status, summary, diff, case_results, created_at, updated_at`,
-		input.BatchID, input.Kind, status, summaryJSON, diffJSON, caseResultsJSON,
+	INSERT INTO qualityworkbench_batch_eval_runs (batch_id, kind, domain_id, source_kind, source_name, runner_info, status, summary, diff, case_results, gate_metrics, judge_verdict, shadow_metrics, shadow_results, domain_regressions)
+	VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+	RETURNING id, batch_id, kind, domain_id, source_kind, source_name, runner_info, status, summary, diff, case_results, gate_metrics, judge_verdict, shadow_metrics, shadow_results, domain_regressions, created_at, updated_at`,
+		input.BatchID, input.Kind, strings.TrimSpace(input.DomainID), strings.TrimSpace(input.SourceKind), strings.TrimSpace(input.SourceName), runnerInfoJSON, status, summaryJSON, diffJSON, caseResultsJSON, gateMetricsJSON, judgeVerdictJSON, shadowMetricsJSON, shadowResultsJSON, domainRegressionsJSON,
 	)
 	if err := scanBatchEvalRun(row, &run); err != nil {
 		return BatchEvalRun{}, err
@@ -344,11 +366,11 @@ type pgScanner interface {
 	Scan(dest ...any) error
 }
 
-const replayJobSelectSQL = `SELECT id, batch_id, kind, target_ids, status, max_attempt, attempt, result, error, created_at, updated_at FROM qualityworkbench_replay_jobs`
+const replayJobSelectSQL = `SELECT id, batch_id, kind, target_ids, domain_id, source_kind, source_name, status, max_attempt, attempt, result, error, created_at, updated_at FROM qualityworkbench_replay_jobs`
 
 func scanReplayJob(row pgScanner, job *ReplayJob) error {
 	var targetIDs, resultJSON []byte
-	if err := row.Scan(&job.ID, &job.BatchID, &job.Kind, &targetIDs, &job.Status, &job.MaxAttempt, &job.Attempt, &resultJSON, &job.Error, &job.CreatedAt, &job.UpdatedAt); err != nil {
+	if err := row.Scan(&job.ID, &job.BatchID, &job.Kind, &targetIDs, &job.DomainID, &job.SourceKind, &job.SourceName, &job.Status, &job.MaxAttempt, &job.Attempt, &resultJSON, &job.Error, &job.CreatedAt, &job.UpdatedAt); err != nil {
 		return err
 	}
 	if len(targetIDs) > 0 {
@@ -391,18 +413,35 @@ func replayJobWhere(filter ReplayJobListFilter) (string, []any) {
 		clauses = append(clauses, fmt.Sprintf("status=$%d", len(args)+1))
 		args = append(args, filter.Status)
 	}
+	if filter.DomainID != "" {
+		clauses = append(clauses, fmt.Sprintf("domain_id=$%d", len(args)+1))
+		args = append(args, filter.DomainID)
+	}
+	if filter.SourceKind != "" {
+		clauses = append(clauses, fmt.Sprintf("source_kind=$%d", len(args)+1))
+		args = append(args, filter.SourceKind)
+	}
+	if filter.SourceName != "" {
+		clauses = append(clauses, fmt.Sprintf("source_name=$%d", len(args)+1))
+		args = append(args, filter.SourceName)
+	}
 	if len(clauses) == 0 {
 		return "", args
 	}
 	return " WHERE " + strings.Join(clauses, " AND "), args
 }
 
-const batchEvalRunSelectSQL = `SELECT id, batch_id, kind, status, summary, diff, case_results, created_at, updated_at FROM qualityworkbench_batch_eval_runs`
+const batchEvalRunSelectSQL = `SELECT id, batch_id, kind, domain_id, source_kind, source_name, runner_info, status, summary, diff, case_results, gate_metrics, judge_verdict, shadow_metrics, shadow_results, domain_regressions, created_at, updated_at FROM qualityworkbench_batch_eval_runs`
 
 func scanBatchEvalRun(row pgScanner, run *BatchEvalRun) error {
-	var summaryJSON, diffJSON, caseResultsJSON []byte
-	if err := row.Scan(&run.ID, &run.BatchID, &run.Kind, &run.Status, &summaryJSON, &diffJSON, &caseResultsJSON, &run.CreatedAt, &run.UpdatedAt); err != nil {
+	var runnerInfoJSON, summaryJSON, diffJSON, caseResultsJSON, gateMetricsJSON, judgeVerdictJSON, shadowMetricsJSON, shadowResultsJSON, domainRegressionsJSON []byte
+	if err := row.Scan(&run.ID, &run.BatchID, &run.Kind, &run.DomainID, &run.SourceKind, &run.SourceName, &runnerInfoJSON, &run.Status, &summaryJSON, &diffJSON, &caseResultsJSON, &gateMetricsJSON, &judgeVerdictJSON, &shadowMetricsJSON, &shadowResultsJSON, &domainRegressionsJSON, &run.CreatedAt, &run.UpdatedAt); err != nil {
 		return err
+	}
+	if len(runnerInfoJSON) > 0 {
+		if err := json.Unmarshal(runnerInfoJSON, &run.RunnerInfo); err != nil {
+			return err
+		}
 	}
 	if len(summaryJSON) > 0 {
 		if err := json.Unmarshal(summaryJSON, &run.Summary); err != nil {
@@ -416,6 +455,31 @@ func scanBatchEvalRun(row pgScanner, run *BatchEvalRun) error {
 	}
 	if len(caseResultsJSON) > 0 {
 		if err := json.Unmarshal(caseResultsJSON, &run.CaseResults); err != nil {
+			return err
+		}
+	}
+	if len(gateMetricsJSON) > 0 {
+		if err := json.Unmarshal(gateMetricsJSON, &run.GateMetrics); err != nil {
+			return err
+		}
+	}
+	if len(judgeVerdictJSON) > 0 {
+		if err := json.Unmarshal(judgeVerdictJSON, &run.JudgeVerdict); err != nil {
+			return err
+		}
+	}
+	if len(shadowMetricsJSON) > 0 {
+		if err := json.Unmarshal(shadowMetricsJSON, &run.ShadowMetrics); err != nil {
+			return err
+		}
+	}
+	if len(shadowResultsJSON) > 0 {
+		if err := json.Unmarshal(shadowResultsJSON, &run.ShadowResults); err != nil {
+			return err
+		}
+	}
+	if len(domainRegressionsJSON) > 0 {
+		if err := json.Unmarshal(domainRegressionsJSON, &run.DomainRegressions); err != nil {
 			return err
 		}
 	}
@@ -448,6 +512,18 @@ func batchEvalRunWhere(filter BatchEvalRunListFilter) (string, []any) {
 	if filter.Status != "" {
 		clauses = append(clauses, fmt.Sprintf("status=$%d", len(args)+1))
 		args = append(args, filter.Status)
+	}
+	if filter.DomainID != "" {
+		clauses = append(clauses, fmt.Sprintf("domain_id=$%d", len(args)+1))
+		args = append(args, filter.DomainID)
+	}
+	if filter.SourceKind != "" {
+		clauses = append(clauses, fmt.Sprintf("source_kind=$%d", len(args)+1))
+		args = append(args, filter.SourceKind)
+	}
+	if filter.SourceName != "" {
+		clauses = append(clauses, fmt.Sprintf("source_name=$%d", len(args)+1))
+		args = append(args, filter.SourceName)
 	}
 	if len(clauses) == 0 {
 		return "", args

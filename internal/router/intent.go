@@ -19,6 +19,7 @@ const (
 // IntentFrame 是 RouteDecision 的输入骨架；Phase 1 只定义结构，不做分类。
 type IntentFrame struct {
 	Kind               IntentKind   `json:"kind"`
+	DomainID           string       `json:"domain_id,omitempty"`
 	Subject            string       `json:"subject,omitempty"`
 	Constraints        []string     `json:"constraints,omitempty"`
 	NegatedActions     []string     `json:"negated_actions,omitempty"`

@@ -551,14 +551,15 @@ func (sm *SessionManager) HandleSessionCommand(req SessionRequest, st ...store.S
 
 		forkID := uuid.New().String()
 		fork := &SessionState{
-			ID:           forkID,
-			Name:         forkName,
-			Created:      time.Now(),
-			LastAccessed: time.Now(),
-			Messages:     make([]llm.MessageWithTools, forkPoint),
-			Metadata:     copyMap(parent.Metadata),
-			Tags:         append([]string{}, parent.Tags...),
-			Stats:        SessionStats{},
+			ID:            forkID,
+			Name:          forkName,
+			Created:       time.Now(),
+			LastAccessed:  time.Now(),
+			Messages:      make([]llm.MessageWithTools, forkPoint),
+			Metadata:      copyMap(parent.Metadata),
+			Tags:          append([]string{}, parent.Tags...),
+			SelectedModel: parent.SelectedModel,
+			Stats:         SessionStats{},
 		}
 
 		copy(fork.Messages, parent.Messages[:forkPoint])
@@ -657,14 +658,15 @@ func (sm *SessionManager) LoadLastActiveSession(ctx context.Context, st store.Se
 	}
 
 	session := &SessionState{
-		ID:           record.ID,
-		Name:         record.Name,
-		Messages:     []llm.MessageWithTools{},
-		Metadata:     make(map[string]any),
-		Tags:         record.Tags,
-		UserID:       record.UserID,
-		Created:      parseTime(record.CreatedAt),
-		LastAccessed: parseTime(record.LastAccessedAt),
+		ID:            record.ID,
+		Name:          record.Name,
+		Messages:      []llm.MessageWithTools{},
+		Metadata:      make(map[string]any),
+		Tags:          record.Tags,
+		UserID:        record.UserID,
+		SelectedModel: record.SelectedModel,
+		Created:       parseTime(record.CreatedAt),
+		LastAccessed:  parseTime(record.LastAccessedAt),
 		Stats: SessionStats{
 			MessageCount: record.MessageCount,
 			TotalTokens:  record.TotalTokens,
@@ -747,6 +749,7 @@ func (sm *SessionManager) SaveSession(ctx context.Context, st store.SessionStore
 		CreatedAt:      session.Created.Format(time.RFC3339),
 		UpdatedAt:      time.Now().Format(time.RFC3339),
 		LastAccessedAt: session.LastAccessed.Format(time.RFC3339),
+		SelectedModel:  session.SelectedModel,
 		MessageCount:   len(session.Messages),
 		TotalTokens:    session.Stats.TotalTokens,
 		Deleted:        false,
@@ -809,6 +812,7 @@ func (sm *SessionManager) GetSessionByID(ctx context.Context, sessionID string, 
 			CreatedAt:      session.Created.Format(time.RFC3339),
 			UpdatedAt:      time.Now().Format(time.RFC3339),
 			LastAccessedAt: session.LastAccessed.Format(time.RFC3339),
+			SelectedModel:  session.SelectedModel,
 			MessageCount:   len(session.Messages),
 			TotalTokens:    session.Stats.TotalTokens,
 			Tags:           session.Tags,

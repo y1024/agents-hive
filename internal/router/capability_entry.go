@@ -4,15 +4,18 @@ package router
 type Capability string
 
 const (
-	CapabilityMetaSkillCreate       Capability = "meta.skill.create"
-	CapabilityMetaSkillModify       Capability = "meta.skill.modify"
-	CapabilityMetaToolRegister      Capability = "meta.tool.register"
-	CapabilityExternalSend          Capability = "external.send"
-	CapabilityExternalSendFeishu    Capability = "external.send.feishu"
-	CapabilityExternalSendWechatBot Capability = "external.send.wechatbot"
-	CapabilityExternalSendWeCom     Capability = "external.send.wecom"
-	CapabilityExternalSendDingTalk  Capability = "external.send.dingtalk"
-	CapabilityRuntimeExec           Capability = "runtime.exec"
+	CapabilityMetaSkillCreate                 Capability = "meta.skill.create"
+	CapabilityMetaSkillModify                 Capability = "meta.skill.modify"
+	CapabilityMetaToolRegister                Capability = "meta.tool.register"
+	CapabilityExternalSend                    Capability = "external.send"
+	CapabilityExternalSendFeishu              Capability = "external.send.feishu"
+	CapabilityExternalSendWechatBot           Capability = "external.send.wechatbot"
+	CapabilityExternalSendWeCom               Capability = "external.send.wecom"
+	CapabilityExternalSendDingTalk            Capability = "external.send.dingtalk"
+	CapabilityRuntimeExec                     Capability = "runtime.exec"
+	CapabilityCustomerServiceKBRead           Capability = "customer_service.kb.read"
+	CapabilityCustomerServiceEscalate         Capability = "customer_service.escalate"
+	CapabilityCustomerServiceCancelEscalation Capability = "customer_service.escalation.cancel"
 )
 
 // CapabilityKind 标记目录条目的真实类别。
@@ -65,12 +68,17 @@ const (
 
 // CapabilityEntry 是 typed catalog 的最小一等条目。
 type CapabilityEntry struct {
-	Name         string           `json:"name"`
-	Kind         CapabilityKind   `json:"kind"`
-	Domain       string           `json:"domain,omitempty"`
-	Source       CapabilitySource `json:"source"`
-	Invocation   InvocationMode   `json:"invocation"`
-	Risk         RiskLevel        `json:"risk"`
-	Capabilities []Capability     `json:"capabilities,omitempty"`
-	Description  string           `json:"description,omitempty"`
+	Name            string           `json:"name"`
+	Kind            CapabilityKind   `json:"kind"`
+	Domain          string           `json:"domain,omitempty"`
+	Source          CapabilitySource `json:"source"`
+	Invocation      InvocationMode   `json:"invocation"`
+	Risk            RiskLevel        `json:"risk"`
+	Capabilities    []Capability     `json:"capabilities,omitempty"`
+	Description     string           `json:"description,omitempty"`
+	Version         string           `json:"version,omitempty"`
+	OwnerUserID     string           `json:"owner_user_id,omitempty"`
+	Visibility      string           `json:"visibility,omitempty"`
+	PolicyProfile   string           `json:"policy_profile,omitempty"`
+	InputSchemaHash string           `json:"input_schema_hash,omitempty"`
 }

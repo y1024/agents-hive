@@ -34,6 +34,8 @@ import type {
   QualityCandidateUpdateRequest,
   QualityCandidatesResponse,
   QualityCandidateRecord,
+  QualityWorkbenchDashboardFilter,
+  QualityWorkbenchFilter,
   QualityWorkbenchClustersResponse,
   GroupingRule,
   GroupingRulePreview,
@@ -70,11 +72,14 @@ import type {
   OptimizationSuggestionsResponse,
   OptimizationSuggestionStatus,
   OptimizationRollout,
+  OptimizationRolloutMutationResponse,
   OptimizationApprovalAction,
   OptimizationApprovalRecord,
+  OptimizationApprovalMutationResponse,
   OptimizationApprovalRole,
   OptimizationApprovalsResponse,
   OptimizationApprovalSubjectType,
+  OptimizationSuggestionMutationResponse,
   RollbackAlertResponse,
   RollbackAlertThresholds,
   RollbackAlertsResponse,
@@ -118,8 +123,8 @@ export interface NodeClient {
   health(): Promise<Health>;
   saveConfig(): Promise<{ success: boolean; message: string; path: string }>;
   // Model
-  listModels(): Promise<{ models: ModelInfo[]; active: string }>;
-  switchModel(name: string): Promise<void>;
+  listModels(sessionId?: string): Promise<{ models: ModelInfo[]; active: string }>;
+  switchModel(sessionId: string, name: string): Promise<void>;
   // 远程 ACP Agent
   listRemoteAgents(): Promise<RemoteAgentConfig[]>;
   connectRemoteAgent(cfg: RemoteAgentConfig): Promise<{ name: string; status: string }>;
@@ -192,23 +197,23 @@ export interface NodeClient {
   adminCreateQualityCandidate(body: QualityCandidateCreateRequest): Promise<QualityCandidateRecord>;
   adminUpdateQualityCandidate(id: string, body: QualityCandidateUpdateRequest): Promise<QualityCandidateRecord>;
   adminExportQualityCandidate(id: string): Promise<QualityCandidateRecord['golden_case']>;
-  adminListQualityWorkbenchClusters(filter?: { status?: QualityCandidateStatus | ''; route?: string; page?: number; size?: number }): Promise<QualityWorkbenchClustersResponse>;
+  adminListQualityWorkbenchClusters(filter?: QualityWorkbenchFilter): Promise<QualityWorkbenchClustersResponse>;
   adminPreviewGroupingRules(): Promise<GroupingRulePreview>;
   adminListGroupingRules(): Promise<GroupingRulesResponse>;
   adminUpsertGroupingRule(id: string, rule: GroupingRule): Promise<GroupingRule>;
   adminDeleteGroupingRule(id: string): Promise<void>;
   adminPlanReplayFanout(body: { target_ids: string[]; limit?: number }): Promise<ReplayFanoutPlan>;
   adminCompareVersionMatrix(body: VersionMatrixInput): Promise<VersionDiff>;
-  adminCreateReplayJobs(body: { kind: string; target_ids: string[]; max_attempt?: number }): Promise<{ batch_id: string; jobs: ReplayJob[] }>;
-  adminListReplayJobs(filter?: { batch_id?: string; status?: string; page?: number; size?: number }): Promise<ReplayJobsResponse>;
+  adminCreateReplayJobs(body: { kind: string; target_ids: string[]; max_attempt?: number } & Pick<QualityWorkbenchFilter, 'domain_id' | 'source_kind' | 'source_name'>): Promise<{ batch_id: string; jobs: ReplayJob[] }>;
+  adminListReplayJobs(filter?: { batch_id?: string; status?: string; kind?: string; page?: number; size?: number } & Pick<QualityWorkbenchFilter, 'domain_id' | 'source_kind' | 'source_name'>): Promise<ReplayJobsResponse>;
   adminCancelReplayJob(id: string): Promise<ReplayJob>;
   adminRunReplayJob(id: string): Promise<ReplayJob>;
-  adminCreateBatchEval(body: { mode: string; since?: string; baseline_run_id?: string; cases_dir?: string }): Promise<BatchEvalRun>;
-  adminListBatchEvals(): Promise<BatchEvalRunsResponse>;
+  adminCreateBatchEval(body: { mode: string; suite_type?: string; since?: string; baseline_run_id?: string; cases_dir?: string } & Pick<QualityWorkbenchFilter, 'domain_id' | 'source_kind' | 'source_name'>): Promise<BatchEvalRun>;
+  adminListBatchEvals(filter?: { batch_id?: string; status?: string; kind?: string; page?: number; size?: number } & Pick<QualityWorkbenchFilter, 'domain_id' | 'source_kind' | 'source_name'>): Promise<BatchEvalRunsResponse>;
   adminListQualityReports(): Promise<QualityReportsResponse>;
   adminGenerateQualityReport(weekStart: string): Promise<QualityReport>;
-  adminGetQualityDashboardSnapshot(filter?: { since?: string; until?: string }): Promise<QualityDashboardSnapshot>;
-  adminGetQualityDashboardSeries(filter?: { since?: string; until?: string }): Promise<{ items: QualityDashboardSeriesPoint[] }>;
+  adminGetQualityDashboardSnapshot(filter?: QualityWorkbenchDashboardFilter): Promise<QualityDashboardSnapshot>;
+  adminGetQualityDashboardSeries(filter?: QualityWorkbenchDashboardFilter): Promise<{ items: QualityDashboardSeriesPoint[] }>;
   adminGetMemoryGovernance(limit?: number, filter?: MemoryAdminFilter): Promise<MemoryGovernanceStats>;
   adminPruneMemoryGovernance(options?: { dryRun?: boolean; minConfidence?: number; maxMemories?: number; limit?: number } & MemoryAdminFilter): Promise<MemoryPruneResponse>;
   adminExportMemory(options?: MemoryAdminFilter): Promise<MemoryExportDocument>;
@@ -347,12 +352,13 @@ export class LocalNodeClient implements NodeClient {
   }
 
   // Model
-  listModels(): Promise<{ models: ModelInfo[]; active: string }> {
-    return this.client.get('/api/v1/models');
+  listModels(sessionId?: string): Promise<{ models: ModelInfo[]; active: string }> {
+    const params = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+    return this.client.get(`/api/v1/models${params}`);
   }
 
-  switchModel(name: string): Promise<void> {
-    return this.client.put('/api/v1/model', { name });
+  switchModel(sessionId: string, name: string): Promise<void> {
+    return this.client.put('/api/v1/model', { name, session_id: sessionId });
   }
 
   // 远程 ACP Agent — 通过 Gateway RPC 调用
@@ -625,13 +631,14 @@ export class LocalNodeClient implements NodeClient {
     return this.client.get(`/api/v1/admin/quality/candidates/${encodeURIComponent(id)}/golden-case`);
   }
 
-  adminListQualityWorkbenchClusters(filter: { status?: QualityCandidateStatus | ''; route?: string; page?: number; size?: number } = {}): Promise<QualityWorkbenchClustersResponse> {
+  adminListQualityWorkbenchClusters(filter: QualityWorkbenchFilter = {}): Promise<QualityWorkbenchClustersResponse> {
     const params = new URLSearchParams({
       page: String(filter.page ?? 1),
       size: String(filter.size ?? 50),
     });
     if (filter.status) params.set('status', filter.status);
     if (filter.route) params.set('route', filter.route);
+    addQualityWorkbenchAttributionParams(params, filter);
     return this.client.get(`/api/v1/admin/quality-workbench/clusters?${params}`);
   }
 
@@ -659,17 +666,19 @@ export class LocalNodeClient implements NodeClient {
     return this.client.post('/api/v1/admin/quality-workbench/version-diff', body);
   }
 
-  adminCreateReplayJobs(body: { kind: string; target_ids: string[]; max_attempt?: number }): Promise<{ batch_id: string; jobs: ReplayJob[] }> {
+  adminCreateReplayJobs(body: { kind: string; target_ids: string[]; max_attempt?: number } & Pick<QualityWorkbenchFilter, 'domain_id' | 'source_kind' | 'source_name'>): Promise<{ batch_id: string; jobs: ReplayJob[] }> {
     return this.client.post('/api/v1/admin/quality-workbench/replays', body);
   }
 
-  adminListReplayJobs(filter: { batch_id?: string; status?: string; page?: number; size?: number } = {}): Promise<ReplayJobsResponse> {
+  adminListReplayJobs(filter: { batch_id?: string; status?: string; kind?: string; page?: number; size?: number } & Pick<QualityWorkbenchFilter, 'domain_id' | 'source_kind' | 'source_name'> = {}): Promise<ReplayJobsResponse> {
     const params = new URLSearchParams({
       page: String(filter.page ?? 1),
       size: String(filter.size ?? 50),
     });
     if (filter.batch_id) params.set('batch_id', filter.batch_id);
+    if (filter.kind) params.set('kind', filter.kind);
     if (filter.status) params.set('status', filter.status);
+    addQualityWorkbenchAttributionParams(params, filter);
     return this.client.get(`/api/v1/admin/quality-workbench/replays?${params}`);
   }
 
@@ -681,12 +690,20 @@ export class LocalNodeClient implements NodeClient {
     return this.client.post(`/api/v1/admin/quality-workbench/replays/${encodeURIComponent(id)}/run`);
   }
 
-  adminCreateBatchEval(body: { mode: string; since?: string; baseline_run_id?: string; cases_dir?: string }): Promise<BatchEvalRun> {
+  adminCreateBatchEval(body: { mode: string; suite_type?: string; since?: string; baseline_run_id?: string; cases_dir?: string } & Pick<QualityWorkbenchFilter, 'domain_id' | 'source_kind' | 'source_name'>): Promise<BatchEvalRun> {
     return this.client.post('/api/v1/admin/quality-workbench/batch-evals', body);
   }
 
-  adminListBatchEvals(): Promise<BatchEvalRunsResponse> {
-    return this.client.get('/api/v1/admin/quality-workbench/batch-evals');
+  adminListBatchEvals(filter: { batch_id?: string; status?: string; kind?: string; page?: number; size?: number } & Pick<QualityWorkbenchFilter, 'domain_id' | 'source_kind' | 'source_name'> = {}): Promise<BatchEvalRunsResponse> {
+    const params = new URLSearchParams({
+      page: String(filter.page ?? 1),
+      size: String(filter.size ?? 50),
+    });
+    if (filter.batch_id) params.set('batch_id', filter.batch_id);
+    if (filter.kind) params.set('kind', filter.kind);
+    if (filter.status) params.set('status', filter.status);
+    addQualityWorkbenchAttributionParams(params, filter);
+    return this.client.get(`/api/v1/admin/quality-workbench/batch-evals?${params}`);
   }
 
   adminListQualityReports(): Promise<QualityReportsResponse> {
@@ -697,17 +714,19 @@ export class LocalNodeClient implements NodeClient {
     return this.client.post('/api/v1/admin/quality-workbench/reports/generate', { week_start: weekStart });
   }
 
-  adminGetQualityDashboardSnapshot(filter: { since?: string; until?: string } = {}): Promise<QualityDashboardSnapshot> {
+  adminGetQualityDashboardSnapshot(filter: QualityWorkbenchDashboardFilter = {}): Promise<QualityDashboardSnapshot> {
     const params = new URLSearchParams();
     if (filter.since) params.set('since', filter.since);
     if (filter.until) params.set('until', filter.until);
+    addQualityWorkbenchAttributionParams(params, filter);
     return this.client.get(`/api/v1/admin/quality-workbench/dashboard/snapshot?${params}`);
   }
 
-  adminGetQualityDashboardSeries(filter: { since?: string; until?: string } = {}): Promise<{ items: QualityDashboardSeriesPoint[] }> {
+  adminGetQualityDashboardSeries(filter: QualityWorkbenchDashboardFilter = {}): Promise<{ items: QualityDashboardSeriesPoint[] }> {
     const params = new URLSearchParams();
     if (filter.since) params.set('since', filter.since);
     if (filter.until) params.set('until', filter.until);
+    addQualityWorkbenchAttributionParams(params, filter);
     return this.client.get(`/api/v1/admin/quality-workbench/dashboard/series?${params}`);
   }
 
@@ -782,20 +801,24 @@ export class LocalNodeClient implements NodeClient {
     return this.client.get(`/api/v1/admin/optimization/suggestions?${params}`);
   }
 
-  adminApproveOptimizationSuggestion(id: string, note = ''): Promise<OptimizationReviewSuggestion> {
-    return this.client.post(`/api/v1/admin/optimization/suggestions/${encodeURIComponent(id)}/approve`, { note });
+  async adminApproveOptimizationSuggestion(id: string, note = ''): Promise<OptimizationReviewSuggestion> {
+    const res = await this.client.post<OptimizationReviewSuggestion | OptimizationSuggestionMutationResponse>(`/api/v1/admin/optimization/suggestions/${encodeURIComponent(id)}/approve`, { note });
+    return unwrapOptimizationSuggestionResponse(res);
   }
 
-  adminRejectOptimizationSuggestion(id: string, note = ''): Promise<OptimizationReviewSuggestion> {
-    return this.client.post(`/api/v1/admin/optimization/suggestions/${encodeURIComponent(id)}/reject`, { note });
+  async adminRejectOptimizationSuggestion(id: string, note = ''): Promise<OptimizationReviewSuggestion> {
+    const res = await this.client.post<OptimizationReviewSuggestion | OptimizationSuggestionMutationResponse>(`/api/v1/admin/optimization/suggestions/${encodeURIComponent(id)}/reject`, { note });
+    return unwrapOptimizationSuggestionResponse(res);
   }
 
-  adminApplyOptimizationSuggestion(id: string): Promise<OptimizationReviewSuggestion> {
-    return this.client.post(`/api/v1/admin/optimization/suggestions/${encodeURIComponent(id)}/apply`);
+  async adminApplyOptimizationSuggestion(id: string): Promise<OptimizationReviewSuggestion> {
+    const res = await this.client.post<OptimizationReviewSuggestion | OptimizationSuggestionMutationResponse>(`/api/v1/admin/optimization/suggestions/${encodeURIComponent(id)}/apply`);
+    return unwrapOptimizationSuggestionResponse(res);
   }
 
-  adminRollbackOptimizationSuggestion(id: string): Promise<OptimizationRollout> {
-    return this.client.post(`/api/v1/admin/optimization/suggestions/${encodeURIComponent(id)}/rollback`);
+  async adminRollbackOptimizationSuggestion(id: string): Promise<OptimizationRollout> {
+    const res = await this.client.post<OptimizationRollout | OptimizationRolloutMutationResponse>(`/api/v1/admin/optimization/suggestions/${encodeURIComponent(id)}/rollback`);
+    return unwrapOptimizationRolloutResponse(res);
   }
 
   adminComputeEvalDiff(body: { baseline: EvalRun; treatment: EvalRun }): Promise<EvalDiff> {
@@ -826,8 +849,9 @@ export class LocalNodeClient implements NodeClient {
     return this.client.get(`/api/v1/admin/optimization/approvals${query ? `?${query}` : ''}`);
   }
 
-  adminCreateOptimizationApproval(body: { subject_id: string; subject_type: OptimizationApprovalSubjectType; action: OptimizationApprovalAction; reviewer_role: OptimizationApprovalRole; note?: string }): Promise<OptimizationApprovalRecord> {
-    return this.client.post('/api/v1/admin/optimization/approvals', body);
+  async adminCreateOptimizationApproval(body: { subject_id: string; subject_type: OptimizationApprovalSubjectType; action: OptimizationApprovalAction; reviewer_role: OptimizationApprovalRole; note?: string }): Promise<OptimizationApprovalRecord> {
+    const res = await this.client.post<OptimizationApprovalRecord | OptimizationApprovalMutationResponse>('/api/v1/admin/optimization/approvals', body);
+    return unwrapOptimizationApprovalResponse(res);
   }
 
   adminEvaluateRollbackAlert(body: { eval_diff: EvalDiff; thresholds: RollbackAlertThresholds }): Promise<RollbackAlertResponse> {
@@ -854,6 +878,42 @@ function memoryAdminParams(options: MemoryAdminFilter = {}): URLSearchParams {
   if (kind) params.set('memory_kind', kind);
   if (options.limit != null) params.set('limit', String(options.limit));
   return params;
+}
+
+function addQualityWorkbenchAttributionParams(params: URLSearchParams, filter: QualityWorkbenchDashboardFilter): void {
+  if (filter.domain_id) params.set('domain_id', filter.domain_id);
+  if (filter.source_kind) params.set('source_kind', filter.source_kind);
+  if (filter.source_name) params.set('source_name', filter.source_name);
+  if (filter.failure_type) params.set('failure_type', filter.failure_type);
+}
+
+function unwrapOptimizationSuggestionResponse(res: OptimizationReviewSuggestion | OptimizationSuggestionMutationResponse): OptimizationReviewSuggestion {
+  if (isObjectWithKey<OptimizationSuggestionMutationResponse>(res, 'suggestion')) {
+    return withCandidate(res.suggestion, res.candidate);
+  }
+  return res;
+}
+
+function unwrapOptimizationRolloutResponse(res: OptimizationRollout | OptimizationRolloutMutationResponse): OptimizationRollout {
+  if (isObjectWithKey<OptimizationRolloutMutationResponse>(res, 'rollout')) {
+    return withCandidate(res.rollout, res.candidate);
+  }
+  return res;
+}
+
+function unwrapOptimizationApprovalResponse(res: OptimizationApprovalRecord | OptimizationApprovalMutationResponse): OptimizationApprovalRecord {
+  if (isObjectWithKey<OptimizationApprovalMutationResponse>(res, 'approval')) {
+    return withCandidate(res.approval, res.candidate);
+  }
+  return res;
+}
+
+function withCandidate<T extends { candidate?: QualityCandidateRecord | null }>(value: T, candidate?: QualityCandidateRecord | null): T {
+  return candidate === undefined ? value : { ...value, candidate };
+}
+
+function isObjectWithKey<T extends object>(value: unknown, key: keyof T): value is T {
+  return typeof value === 'object' && value !== null && key in value;
 }
 
 function memoryPromotionCandidateParams(options: MemoryPromotionCandidateFilter = {}): URLSearchParams {

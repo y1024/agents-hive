@@ -3,12 +3,15 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
 	"go.uber.org/zap"
 
 	"github.com/chef-guo/agents-hive/internal/mcphost"
+	"github.com/chef-guo/agents-hive/internal/router"
+	"github.com/chef-guo/agents-hive/internal/toolruntime"
 )
 
 func TestRegisterBuiltinToolsRegistersToolSearch(t *testing.T) {
@@ -64,17 +67,20 @@ func TestToolSearchFindsRegisteredToolsWithoutMutatingRegistry(t *testing.T) {
 	var out struct {
 		Count   int `json:"count"`
 		Results []struct {
-			Name              string  `json:"name"`
-			Description       string  `json:"description"`
-			DangerLevel       string  `json:"danger_level"`
-			RequiresApproval  bool    `json:"requires_approval"`
-			IsConcurrencySafe bool    `json:"is_concurrency_safe"`
-			Kind              string  `json:"kind"`
-			Domain            string  `json:"domain"`
-			Source            string  `json:"source"`
-			Invocation        string  `json:"invocation"`
-			RouteStatus       string  `json:"route_status"`
-			Score             float64 `json:"score"`
+			Name               string  `json:"name"`
+			Description        string  `json:"description"`
+			DangerLevel        string  `json:"danger_level"`
+			RequiresApproval   bool    `json:"requires_approval"`
+			MayRequireApproval bool    `json:"may_require_approval"`
+			IsConcurrencySafe  bool    `json:"is_concurrency_safe"`
+			Kind               string  `json:"kind"`
+			Domain             string  `json:"domain"`
+			Source             string  `json:"source"`
+			Risk               string  `json:"risk"`
+			Visibility         string  `json:"visibility"`
+			Invocation         string  `json:"invocation"`
+			RouteStatus        string  `json:"route_status"`
+			Score              float64 `json:"score"`
 		} `json:"results"`
 	}
 	if err := json.Unmarshal([]byte(result.DecodeContent()), &out); err != nil {
@@ -96,6 +102,9 @@ func TestToolSearchFindsRegisteredToolsWithoutMutatingRegistry(t *testing.T) {
 	if got.RequiresApproval {
 		t.Fatal("read-only safe tool should not require approval")
 	}
+	if got.MayRequireApproval {
+		t.Fatal("read-only safe tool should not be marked as possibly requiring approval")
+	}
 	if !got.IsConcurrencySafe {
 		t.Fatal("expected concurrency-safe metadata")
 	}
@@ -104,6 +113,12 @@ func TestToolSearchFindsRegisteredToolsWithoutMutatingRegistry(t *testing.T) {
 	}
 	if got.Source != "custom_dir" {
 		t.Fatalf("source = %q, want custom_dir", got.Source)
+	}
+	if got.Risk != "read_only" {
+		t.Fatalf("risk = %q, want read_only", got.Risk)
+	}
+	if got.Visibility != "system" {
+		t.Fatalf("visibility = %q, want system", got.Visibility)
 	}
 	if got.Invocation != "direct_tool" {
 		t.Fatalf("invocation = %q, want direct_tool", got.Invocation)
@@ -138,13 +153,16 @@ func TestToolSearchExposesExternalMCPRiskMetadata(t *testing.T) {
 
 	var out struct {
 		Results []struct {
-			Name             string `json:"name"`
-			DangerLevel      string `json:"danger_level"`
-			RequiresApproval bool   `json:"requires_approval"`
-			Kind             string `json:"kind"`
-			Domain           string `json:"domain"`
-			Source           string `json:"source"`
-			Invocation       string `json:"invocation"`
+			Name               string `json:"name"`
+			DangerLevel        string `json:"danger_level"`
+			RequiresApproval   bool   `json:"requires_approval"`
+			MayRequireApproval bool   `json:"may_require_approval"`
+			Kind               string `json:"kind"`
+			Domain             string `json:"domain"`
+			Source             string `json:"source"`
+			Risk               string `json:"risk"`
+			Visibility         string `json:"visibility"`
+			Invocation         string `json:"invocation"`
 		} `json:"results"`
 	}
 	if err := json.Unmarshal([]byte(result.DecodeContent()), &out); err != nil {
@@ -160,11 +178,17 @@ func TestToolSearchExposesExternalMCPRiskMetadata(t *testing.T) {
 	if got.DangerLevel != "dangerous" {
 		t.Fatalf("danger_level = %q, want dangerous", got.DangerLevel)
 	}
-	if !got.RequiresApproval {
-		t.Fatal("external MCP tool should require approval metadata")
+	if got.RequiresApproval {
+		t.Fatal("blocked external MCP tool should not imply current approval can make it callable")
+	}
+	if !got.MayRequireApproval {
+		t.Fatal("external MCP tool should expose may_require_approval metadata")
 	}
 	if got.Kind != "mcp_tool" || got.Domain != "github" || got.Source != "mcp_server" || got.Invocation != "direct_tool" {
 		t.Fatalf("unexpected typed metadata: %+v", got)
+	}
+	if got.Risk != "destructive" || got.Visibility != "workspace" {
+		t.Fatalf("unexpected risk/visibility metadata: %+v", got)
 	}
 }
 
@@ -189,13 +213,16 @@ func TestToolSearchExposesTrustedRemoteReadOnlyMetadata(t *testing.T) {
 
 	var out struct {
 		Results []struct {
-			Name             string `json:"name"`
-			DangerLevel      string `json:"danger_level"`
-			RequiresApproval bool   `json:"requires_approval"`
-			Kind             string `json:"kind"`
-			Domain           string `json:"domain"`
-			Source           string `json:"source"`
-			Invocation       string `json:"invocation"`
+			Name               string `json:"name"`
+			DangerLevel        string `json:"danger_level"`
+			RequiresApproval   bool   `json:"requires_approval"`
+			MayRequireApproval bool   `json:"may_require_approval"`
+			Kind               string `json:"kind"`
+			Domain             string `json:"domain"`
+			Source             string `json:"source"`
+			Risk               string `json:"risk"`
+			Visibility         string `json:"visibility"`
+			Invocation         string `json:"invocation"`
 		} `json:"results"`
 	}
 	if err := json.Unmarshal([]byte(result.DecodeContent()), &out); err != nil {
@@ -211,8 +238,14 @@ func TestToolSearchExposesTrustedRemoteReadOnlyMetadata(t *testing.T) {
 	if got.DangerLevel != "read_only" || got.RequiresApproval {
 		t.Fatalf("trusted remote read tool metadata wrong: %+v", got)
 	}
+	if got.MayRequireApproval {
+		t.Fatalf("trusted remote read tool should not expose may_require_approval: %+v", got)
+	}
 	if got.Kind != "mcp_tool" || got.Domain != "metamcp" || got.Source != "mcp_server" || got.Invocation != "direct_tool" {
 		t.Fatalf("unexpected typed metadata: %+v", got)
+	}
+	if got.Risk != "read_only" || got.Visibility != "workspace" {
+		t.Fatalf("unexpected risk/visibility metadata: %+v", got)
 	}
 }
 
@@ -275,6 +308,7 @@ func TestToolSearchFeishuApprovalMetadataIsActionAware(t *testing.T) {
 			Name                string   `json:"name"`
 			DangerLevel         string   `json:"danger_level"`
 			RequiresApproval    bool     `json:"requires_approval"`
+			MayRequireApproval  bool     `json:"may_require_approval"`
 			DangerousActions    []string `json:"dangerous_actions"`
 			ActionField         string   `json:"action_field"`
 			ReadOnlyActions     []string `json:"read_only_actions"`
@@ -294,6 +328,9 @@ func TestToolSearchFeishuApprovalMetadataIsActionAware(t *testing.T) {
 	}
 	if got.RequiresApproval {
 		t.Fatalf("feishu_api should not be blanket approval-required: %+v", got)
+	}
+	if !got.MayRequireApproval {
+		t.Fatalf("feishu_api should expose possible approval for write/send branches: %+v", got)
 	}
 	if got.ActionField != "action" {
 		t.Fatalf("action_field = %q, want action", got.ActionField)
@@ -316,13 +353,14 @@ func TestToolSearchMixedOperationApprovalMetadataIsActionAware(t *testing.T) {
 
 	var out struct {
 		Results []struct {
-			Name              string   `json:"name"`
-			DangerLevel       string   `json:"danger_level"`
-			RequiresApproval  bool     `json:"requires_approval"`
-			DangerousActions  []string `json:"dangerous_actions"`
-			ActionField       string   `json:"action_field"`
-			ReadOnlyActions   []string `json:"read_only_actions"`
-			LocalWriteActions []string `json:"local_write_actions"`
+			Name               string   `json:"name"`
+			DangerLevel        string   `json:"danger_level"`
+			RequiresApproval   bool     `json:"requires_approval"`
+			MayRequireApproval bool     `json:"may_require_approval"`
+			DangerousActions   []string `json:"dangerous_actions"`
+			ActionField        string   `json:"action_field"`
+			ReadOnlyActions    []string `json:"read_only_actions"`
+			LocalWriteActions  []string `json:"local_write_actions"`
 		} `json:"results"`
 	}
 	if err := json.Unmarshal([]byte(result.DecodeContent()), &out); err != nil {
@@ -334,6 +372,9 @@ func TestToolSearchMixedOperationApprovalMetadataIsActionAware(t *testing.T) {
 	got := out.Results[0]
 	if got.DangerLevel != "mixed" || got.RequiresApproval {
 		t.Fatalf("memory should be mixed without blanket approval, got %+v", got)
+	}
+	if !got.MayRequireApproval {
+		t.Fatalf("memory should expose possible approval for write/delete branches: %+v", got)
 	}
 	if got.ActionField != "operation" {
 		t.Fatalf("action_field = %q, want operation", got.ActionField)
@@ -358,10 +399,11 @@ func TestToolSearchUsesUnifiedPolicyForCustomAndBuiltinTools(t *testing.T) {
 
 	var out struct {
 		Results []struct {
-			Name             string `json:"name"`
-			RouteStatus      string `json:"route_status"`
-			CallableNow      bool   `json:"callable_now"`
-			RequiresApproval bool   `json:"requires_approval"`
+			Name               string `json:"name"`
+			RouteStatus        string `json:"route_status"`
+			CallableNow        bool   `json:"callable_now"`
+			RequiresApproval   bool   `json:"requires_approval"`
+			MayRequireApproval bool   `json:"may_require_approval"`
 		} `json:"results"`
 	}
 	if err := json.Unmarshal([]byte(result.DecodeContent()), &out); err != nil {
@@ -369,26 +411,61 @@ func TestToolSearchUsesUnifiedPolicyForCustomAndBuiltinTools(t *testing.T) {
 	}
 
 	byName := map[string]struct {
-		RouteStatus      string
-		CallableNow      bool
-		RequiresApproval bool
+		RouteStatus        string
+		CallableNow        bool
+		RequiresApproval   bool
+		MayRequireApproval bool
 	}{}
 	for _, hit := range out.Results {
 		byName[hit.Name] = struct {
-			RouteStatus      string
-			CallableNow      bool
-			RequiresApproval bool
-		}{hit.RouteStatus, hit.CallableNow, hit.RequiresApproval}
+			RouteStatus        string
+			CallableNow        bool
+			RequiresApproval   bool
+			MayRequireApproval bool
+		}{hit.RouteStatus, hit.CallableNow, hit.RequiresApproval, hit.MayRequireApproval}
 	}
 
-	if got := byName["read_file"]; got.RouteStatus != "callable_read_only" || !got.CallableNow || got.RequiresApproval {
+	if got := byName["read_file"]; got.RouteStatus != "callable_read_only" || !got.CallableNow || got.RequiresApproval || got.MayRequireApproval {
 		t.Fatalf("read_file metadata = %+v", got)
 	}
-	if got := byName["project_status"]; got.RouteStatus != "callable_read_only" || !got.CallableNow || got.RequiresApproval {
+	if got := byName["project_status"]; got.RouteStatus != "callable_read_only" || !got.CallableNow || got.RequiresApproval || got.MayRequireApproval {
 		t.Fatalf("project_status metadata = %+v", got)
 	}
-	if got := byName["opaque_candidate"]; (got.RouteStatus != "blocked_unknown" && got.RouteStatus != "blocked_dangerous") || got.CallableNow || !got.RequiresApproval {
+	if got := byName["opaque_candidate"]; (got.RouteStatus != "blocked_unknown" && got.RouteStatus != "blocked_dangerous") || got.CallableNow || got.RequiresApproval || !got.MayRequireApproval {
 		t.Fatalf("opaque_candidate metadata = %+v", got)
+	}
+}
+
+func TestToolSearchDoesNotChangeRouteDecisionAllowedTools(t *testing.T) {
+	logger := zap.NewNop()
+	host := mcphost.NewHost(logger)
+	registerToolSearch(host, logger)
+	host.RegisterTool(mcphost.ToolDefinition{Name: "read_file", Core: true, Description: "读取文件"}, nil)
+	host.RegisterTool(mcphost.ToolDefinition{Name: "danger_delete", Description: "delete production data"}, nil)
+
+	profiles := toolSearchProfilesForTest(host.ListTools())
+	before := router.BuildRouteDecision(router.IntentFrame{Kind: router.IntentRead}, profiles)
+	if !reflect.DeepEqual(before.AllowedTools, []string{"read_file"}) {
+		t.Fatalf("unexpected baseline AllowedTools = %+v", before.AllowedTools)
+	}
+
+	result, err := host.ExecuteTool(context.Background(), "tool_search", []byte(`{"query":"delete","limit":5}`))
+	if err != nil {
+		t.Fatalf("ExecuteTool(tool_search): %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool_search error: %s", result.DecodeContent())
+	}
+
+	after := router.BuildRouteDecision(router.IntentFrame{Kind: router.IntentRead}, toolSearchProfilesForTest(host.ListTools()))
+	if !reflect.DeepEqual(after.AllowedTools, before.AllowedTools) {
+		t.Fatalf("tool_search must not change AllowedTools: before=%+v after=%+v content=%s", before.AllowedTools, after.AllowedTools, result.DecodeContent())
+	}
+	if !reflect.DeepEqual(after.VisibleOnly, before.VisibleOnly) {
+		t.Fatalf("tool_search must not change VisibleOnly discovery tools: before=%+v after=%+v", before.VisibleOnly, after.VisibleOnly)
+	}
+	if after.Mode != before.Mode || after.Reason != before.Reason {
+		t.Fatalf("tool_search changed route decision: before=%+v after=%+v", before, after)
 	}
 }
 
@@ -438,6 +515,8 @@ func TestToolSearchTypedMetadataPhase0Kinds(t *testing.T) {
 			Kind        string `json:"kind"`
 			Domain      string `json:"domain"`
 			Source      string `json:"source"`
+			Risk        string `json:"risk"`
+			Visibility  string `json:"visibility"`
 			Invocation  string `json:"invocation"`
 			RouteStatus string `json:"route_status"`
 		} `json:"results"`
@@ -450,6 +529,8 @@ func TestToolSearchTypedMetadataPhase0Kinds(t *testing.T) {
 		Kind        string
 		Domain      string
 		Source      string
+		Risk        string
+		Visibility  string
 		Invocation  string
 		RouteStatus string
 	}{}
@@ -458,16 +539,18 @@ func TestToolSearchTypedMetadataPhase0Kinds(t *testing.T) {
 			Kind        string
 			Domain      string
 			Source      string
+			Risk        string
+			Visibility  string
 			Invocation  string
 			RouteStatus string
-		}{hit.Kind, hit.Domain, hit.Source, hit.Invocation, hit.RouteStatus}
+		}{hit.Kind, hit.Domain, hit.Source, hit.Risk, hit.Visibility, hit.Invocation, hit.RouteStatus}
 	}
 
-	assertToolSearchMeta(t, byName, "tool_search", "builtin_tool", "discovery", "builtin", "discovery_only", "discovery_only")
-	assertToolSearchMeta(t, byName, "mcp-builder", "skill_workflow", "mcp_server_building", "local_skill", "skill_tool", "requires_matching_intent")
-	assertToolSearchMeta(t, byName, "github__create_issue", "mcp_tool", "github", "mcp_server", "direct_tool", "blocked_dangerous")
-	assertToolSearchMeta(t, byName, "project_status", "custom_tool", "custom", "custom_dir", "direct_tool", "blocked_unknown")
-	assertToolSearchMeta(t, byName, "opaque_candidate", "unknown", "unknown", "unknown", "discovery_only", "discovery_only")
+	assertToolSearchMeta(t, byName, "tool_search", "builtin_tool", "discovery", "builtin", "read_only", "system", "discovery_only", "discovery_only")
+	assertToolSearchMeta(t, byName, "mcp-builder", "skill_workflow", "mcp_server_building", "local_skill", "local_write", "system", "skill_tool", "requires_matching_intent")
+	assertToolSearchMeta(t, byName, "github__create_issue", "mcp_tool", "github", "mcp_server", "destructive", "workspace", "direct_tool", "blocked_dangerous")
+	assertToolSearchMeta(t, byName, "project_status", "custom_tool", "custom", "custom_dir", "unknown", "system", "direct_tool", "blocked_unknown")
+	assertToolSearchMeta(t, byName, "opaque_candidate", "unknown", "unknown", "unknown", "unknown", "system", "discovery_only", "discovery_only")
 }
 
 func TestToolSearchFindsToolsBySchemaEnumValues(t *testing.T) {
@@ -696,9 +779,11 @@ func assertToolSearchMeta(t *testing.T, got map[string]struct {
 	Kind        string
 	Domain      string
 	Source      string
+	Risk        string
+	Visibility  string
 	Invocation  string
 	RouteStatus string
-}, name, kind, domain, source, invocation, routeStatus string) {
+}, name, kind, domain, source, risk, visibility, invocation, routeStatus string) {
 	t.Helper()
 	meta, ok := got[name]
 	if !ok {
@@ -713,12 +798,26 @@ func assertToolSearchMeta(t *testing.T, got map[string]struct {
 	if meta.Source != source {
 		t.Fatalf("%s source = %q, want %q", name, meta.Source, source)
 	}
+	if meta.Risk != risk {
+		t.Fatalf("%s risk = %q, want %q", name, meta.Risk, risk)
+	}
+	if meta.Visibility != visibility {
+		t.Fatalf("%s visibility = %q, want %q", name, meta.Visibility, visibility)
+	}
 	if meta.Invocation != invocation {
 		t.Fatalf("%s invocation = %q, want %q", name, meta.Invocation, invocation)
 	}
 	if meta.RouteStatus != routeStatus {
 		t.Fatalf("%s route_status = %q, want %q", name, meta.RouteStatus, routeStatus)
 	}
+}
+
+func toolSearchProfilesForTest(defs []mcphost.ToolDefinition) []router.ToolProfile {
+	profiles := make([]router.ToolProfile, 0, len(defs))
+	for _, def := range defs {
+		profiles = append(profiles, toolruntime.DescriptorFromDefinition(def).Profile)
+	}
+	return profiles
 }
 
 func containsStringForToolTest(items []string, want string) bool {

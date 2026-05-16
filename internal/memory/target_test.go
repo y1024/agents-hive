@@ -58,6 +58,32 @@ func TestNormalizeMemoryRecordAddsTargetIDForSkillScope(t *testing.T) {
 	}
 }
 
+func TestNormalizeMemoryRecordCarriesDomainAndSource(t *testing.T) {
+	rec := &MemoryRecord{
+		Type:     MemoryTypeProcedural,
+		Content:  "domain scoped",
+		Metadata: json.RawMessage(`{"target":{"target_scope":"domain","visibility":"private"}}`),
+	}
+
+	err := NormalizeMemoryRecord(rec, RuntimeContext{
+		UserID:     "user-1",
+		DomainID:   "customer_service",
+		SourceKind: "workflow",
+		SourceName: "case_triage",
+	})
+
+	if err != nil {
+		t.Fatalf("NormalizeMemoryRecord error = %v", err)
+	}
+	target := DecodeMemoryTarget(rec.Metadata, rec.Type, rec.UserID)
+	if target.Scope != TargetScopeDomain || target.DomainID != "customer_service" || target.ID != "customer_service" {
+		t.Fatalf("target = %+v, want customer_service domain target", target)
+	}
+	if target.SourceKind != "workflow" || target.SourceName != "case_triage" {
+		t.Fatalf("target source = %s/%s, want workflow/case_triage", target.SourceKind, target.SourceName)
+	}
+}
+
 func TestNormalizeMemoryRecordRejectsDirtyTarget(t *testing.T) {
 	rec := &MemoryRecord{
 		Type:     MemoryTypeUser,

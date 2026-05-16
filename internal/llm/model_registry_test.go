@@ -18,14 +18,14 @@ func TestModelRegistry_DefaultModels(t *testing.T) {
 		want    string // 期望的 Name 字段
 	}{
 		{
-			name:    "GPT-4o 默认存在",
-			modelID: "gpt-4o",
-			want:    "GPT-4o",
+			name:    "gpt-5 默认存在",
+			modelID: "gpt-5",
+			want:    "gpt-5",
 		},
 		{
-			name:    "GPT-4o Mini 默认存在",
-			modelID: "gpt-4o-mini",
-			want:    "GPT-4o Mini",
+			name:    "gpt-5 Mini 默认存在",
+			modelID: "gpt-5-mini",
+			want:    "gpt-5 Mini",
 		},
 		{
 			name:    "Claude 3.5 Sonnet 默认存在",
@@ -113,9 +113,9 @@ func TestModelRegistry_Register(t *testing.T) {
 		},
 		{
 			name:    "覆盖已有模型",
-			modelID: "gpt-4o",
+			modelID: "gpt-5",
 			meta: ModelMeta{
-				Name:          "GPT-4o Override",
+				Name:          "gpt-5 Override",
 				ContextWindow: 256000,
 				MaxOutput:     32768,
 				Capabilities: ModelCapabilities{
@@ -159,7 +159,7 @@ func TestModelRegistry_Get_NotFound(t *testing.T) {
 		},
 		{
 			name:    "相似但不完全匹配",
-			modelID: "gpt-4o-turbo",
+			modelID: "gpt-5-turbo",
 		},
 	}
 
@@ -205,9 +205,9 @@ func TestModelRegistry_BackwardCompat(t *testing.T) {
 		}()
 
 		// GetModelMeta 应从静态注册表返回
-		meta := GetModelMeta("gpt-4o")
-		require.NotNil(t, meta, "静态回退: gpt-4o 应存在")
-		assert.Equal(t, "GPT-4o", meta.Name)
+		meta := GetModelMeta("gpt-5")
+		require.NotNil(t, meta, "静态回退: gpt-5 应存在")
+		assert.Equal(t, "gpt-5", meta.Name)
 
 		// ListModelMetas 应返回静态注册表数据
 		listed := ListModelMetas()
@@ -237,9 +237,9 @@ func TestModelRegistry_BackwardCompat(t *testing.T) {
 		assert.Equal(t, "BC Test", meta.Name)
 
 		// 也能查到默认模型
-		meta2 := GetModelMeta("gpt-4o")
+		meta2 := GetModelMeta("gpt-5")
 		require.NotNil(t, meta2)
-		assert.Equal(t, "GPT-4o", meta2.Name)
+		assert.Equal(t, "gpt-5", meta2.Name)
 
 		// ListModelMetas 应包含默认模型 + 自定义模型
 		listed := ListModelMetas()

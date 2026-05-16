@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -16,16 +17,18 @@ import (
 	"github.com/chef-guo/agents-hive/internal/auth"
 	"github.com/chef-guo/agents-hive/internal/mcphost"
 	"github.com/chef-guo/agents-hive/internal/skills"
+	"github.com/chef-guo/agents-hive/internal/toolruntime"
 )
 
 // --- 测试替身 ---------------------------------------------------------------
 
 // fakeEmitter 把测试期望塞进来：Action 决定 handler 如何分支。
 type fakeEmitter struct {
-	mu     sync.Mutex
-	action string
-	err    error
-	calls  []mcphost.HITLInputRequest
+	mu          sync.Mutex
+	action      string
+	err         error
+	nilResponse bool
+	calls       []mcphost.HITLInputRequest
 }
 
 func (f *fakeEmitter) EmitInputRequest(ctx context.Context, req mcphost.HITLInputRequest) (*mcphost.HITLInputResponse, error) {
@@ -34,6 +37,9 @@ func (f *fakeEmitter) EmitInputRequest(ctx context.Context, req mcphost.HITLInpu
 	f.calls = append(f.calls, req)
 	if f.err != nil {
 		return nil, f.err
+	}
+	if f.nilResponse {
+		return nil, nil
 	}
 	return &mcphost.HITLInputResponse{RequestID: req.ID, Action: f.action}, nil
 }
@@ -279,6 +285,78 @@ func TestSkillInstall_UserDeclinedApproval(t *testing.T) {
 	}
 	if reg.called {
 		t.Error("Registry must not be called on decline")
+	}
+}
+
+func TestSkillInstall_MissingApprovalChannelIsRecoverable(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	srv := newTestMarketplace(t)
+	defer srv.Close()
+	deps, reg, _ := newDeps(t, srv, nil, stubAdminChecker{admin: false})
+
+	ctx := auth.WithUser(context.Background(), &auth.User{ID: "alice", Role: "user", Status: "active"})
+	in, _ := json.Marshal(skillInstallInput{Name: "hello"})
+	res, _ := handleSkillInstall(ctx, deps, in)
+	if !res.IsError {
+		t.Fatal("expected recoverable error when approval channel is missing")
+	}
+	if !strings.Contains(res.DecodeContent(), toolruntime.RecoverableToolCallErrorMarker) {
+		t.Fatalf("content = %q, want recoverable marker", res.DecodeContent())
+	}
+	if !strings.Contains(res.DecodeContent(), "approval_channel_missing") {
+		t.Fatalf("content = %q, want approval_channel_missing", res.DecodeContent())
+	}
+	if reg.called {
+		t.Error("Registry must not be called without approval channel")
+	}
+}
+
+func TestSkillInstall_ApprovalRequestFailureIsRecoverable(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	srv := newTestMarketplace(t)
+	defer srv.Close()
+	emitter := &fakeEmitter{err: errors.New("broker down")}
+	deps, reg, _ := newDeps(t, srv, emitter, stubAdminChecker{admin: false})
+
+	ctx := auth.WithUser(context.Background(), &auth.User{ID: "alice", Role: "user", Status: "active"})
+	in, _ := json.Marshal(skillInstallInput{Name: "hello"})
+	res, _ := handleSkillInstall(ctx, deps, in)
+	if !res.IsError {
+		t.Fatal("expected recoverable error when approval request fails")
+	}
+	if !strings.Contains(res.DecodeContent(), toolruntime.RecoverableToolCallErrorMarker) {
+		t.Fatalf("content = %q, want recoverable marker", res.DecodeContent())
+	}
+	if !strings.Contains(res.DecodeContent(), "approval_request_failed") {
+		t.Fatalf("content = %q, want approval_request_failed", res.DecodeContent())
+	}
+	if reg.called {
+		t.Error("Registry must not be called when approval request fails")
+	}
+}
+
+func TestSkillInstall_NilApprovalResponseIsRecoverable(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	srv := newTestMarketplace(t)
+	defer srv.Close()
+	emitter := &fakeEmitter{nilResponse: true}
+	deps, reg, br := newDeps(t, srv, emitter, stubAdminChecker{admin: false})
+
+	ctx := auth.WithUser(context.Background(), &auth.User{ID: "alice", Role: "user", Status: "active"})
+	in, _ := json.Marshal(skillInstallInput{Name: "hello"})
+	res, _ := handleSkillInstall(ctx, deps, in)
+	if !res.IsError {
+		t.Fatal("expected recoverable error when approval response is nil")
+	}
+	if !strings.Contains(res.DecodeContent(), toolruntime.RecoverableToolCallErrorMarker) {
+		t.Fatalf("content = %q, want recoverable marker", res.DecodeContent())
+	}
+	lastEvt := br.events[len(br.events)-1].Payload.(skillInstallProgress)
+	if lastEvt.Reason == "user_declined" {
+		t.Fatal("nil approval response must not be treated as explicit user decline")
+	}
+	if reg.called {
+		t.Error("Registry must not be called without an approval response")
 	}
 }
 

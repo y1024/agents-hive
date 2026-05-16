@@ -8,6 +8,7 @@ import { useAppStore } from '../store/app';
 import { useWsStore } from '../store/ws';
 import { useChatStore } from '../store/chat';
 import { useAgentActivityStore } from '../store/agentActivity';
+import { useAuthStore } from '../store/auth';
 import { TagEditor } from '../components/session/TagEditor';
 import type { Session } from '../types/api';
 
@@ -205,6 +206,8 @@ export function Sidebar() {
   const createSession = useSessionStore((s) => s.createSession);
   const sidebarOpen = useAppStore((s) => s.sidebarOpen);
   const connected = useWsStore((s) => s.connected);
+  const authEnabled = useAuthStore((s) => s.authEnabled);
+  const user = useAuthStore((s) => s.user);
   const chatSessionId = useChatStore((s) => s.currentSessionId);
   const isBusy = useChatStore((s) => s.sending || s.streaming);
   const navigate = useNavigate();
@@ -366,14 +369,16 @@ export function Sidebar() {
             <NavItem key={item.path} item={item} sidebarOpen={sidebarOpen} t={t} />
           ))}
           {/* 管理后台入口 */}
-          <NavLink
-            to="/admin"
-            className="flex items-center gap-3 px-3 py-2 text-sm rounded-lg transition-colors text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-secondary)]"
-            title={!sidebarOpen ? t('nav.admin') : undefined}
-          >
-            <ExternalLink className="w-[18px] h-[18px] shrink-0" />
-            {sidebarOpen && <span>{t('nav.admin')}</span>}
-          </NavLink>
+          {(authEnabled === false || user?.role === 'admin') && (
+            <NavLink
+              to="/admin"
+              className="flex items-center gap-3 px-3 py-2 text-sm rounded-lg transition-colors text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-secondary)]"
+              title={!sidebarOpen ? t('nav.admin') : undefined}
+            >
+              <ExternalLink className="w-[18px] h-[18px] shrink-0" />
+              {sidebarOpen && <span>{t('nav.admin')}</span>}
+            </NavLink>
+          )}
         </nav>
 
         {/* 连接状态 */}

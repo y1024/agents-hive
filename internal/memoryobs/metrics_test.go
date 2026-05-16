@@ -43,6 +43,22 @@ func TestBuildProductionMetricsAggregatesSnapshotSeriesAndAlerts(t *testing.T) {
 	require.Contains(t, alertCodes(got.Alerts), "vector_space_mismatch")
 }
 
+func TestNormalizeProductionMetricsInitializesCollections(t *testing.T) {
+	since := time.Date(2026, 5, 9, 8, 0, 0, 0, time.UTC)
+	until := since.Add(time.Hour)
+
+	got := NormalizeProductionMetrics(ProductionMetrics{}, since, until, time.Hour)
+
+	require.Equal(t, "memory", got.Source)
+	require.Equal(t, 60, got.WindowMinutes)
+	require.NotNil(t, got.Snapshot.BacklogDepthByStatus)
+	require.NotNil(t, got.Snapshot.DropReasons)
+	require.NotNil(t, got.Snapshot.FallbackReasons)
+	require.NotNil(t, got.Snapshot.MismatchOperations)
+	require.NotNil(t, got.Series)
+	require.NotNil(t, got.Alerts)
+}
+
 func alertCodes(alerts []ProductionMetricAlert) []string {
 	codes := make([]string, 0, len(alerts))
 	for _, alert := range alerts {

@@ -21,6 +21,7 @@ export function ExecRulesSettings() {
 
   const [rules, setRules] = useState<ExecRule[]>([]);
   const [defaultPolicy, setDefaultPolicy] = useState<'allow' | 'ask' | 'deny'>('allow');
+  const [permissionMode, setPermissionMode] = useState<'minimal' | 'strict'>('minimal');
   const [loading, setLoading] = useState(true);
   const [applying, setApplying] = useState(false);
 
@@ -32,6 +33,7 @@ export function ExecRulesSettings() {
         setRules(cfg.security.exec_rules);
       }
       setDefaultPolicy(cfg.security?.default_policy ?? 'allow');
+      setPermissionMode(cfg.security?.permission_mode ?? 'minimal');
     } catch (e) {
       const msg = e instanceof Error ? e.message : t('runtimeConfig.loadFailed');
       addToast('error', msg);
@@ -47,7 +49,13 @@ export function ExecRulesSettings() {
   const handleApply = async () => {
     setApplying(true);
     try {
-      await client.updateRuntimeConfig({ security: { default_policy: defaultPolicy, exec_rules: rules } });
+      await client.updateRuntimeConfig({
+        security: {
+          default_policy: defaultPolicy,
+          permission_mode: permissionMode,
+          exec_rules: rules,
+        },
+      });
       addToast('success', t('runtimeConfig.applySuccess'));
     } catch (e) {
       const msg = e instanceof Error ? e.message : t('runtimeConfig.applyFailed');
@@ -72,6 +80,7 @@ export function ExecRulesSettings() {
   const resetDefaults = () => {
     setRules([...DEFAULT_RULES]);
     setDefaultPolicy('allow');
+    setPermissionMode('minimal');
   };
 
   if (loading) {
@@ -100,12 +109,28 @@ export function ExecRulesSettings() {
             {t('runtimeConfig.execRulesHint', 'Define regex patterns to allow, ask, or deny command execution. Rules are evaluated in order; first match wins.')}
           </p>
 
+          <div className="flex items-center gap-3 py-2 px-3 bg-[var(--bg-primary)] rounded-lg border border-[var(--border-color)]">
+            <span className="text-xs text-[var(--text-secondary)] flex-1">
+              {t('runtimeConfig.permissionMode')}
+            </span>
+            <select
+              aria-label={t('runtimeConfig.permissionMode')}
+              value={permissionMode}
+              onChange={(e) => setPermissionMode(e.target.value as 'minimal' | 'strict')}
+              className="px-2 py-1 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-subtle)] focus:border-[var(--accent)]"
+            >
+              <option value="minimal">{t('runtimeConfig.permissionModeMinimal')}</option>
+              <option value="strict">{t('runtimeConfig.permissionModeStrict')}</option>
+            </select>
+          </div>
+
           {/* 默认策略选择器 */}
           <div className="flex items-center gap-3 py-2 px-3 bg-[var(--bg-primary)] rounded-lg border border-[var(--border-color)]">
             <span className="text-xs text-[var(--text-secondary)] flex-1">
               {t('runtimeConfig.defaultPolicy', 'Default policy (when no rule matches)')}
             </span>
             <select
+              aria-label={t('runtimeConfig.defaultPolicy', 'Default policy (when no rule matches)')}
               value={defaultPolicy}
               onChange={(e) => setDefaultPolicy(e.target.value as 'allow' | 'ask' | 'deny')}
               className="px-2 py-1 text-xs rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-subtle)] focus:border-[var(--accent)]"

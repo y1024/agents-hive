@@ -127,7 +127,7 @@ func RegisterCustomTool(host *mcphost.Host, logger *zap.Logger, tool CustomTool)
 
 			switch tool.Type {
 			case "shell":
-				result, execErr = executeShellTool(tool, params, logger)
+				result, execErr = executeShellToolWithContext(ctx, tool, params, logger)
 			case "http":
 				result, execErr = executeHTTPTool(tool, params, logger)
 			default:
@@ -224,15 +224,33 @@ func parseParameters(input json.RawMessage, params []ToolParameter) (map[string]
 
 // executeShellTool 执行 shell 类型工具
 func executeShellTool(tool CustomTool, params map[string]interface{}, logger *zap.Logger) (string, error) {
+	return executeShellToolWithContext(context.Background(), tool, params, logger)
+}
+
+func executeShellToolWithContext(ctx context.Context, tool CustomTool, params map[string]interface{}, logger *zap.Logger) (string, error) {
 	// 1. 渲染命令模板（替换 {{.param}}），启用 shell escaping 防止命令注入
 	command := renderTemplate(tool.Command, params, true)
 
-	// 2. 工具级安全检查
+	// 2. 工具级安全检查。写操作和安全策略不再硬拒绝，统一转入一次审批。
+	var approvalReasons []string
 	if !tool.AllowWrite && containsWriteCommand(command) {
-		return "", errs.New(errs.CodePermissionDenied, fmt.Sprintf("工具不允许写操作，命令被拒绝: %s", command))
+		approvalReasons = append(approvalReasons, "工具未声明允许写操作")
 	}
 
-	// 3. 委托给 globalExecutor（SafeExecutorWrapper 统一处理安全检查）
+	// 3. 统一 shell 策略检查。deny 与 ask 都进入同一审批通道。
+	if globalSafeExec != nil {
+		switch globalSafeExec.MatchPolicy(command) {
+		case "deny", "ask":
+			approvalReasons = append(approvalReasons, "命令命中安全策略")
+		}
+	}
+	if len(approvalReasons) > 0 {
+		if err := requestCustomShellApproval(ctx, tool, command, strings.Join(approvalReasons, "；")); err != nil {
+			return "", err
+		}
+	}
+
+	// 4. 委托给 globalExecutor（SafeExecutorWrapper 仅保留审计检查，审批由上层完成）
 	if globalExecutor == nil {
 		return "", errs.New(errs.CodeExecutionFailed, "沙箱执行器未初始化，无法执行自定义工具命令")
 	}
@@ -251,6 +269,28 @@ func executeShellTool(tool CustomTool, params map[string]interface{}, logger *za
 		return "", errs.New(errs.CodeSkillExecFailed, formatCommandFailure(result))
 	}
 	return formatCommandOutput(result), nil
+}
+
+func requestCustomShellApproval(ctx context.Context, tool CustomTool, command, reason string) error {
+	if globalApprovalBridge == nil {
+		return recoverableApprovalMissingError(tool.Name, "执行自定义 shell 工具", fmt.Sprintf("当前命令未执行；reason=%s；command=%s", reason, command))
+	}
+	approved, err := globalApprovalBridge.RequestApproval(ctx, tool.Name,
+		"执行自定义 shell 工具需要审批",
+		map[string]string{
+			"tool":    tool.Name,
+			"source":  "custom_tool",
+			"reason":  reason,
+			"command": command,
+		},
+	)
+	if err != nil {
+		return recoverableApprovalFailedError(tool.Name, "执行自定义 shell 工具", fmt.Sprintf("当前命令未执行；command=%s", command), err)
+	}
+	if !approved {
+		return errs.New(errs.CodePermissionDenied, fmt.Sprintf("命令审批被拒绝: %s", command))
+	}
+	return nil
 }
 
 // isDomainAllowed 检查 URL 的域名是否在白名单中

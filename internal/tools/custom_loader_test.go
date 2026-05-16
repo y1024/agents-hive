@@ -18,6 +18,7 @@ import (
 	"github.com/chef-guo/agents-hive/internal/config"
 	"github.com/chef-guo/agents-hive/internal/mcphost"
 	"github.com/chef-guo/agents-hive/internal/sandbox"
+	"github.com/chef-guo/agents-hive/internal/toolruntime"
 )
 
 // setupTestExecutor 为 custom_loader 测试注入 executor，返回清理函数。
@@ -387,7 +388,7 @@ func TestExecuteShellTool(t *testing.T) {
 			wantOutput: "hello\n",
 		},
 		{
-			name: "写操作被拒绝",
+			name: "写操作无审批桥时要求审批",
 			tool: CustomTool{
 				Command:    "rm {{.file}}",
 				AllowWrite: false,
@@ -413,6 +414,9 @@ func TestExecuteShellTool(t *testing.T) {
 			output, err := executeShellTool(tt.tool, tt.params, logger)
 			if tt.wantErr {
 				assert.Error(t, err)
+				if tt.name == "写操作无审批桥时要求审批" {
+					assert.Contains(t, err.Error(), toolruntime.RecoverableToolCallErrorMarker)
+				}
 			} else {
 				assert.NoError(t, err)
 				if tt.wantOutput != "" {
@@ -421,6 +425,26 @@ func TestExecuteShellTool(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestExecuteShellTool_WriteApprovedExecutes(t *testing.T) {
+	setupTestExecutor(t)
+	logger := zap.NewNop()
+
+	oldBridge := globalApprovalBridge
+	bridge := &mockApprovalBridge{approved: true}
+	globalApprovalBridge = bridge
+	t.Cleanup(func() { globalApprovalBridge = oldBridge })
+
+	_, err := executeShellTool(CustomTool{
+		Name:       "approved_write_tool",
+		Command:    "echo approved > {{.path}}",
+		AllowWrite: false,
+		Timeout:    5,
+	}, map[string]interface{}{"path": filepath.Join(t.TempDir(), "approved.txt")}, logger)
+	require.NoError(t, err)
+	assert.True(t, bridge.called, "写操作应进入审批")
+	assert.Equal(t, "approved_write_tool", bridge.details["tool"])
 }
 
 func TestExecuteHTTPTool(t *testing.T) {
@@ -890,6 +914,57 @@ func TestCreateToolApprovalDenied(t *testing.T) {
 	tools := host.ListTools()
 	for _, td := range tools {
 		assert.NotEqual(t, "denied_tool", td.Name, "被拒绝的工具不应该被注册")
+	}
+}
+
+func TestCreateToolRequiresApprovalWithoutBridgeIsRecoverable(t *testing.T) {
+	tests := []struct {
+		name  string
+		input createToolInput
+	}{
+		{
+			name: "shell",
+			input: createToolInput{
+				Name:        "missing_bridge_shell_tool",
+				Description: "缺少审批桥的 shell 工具",
+				Type:        "shell",
+				Command:     "echo hello",
+			},
+		},
+		{
+			name: "http",
+			input: createToolInput{
+				Name:        "missing_bridge_http_tool",
+				Description: "缺少审批桥的 http 工具",
+				Type:        "http",
+				URL:         "https://example.test/api",
+				Method:      "POST",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logger := zap.NewNop()
+			host := mcphost.NewHost(logger)
+
+			cfg := &config.Config{
+				Tools: config.ToolsConfig{CreateRequiresApproval: true},
+			}
+
+			registerCreateTool(host, logger, t.TempDir(), cfg, nil)
+
+			input, _ := json.Marshal(tt.input)
+			result, err := host.ExecuteTool(context.Background(), "create_tool", input)
+			require.NoError(t, err)
+			require.True(t, result.IsError)
+			assert.Contains(t, result.DecodeContent(), toolruntime.RecoverableToolCallErrorMarker)
+			assert.Contains(t, result.DecodeContent(), "approval_channel_missing")
+
+			for _, td := range host.ListTools() {
+				assert.NotEqual(t, tt.input.Name, td.Name, "审批桥缺失时工具不应该被注册")
+			}
+		})
 	}
 }
 

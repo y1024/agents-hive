@@ -1,0 +1,49 @@
+name: Sync to Gitee
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-to-gitee-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    name: Push mirror to Gitee
+    runs-on: ubuntu-latest
+    if: github.repository_owner != ''
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure SSH
+        env:
+          GITEE_SSH_PRIVATE_KEY: ${{ secrets.GITEE_SSH_PRIVATE_KEY }}
+        run: |
+          test -n "$GITEE_SSH_PRIVATE_KEY"
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$GITEE_SSH_PRIVATE_KEY" > ~/.ssh/gitee_sync_key
+          chmod 600 ~/.ssh/gitee_sync_key
+          ssh-keyscan gitee.com >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Push to Gitee
+        env:
+          GITEE_REPOSITORY_SSH: ${{ secrets.GITEE_REPOSITORY_SSH }}
+          GIT_SSH_COMMAND: ssh -i ~/.ssh/gitee_sync_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes
+        run: |
+          test -n "$GITEE_REPOSITORY_SSH"
+          git remote add gitee "$GITEE_REPOSITORY_SSH"
+          git push --prune gitee '+refs/heads/*:refs/heads/*'
+          git push --prune gitee '+refs/tags/*:refs/tags/*'

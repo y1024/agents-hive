@@ -9,6 +9,8 @@ type DecisionSpan struct {
 	CreatedAt      time.Time                    `json:"created_at"`
 	Intent         DecisionSpanIntent           `json:"intent"`
 	Candidates     []DecisionSpanCandidate      `json:"candidates,omitempty"`
+	AllowedEntries []CapabilityEntry            `json:"allowed_entries,omitempty"`
+	BlockedEntries []CapabilityEntry            `json:"blocked_entries,omitempty"`
 	Allowed        []string                     `json:"allowed,omitempty"`
 	AllowedInputs  map[string]map[string]string `json:"allowed_inputs,omitempty"`
 	VisibleOnly    []string                     `json:"visible_only,omitempty"`
@@ -21,6 +23,7 @@ type DecisionSpan struct {
 // DecisionSpanIntent 是 replay 需要的意图投影，避免依赖完整分类器实现。
 type DecisionSpanIntent struct {
 	Kind               IntentKind `json:"kind"`
+	DomainID           string     `json:"domain_id,omitempty"`
 	Subject            string     `json:"subject,omitempty"`
 	AllowedDomainsHint []string   `json:"allowed_domains_hint,omitempty"`
 	Confidence         float64    `json:"confidence,omitempty"`
@@ -80,6 +83,7 @@ func NewDecisionSpan(decision RouteDecision, candidates []ToolProfile, opts Deci
 		CreatedAt:     createdAt,
 		Intent: DecisionSpanIntent{
 			Kind:               decision.Intent.Kind,
+			DomainID:           decision.Intent.DomainID,
 			Subject:            decision.Intent.Subject,
 			AllowedDomainsHint: cloneStrings(decision.Intent.AllowedDomainsHint),
 			Confidence:         decision.Intent.Confidence,
@@ -87,6 +91,8 @@ func NewDecisionSpan(decision RouteDecision, candidates []ToolProfile, opts Deci
 			Degraded:           opts.IntentDegraded,
 		},
 		Candidates:     decisionSpanCandidates(candidates),
+		AllowedEntries: cloneCapabilityEntries(decision.AllowedCapabilities),
+		BlockedEntries: cloneCapabilityEntries(decision.BlockedCapabilities),
 		Allowed:        append([]string(nil), decision.AllowedTools...),
 		AllowedInputs:  cloneDecisionSpanInputs(decision.AllowedToolInputs),
 		VisibleOnly:    append([]string(nil), decision.VisibleOnly...),
@@ -95,6 +101,19 @@ func NewDecisionSpan(decision RouteDecision, candidates []ToolProfile, opts Deci
 		Mode:           decision.Mode,
 		Reason:         decision.Reason,
 	}
+}
+
+func cloneCapabilityEntries(in []CapabilityEntry) []CapabilityEntry {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]CapabilityEntry, 0, len(in))
+	for _, entry := range in {
+		copied := entry
+		copied.Capabilities = append([]Capability(nil), entry.Capabilities...)
+		out = append(out, copied)
+	}
+	return out
 }
 
 func decisionSpanCandidates(candidates []ToolProfile) []DecisionSpanCandidate {

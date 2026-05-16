@@ -107,31 +107,15 @@ func (r *PGMetricsReader) load(ctx context.Context, since, until time.Time) ([]m
 }
 
 func BuildProductionMetrics(events []memory.MetricEvent, since, until time.Time, bucketSize time.Duration, source string) ProductionMetrics {
-	if until.IsZero() {
-		until = time.Now()
-	}
-	if since.IsZero() || !since.Before(until) {
-		since = until.Add(-24 * time.Hour)
-	}
-	if bucketSize <= 0 {
-		bucketSize = time.Hour
-	}
 	if source == "" {
 		source = "memory"
 	}
-
-	out := ProductionMetrics{
-		Source:        source,
-		Since:         since,
-		Until:         until,
-		WindowMinutes: int(math.Round(until.Sub(since).Minutes())),
-		Snapshot: ProductionMetricsSnapshot{
-			BacklogDepthByStatus: map[string]float64{},
-			DropReasons:          map[string]float64{},
-			FallbackReasons:      map[string]float64{},
-			MismatchOperations:   map[string]float64{},
-		},
-	}
+	out := NormalizeProductionMetrics(ProductionMetrics{
+		Source: source,
+	}, since, until, bucketSize)
+	since = out.Since
+	until = out.Until
+	bucketSize = normalizedBucketSize(bucketSize)
 
 	latencies := make([]float64, 0)
 	for _, event := range events {
@@ -166,6 +150,53 @@ func BuildProductionMetrics(events []memory.MetricEvent, since, until time.Time,
 	out.Series = buildSeries(events, since, until, bucketSize)
 	out.Alerts = buildAlerts(out.Snapshot)
 	return out
+}
+
+func NormalizeProductionMetrics(metrics ProductionMetrics, since, until time.Time, bucketSize time.Duration) ProductionMetrics {
+	if until.IsZero() {
+		until = time.Now()
+	}
+	if since.IsZero() || !since.Before(until) {
+		since = until.Add(-24 * time.Hour)
+	}
+	if metrics.Source == "" {
+		metrics.Source = "memory"
+	}
+	if metrics.Since.IsZero() {
+		metrics.Since = since
+	}
+	if metrics.Until.IsZero() {
+		metrics.Until = until
+	}
+	if metrics.WindowMinutes == 0 {
+		metrics.WindowMinutes = int(math.Round(metrics.Until.Sub(metrics.Since).Minutes()))
+	}
+	if metrics.Snapshot.BacklogDepthByStatus == nil {
+		metrics.Snapshot.BacklogDepthByStatus = map[string]float64{}
+	}
+	if metrics.Snapshot.DropReasons == nil {
+		metrics.Snapshot.DropReasons = map[string]float64{}
+	}
+	if metrics.Snapshot.FallbackReasons == nil {
+		metrics.Snapshot.FallbackReasons = map[string]float64{}
+	}
+	if metrics.Snapshot.MismatchOperations == nil {
+		metrics.Snapshot.MismatchOperations = map[string]float64{}
+	}
+	if metrics.Series == nil {
+		metrics.Series = []ProductionMetricsSeriesPoint{}
+	}
+	if metrics.Alerts == nil {
+		metrics.Alerts = []ProductionMetricAlert{}
+	}
+	return metrics
+}
+
+func normalizedBucketSize(bucketSize time.Duration) time.Duration {
+	if bucketSize <= 0 {
+		return time.Hour
+	}
+	return bucketSize
 }
 
 func buildSeries(events []memory.MetricEvent, since, until time.Time, bucketSize time.Duration) []ProductionMetricsSeriesPoint {

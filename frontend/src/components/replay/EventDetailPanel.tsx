@@ -144,6 +144,9 @@ export function EventDetailPanel({ event, traceItem, onCreateCandidate, canCreat
                   </button>
                 )}
               </div>
+              <QualityField label="业务域" value={event.quality_event.domain_id} />
+              <QualityField label="来源" value={qualitySource(event.quality_event)} />
+              <QualityField label="Owner" value={qualityOwner(event.quality_event)} />
               <QualityField label="失败类型" value={event.quality_event.failure_type} />
               <QualityField label="重试原因" value={event.quality_event.retry_reason} />
               <QualityField label="最终状态" value={event.quality_event.final_status} />
@@ -220,6 +223,13 @@ function TraceDetailPanel({ item }: { item: TraceTimelineItem }) {
       {qualityEvent && !reflection && (
         <div style={{ marginBottom: 12 }}>
           <span style={{ color: 'var(--text-secondary, #6C6C70)', fontSize: 12 }}>质量事件</span>
+          <div style={{ margin: '6px 0 8px', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            <TraceBadge label="domain" value={qualityEvent.domain_id} />
+            <TraceBadge label="source" value={qualitySource(qualityEvent)} />
+            <TraceBadge label="owner" value={qualityOwner(qualityEvent)} />
+            <TraceBadge label="failure" value={qualityEvent.failure_type} />
+            <TraceBadge label="status" value={qualityEvent.final_status} />
+          </div>
           <pre style={preStyle}>{JSON.stringify(qualityEvent, null, 2)}</pre>
         </div>
       )}
@@ -280,6 +290,32 @@ function TraceMeta({ label, value }: { label: string; value?: string }) {
       </div>
     </div>
   );
+}
+
+function TraceBadge({ label, value }: { label: string; value?: string }) {
+  if (!value) return null;
+  return (
+    <span style={{
+      padding: '2px 7px',
+      borderRadius: 999,
+      background: 'var(--bg-secondary, #E8E8ED)',
+      color: 'var(--text-secondary, #6C6C70)',
+      fontSize: 11,
+      fontFamily: 'JetBrains Mono, monospace',
+    }}>
+      {label}: {value}
+    </span>
+  );
+}
+
+function qualitySource(ev: TraceQualityEvent | { source_kind?: string; source_name?: string } | null | undefined): string | undefined {
+  if (!ev) return undefined;
+  return [ev.source_kind, ev.source_name].filter(Boolean).join('/') || undefined;
+}
+
+function qualityOwner(ev: TraceQualityEvent | { owner_scope?: string; owner_id?: string } | null | undefined): string | undefined {
+  if (!ev) return undefined;
+  return [ev.owner_scope, ev.owner_id].filter(Boolean).join(':') || undefined;
 }
 
 function parseTraceQualityEvent(item: TraceTimelineItem): TraceQualityEvent | null {

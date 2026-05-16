@@ -4,6 +4,7 @@ import type { SessionTraceResponse, TraceTimelineItem } from '../../types/api';
 import { AgentTreeView } from './AgentTreeView';
 import { EventDetailPanel } from './EventDetailPanel';
 import { ReplayTimeline } from './ReplayTimeline';
+import { traceItemKey } from './traceItemKey';
 
 describe('Replay trace views', () => {
   const trace: SessionTraceResponse = {
@@ -29,6 +30,12 @@ describe('Replay trace views', () => {
         attributes: {
           quality_event: {
             name: 'quality.reflection',
+            turn_id: 'turn-1',
+            domain_id: 'quality_analysis',
+            source_kind: 'master',
+            source_name: 'react',
+            owner_scope: 'user',
+            owner_id: 'user-1',
             final_status: 'blocked',
             reflection: {
               trigger: 'batch_loop',
@@ -88,6 +95,55 @@ describe('Replay trace views', () => {
     expect(screen.getByText('质量反思')).toBeInTheDocument();
     expect(screen.getByText('batch_loop')).toBeInTheDocument();
     expect(screen.getByText('连续失败后注入反思提示')).toBeInTheDocument();
+  });
+
+  it('renders quality domain and source badges in the detail panel', () => {
+    const item: TraceTimelineItem = {
+      kind: 'quality_event',
+      trace_id: 'trace-root',
+      span_id: 'span-3',
+      operation: 'quality.context_build',
+      status: 'ok',
+      attributes: {
+        quality_event: {
+          name: 'quality.context_build',
+          domain_id: 'customer_service',
+          source_kind: 'master',
+          source_name: 'react',
+          owner_scope: 'user',
+          owner_id: 'user-1',
+          failure_type: 'none',
+          final_status: 'pass',
+        },
+      },
+      timestamp: '2026-05-06T10:00:02Z',
+    };
+
+    render(<EventDetailPanel event={null} traceItem={item} />);
+
+    expect(screen.getByText('domain: customer_service')).toBeInTheDocument();
+    expect(screen.getByText('source: master/react')).toBeInTheDocument();
+    expect(screen.getByText('owner: user:user-1')).toBeInTheDocument();
+  });
+
+  it('builds stable keys for quality timeline items from quality metadata', () => {
+    const item: TraceTimelineItem = {
+      kind: 'quality_event',
+      trace_id: 'trace-root',
+      span_id: 'span-fallback',
+      operation: 'quality.tool_decision',
+      attributes: {
+        quality_event: {
+          name: 'quality.tool_decision',
+          turn_id: 'turn-42',
+          span_id: 'span-quality',
+          attributes: { tool_call_id: 'call-1' },
+        },
+      },
+      timestamp: '2026-05-06T10:00:03Z',
+    };
+
+    expect(traceItemKey(item, 9)).toBe('quality:turn-42:quality.tool_decision:span-quality:call-1');
   });
 
   it('renders generic trace attributes when no quality event exists', () => {

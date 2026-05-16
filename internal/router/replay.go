@@ -94,6 +94,8 @@ type RouteDecisionSummary struct {
 	IntentSource   string                       `json:"intent_source,omitempty"`
 	IntentDegraded bool                         `json:"intent_degraded,omitempty"`
 	AllowedTools   []string                     `json:"allowed_tools,omitempty"`
+	AllowedEntries []CapabilityEntry            `json:"allowed_entries,omitempty"`
+	BlockedEntries []CapabilityEntry            `json:"blocked_entries,omitempty"`
 	AllowedInputs  map[string]map[string]string `json:"allowed_inputs,omitempty"`
 	VisibleOnly    []string                     `json:"visible_only,omitempty"`
 	BlockedTools   []string                     `json:"blocked_tools,omitempty"`
@@ -111,6 +113,8 @@ func RouteDecisionSummaryFromSpan(span DecisionSpan) RouteDecisionSummary {
 		IntentSource:   span.Intent.Source,
 		IntentDegraded: span.Intent.Degraded,
 		AllowedTools:   append([]string(nil), span.Allowed...),
+		AllowedEntries: cloneCapabilityEntries(span.AllowedEntries),
+		BlockedEntries: cloneCapabilityEntries(span.BlockedEntries),
 		AllowedInputs:  cloneDecisionSpanInputs(span.AllowedInputs),
 		VisibleOnly:    append([]string(nil), span.VisibleOnly...),
 		BlockedTools:   append([]string(nil), span.Blocked...),

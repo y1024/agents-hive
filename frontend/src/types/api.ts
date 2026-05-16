@@ -59,6 +59,9 @@ export interface ToolCallStatus {
   status: 'running' | 'success' | 'error';
   duration?: number; // 毫秒
   error?: string;
+  recoverable?: boolean;
+  terminal?: boolean;
+  error_kind?: string;
   failure_type?: string;
   requires_user_approval?: boolean;
   suggested_action?: string;
@@ -83,6 +86,9 @@ export interface Message {
   llm_duration?: number;      // LLM 请求耗时（毫秒）
   is_error?: boolean;         // 错误消息标记
   tool_name?: string;         // 工具名称（tool 消息使用）
+  recoverable?: boolean;      // 可恢复工具错误，可由模型修复或重新触发审批
+  terminal?: boolean;         // 终止错误，避免重复相同调用
+  error_kind?: string;        // 结构化错误类型
 }
 
 export interface MessagesListResponse {
@@ -104,6 +110,18 @@ export interface TraceQualityReflection {
 
 export interface TraceQualityEvent {
   name?: string;
+  case_id?: string;
+  run_id?: string;
+  trace_id?: string;
+  span_id?: string;
+  turn_id?: string;
+  domain_id?: string;
+  source_kind?: string;
+  source_name?: string;
+  owner_scope?: string;
+  owner_id?: string;
+  user_id?: string;
+  route?: string;
   failure_type?: string;
   retry_reason?: string;
   final_status?: string;
@@ -300,6 +318,9 @@ export interface QualityWorkbenchCluster {
   tool?: string;
   skill?: string;
   prompt_key?: string;
+  domain_id?: string;
+  source_kind?: string;
+  source_name?: string;
   error_digest: string;
   sample_message: string;
   first_seen: string;
@@ -307,6 +328,9 @@ export interface QualityWorkbenchCluster {
   size: number;
   open_count: number;
   candidate_ids: string[];
+  domain_counts?: Record<string, number>;
+  source_kind_counts?: Record<string, number>;
+  source_name_counts?: Record<string, number>;
 }
 
 export interface QualityWorkbenchClustersResponse {
@@ -317,11 +341,34 @@ export interface QualityWorkbenchClustersResponse {
   size?: number;
 }
 
+export interface QualityWorkbenchFilter {
+  status?: QualityCandidateStatus | '';
+  route?: string;
+  page?: number;
+  size?: number;
+  domain_id?: string;
+  source_kind?: string;
+  source_name?: string;
+  failure_type?: QualityFailureType | string | '';
+}
+
+export interface QualityWorkbenchDashboardFilter {
+  since?: string;
+  until?: string;
+  domain_id?: string;
+  source_kind?: string;
+  source_name?: string;
+  failure_type?: QualityFailureType | string | '';
+}
+
 export interface GroupingMatch {
   failure_type?: string;
   tool?: string;
   skill?: string;
   prompt_key?: string;
+  domain_id?: string;
+  source_kind?: string;
+  source_name?: string;
   error_substring?: string;
 }
 
@@ -331,6 +378,7 @@ export interface GroupingRule {
   priority: number;
   enabled: boolean;
   match: GroupingMatch;
+  key_version?: 'v1' | 'v2' | string;
   key_fields: string[];
   digest_normalize: string[];
   notes?: string;
@@ -362,6 +410,15 @@ export interface CaseRunResult {
   case_id: string;
   passed: boolean;
   reason?: string;
+  runner_info?: RunnerInfo;
+  evidence_level?: RunnerEvidenceLevel | string;
+  judge_verdict?: QualityEvaluationVerdict;
+  gate_metrics?: GateMetrics;
+  trace_ref?: string;
+  replay_ref?: string;
+  domain_id?: string;
+  source_kind?: string;
+  source_name?: string;
 }
 
 export interface VersionMatrixInput {
@@ -395,16 +452,101 @@ export interface VersionDiff {
 
 export type ReplayJobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
 
+export type RunnerEvidenceLevel =
+  | 'static_schema'
+  | 'replay_trace'
+  | 'simulated_runner'
+  | 'real_runner'
+  | 'production_shadow'
+  | 'human_verified'
+  | (string & {});
+
+export interface RunnerInfo {
+  name?: string;
+  version?: string;
+  evidence_level?: RunnerEvidenceLevel | string;
+}
+
+export interface QualityEvaluationVerdict {
+  score?: number;
+  verdict?: string;
+  failure_type?: QualityFailureType | string;
+  feedback?: string[];
+  should_optimize?: boolean;
+}
+
+export interface GateMetrics {
+  required_total?: number;
+  required_passed?: number;
+  dangerous_misallow_count?: number;
+  failure_attribution_rate?: number;
+  tool_choice_accuracy?: number;
+  replay_locatable_rate?: number;
+  regression_candidate_rate?: number;
+  required_zero_tool_regression?: number;
+  delegation_trace_coverage_rate?: number;
+  semantic_score?: number;
+  judge_missing?: boolean;
+  judge_required_domain?: string;
+}
+
+export interface ShadowEvalResult {
+  case_id?: string;
+  domain_id?: string;
+  source_kind?: string;
+  source_name?: string;
+  passed?: boolean;
+  judge_verdict?: QualityEvaluationVerdict;
+  runner_info?: RunnerInfo;
+  trace_ref?: string;
+  replay_ref?: string;
+  timestamp?: string;
+  eval_duration_ms?: number;
+}
+
+export interface ShadowEvalMetrics {
+  domain_id?: string;
+  sample_count?: number;
+  pass_rate?: number;
+  avg_semantic_score?: number;
+  safety_failures?: number;
+  tool_misuses?: number;
+  recent_alerts?: RollbackAlert[];
+}
+
+export interface DomainRegressionStatus {
+  domain_id?: string;
+  status?: 'pass' | 'fail' | 'unknown' | string;
+  semantic_score?: number;
+  safety_failures?: number;
+  active_cases?: number;
+  evidence_level?: RunnerEvidenceLevel | string;
+}
+
+export interface ReplayJobResult {
+  total?: number;
+  passed?: number;
+  failed?: number;
+  unknown?: number;
+  case_ids?: string[];
+  reasons?: string[];
+  runner_info?: RunnerInfo;
+  evidence_level?: RunnerEvidenceLevel | string;
+}
+
 export interface ReplayJob {
   id: string;
   batch_id: string;
   kind: string;
   target_ids: string[];
+  domain_id?: string;
+  source_kind?: string;
+  source_name?: string;
   status: ReplayJobStatus;
   max_attempt: number;
   attempt: number;
   error?: string;
-  result?: Record<string, unknown>;
+  result?: ReplayJobResult;
   created_at: string;
   updated_at: string;
 }
@@ -432,12 +574,24 @@ export interface OptimizationRollout {
   created_at: string;
   updated_at: string;
   rolled_back_at?: string;
+  candidate?: QualityCandidateRecord | null;
+}
+
+export interface OptimizationRolloutMutationResponse {
+  rollout: OptimizationRollout;
+  candidate?: QualityCandidateRecord | null;
 }
 
 export interface BatchEvalRun {
   id: string;
   batch_id: string;
   kind: string;
+  suite_type?: string;
+  domain_id?: string;
+  source_kind?: string;
+  source_name?: string;
+  runner_info?: RunnerInfo;
+  evidence_level?: RunnerEvidenceLevel | string;
   status: string;
   summary?: {
     total: number;
@@ -445,8 +599,29 @@ export interface BatchEvalRun {
     failed: number;
     unknown: number;
     reasons?: string[];
+    evidence_level?: RunnerEvidenceLevel | string;
+    semantic_score?: number;
+    judge_missing?: boolean;
+    gate_metrics?: GateMetrics;
+    judge_verdict?: QualityEvaluationVerdict;
+    shadow_metrics?: ShadowEvalMetrics | ShadowEvalMetrics[];
+    domain_regression?: DomainRegressionStatus | DomainRegressionStatus[];
+    domain_regressions?: DomainRegressionStatus[];
   };
-  diff?: Record<string, unknown>;
+  diff?: {
+    changed_candidate_ids?: string[];
+    new_failures?: string[];
+    recovered?: string[];
+    domain_regressions?: DomainRegressionStatus[];
+    shadow_metrics?: ShadowEvalMetrics | ShadowEvalMetrics[];
+    [key: string]: unknown;
+  };
+  gate_metrics?: GateMetrics;
+  judge_verdict?: QualityEvaluationVerdict;
+  shadow_metrics?: ShadowEvalMetrics | ShadowEvalMetrics[];
+  shadow_results?: ShadowEvalResult[];
+  domain_regression?: DomainRegressionStatus | DomainRegressionStatus[];
+  domain_regressions?: DomainRegressionStatus[];
   case_results?: CaseRunResult[];
   created_at?: string;
   updated_at?: string;
@@ -492,6 +667,7 @@ export interface EvalResult {
 
 export interface EvalRun {
   id: string;
+  runner_info?: RunnerInfo;
   results: EvalResult[];
   created_at?: string;
 }
@@ -523,6 +699,8 @@ export interface EvalDiff {
   status: EvalDiffStatus;
   baseline_run_id: string;
   treatment_run_id: string;
+  baseline_runner_info?: RunnerInfo;
+  treatment_runner_info?: RunnerInfo;
   baseline: EvalRunSummary;
   treatment: EvalRunSummary;
   success_rate_delta: number;
@@ -570,16 +748,23 @@ export interface QualityDashboardSnapshot {
   candidate_status_counts?: Record<string, number>;
   failure_type_counts?: Record<string, number>;
   verify_result_counts?: Record<string, number>;
+  domain_counts?: Record<string, number>;
+  source_kind_counts?: Record<string, number>;
+  source_name_counts?: Record<string, number>;
   by_status?: Record<string, number>;
   by_failure_type?: Record<string, number>;
   by_verify_result?: Record<string, number>;
 }
 
 export interface QualityDashboardSeriesPoint {
-  date: string;
-  open_clusters: number;
-  open_candidates: number;
-  failures: number;
+  since?: string;
+  until?: string;
+  candidate_status_counts?: Record<string, number>;
+  failure_type_counts?: Record<string, number>;
+  verify_result_counts?: Record<string, number>;
+  domain_counts?: Record<string, number>;
+  source_kind_counts?: Record<string, number>;
+  source_name_counts?: Record<string, number>;
 }
 
 export interface MemoryGovernanceStats {
@@ -602,8 +787,8 @@ export interface MemoryPruneResponse {
   dry_run: boolean;
   matched?: number;
   deleted?: number;
-  delete_ids: number[];
-  reasons: Record<string, string>;
+  delete_ids?: number[] | null;
+  reasons?: Record<string, string> | null;
 }
 
 export type MemoryType = 'user' | 'project' | 'feedback' | 'reference' | 'procedural' | 'episodic';
@@ -627,7 +812,7 @@ export interface MemoryExportDocument {
   version: number;
   user_id?: string;
   exported_at?: string;
-  memories: MemoryRecord[];
+  memories?: MemoryRecord[] | null;
 }
 
 export interface MemoryImportResponse {
@@ -650,20 +835,25 @@ export interface MemoryInjectionExplainItem {
   timestamp?: string;
   session_id_hash?: string;
   route?: string;
-  prompt_versions?: string[];
-  memory_ids?: number[];
-  skipped_memory_ids?: number[];
-  skip_counts: Record<string, number>;
+  prompt_versions?: string[] | null;
+  memory_ids?: number[] | null;
+  skipped_memory_ids?: number[] | null;
+  skip_counts?: Record<string, number> | null;
   estimated_tokens?: number;
   memory_injected: boolean;
   feedback_memory_count?: number;
   regular_memory_count?: number;
+  memory_domain_id?: string;
+  memory_source_kind?: string;
+  memory_source_name?: string;
+  memory_owner_scope?: string;
+  memory_owner_id?: string;
   contamination_check?: string;
   additional_attributes?: Record<string, string>;
 }
 
 export interface MemoryInjectionExplainResponse {
-  items: MemoryInjectionExplainItem[];
+  items?: MemoryInjectionExplainItem[] | null;
   total: number;
   limit: number;
   source?: string;
@@ -685,13 +875,13 @@ export interface VectorSpaceMigrationUpdate {
 export interface VectorSpaceMigrationPlan {
   dry_run: boolean;
   scanned: number;
-  updates: VectorSpaceMigrationUpdate[];
+  updates?: VectorSpaceMigrationUpdate[] | null;
   resume_token?: string;
   next_offset?: number;
 }
 
 export interface VectorSpaceMigrationResponse {
-  plan: VectorSpaceMigrationPlan;
+  plan?: VectorSpaceMigrationPlan | null;
   applied: boolean;
   updated: number;
 }
@@ -700,22 +890,22 @@ export type EmbeddingBacklogStatus = 'pending' | 'claimed' | 'done' | 'failed';
 
 export interface EmbeddingBacklogStats {
   total: number;
-  by_state: Record<EmbeddingBacklogStatus | string, number>;
+  by_state?: Record<EmbeddingBacklogStatus | string, number> | null;
 }
 
 export interface MemoryPromotionCandidate {
   subject_id: string;
   target_type: 'procedural' | string;
-  proposed_procedural_memory: MemoryRecord;
-  rationale: string;
-  source_memory_ids: number[];
-  source_kind: string;
+  proposed_procedural_memory?: MemoryRecord | null;
+  rationale?: string | null;
+  source_memory_ids?: number[] | null;
+  source_kind?: string | null;
   confidence: number;
   created_at: string;
 }
 
 export interface MemoryPromotionCandidatesResponse {
-  items: MemoryPromotionCandidate[];
+  items?: MemoryPromotionCandidate[] | null;
   total: number;
   limit: number;
 }
@@ -756,10 +946,10 @@ export interface MemoryProductionMetricsSnapshot {
   embedding_latency_avg_seconds: number;
   embedding_latency_p95_seconds: number;
   backlog_depth_total: number;
-  backlog_depth_by_status: Record<string, number>;
-  drop_reasons: Record<string, number>;
-  fallback_reasons: Record<string, number>;
-  mismatch_operations: Record<string, number>;
+  backlog_depth_by_status?: Record<string, number> | null;
+  drop_reasons?: Record<string, number> | null;
+  fallback_reasons?: Record<string, number> | null;
+  mismatch_operations?: Record<string, number> | null;
 }
 
 export interface MemoryProductionMetricsSeriesPoint {
@@ -780,13 +970,13 @@ export interface MemoryProductionMetricAlert {
 }
 
 export interface MemoryProductionMetrics {
-  source: string;
-  since: string;
-  until: string;
-  window_minutes: number;
-  snapshot: MemoryProductionMetricsSnapshot;
-  series: MemoryProductionMetricsSeriesPoint[];
-  alerts: MemoryProductionMetricAlert[];
+  source?: string | null;
+  since?: string | null;
+  until?: string | null;
+  window_minutes?: number | null;
+  snapshot?: MemoryProductionMetricsSnapshot | null;
+  series?: MemoryProductionMetricsSeriesPoint[] | null;
+  alerts?: MemoryProductionMetricAlert[] | null;
 }
 
 export type OptimizationSuggestionStatus = 'pending' | 'approved' | 'rejected' | 'expired';
@@ -804,7 +994,9 @@ export interface OptimizationReviewSuggestion {
   proposed_value: string;
   diff_format: string;
   source_candidate_id: string;
+  source_eval_diff_id?: string;
   source_event?: Record<string, unknown>;
+  runner_info?: RunnerInfo;
   review_required: boolean;
   created_by: string;
   approved_by?: string;
@@ -817,6 +1009,12 @@ export interface OptimizationReviewSuggestion {
   approved_at?: string;
   applied_at?: string;
   expires_at: string;
+  candidate?: QualityCandidateRecord | null;
+}
+
+export interface OptimizationSuggestionMutationResponse {
+  suggestion: OptimizationReviewSuggestion;
+  candidate?: QualityCandidateRecord | null;
 }
 
 export interface OptimizationSuggestionsResponse {
@@ -840,6 +1038,12 @@ export interface OptimizationApprovalRecord {
   reviewer_role: OptimizationApprovalRole;
   note?: string;
   created_at: string;
+  candidate?: QualityCandidateRecord | null;
+}
+
+export interface OptimizationApprovalMutationResponse {
+  approval: OptimizationApprovalRecord;
+  candidate?: QualityCandidateRecord | null;
 }
 
 export interface OptimizationApprovalsResponse {
@@ -1027,6 +1231,7 @@ export interface RuntimeConfig {
   };
   security?: {
     default_policy?: 'allow' | 'ask' | 'deny';
+    permission_mode?: 'minimal' | 'strict';
     exec_rules: ExecRule[];
   };
 }
@@ -1057,6 +1262,10 @@ export interface MCPToolSummary {
   risk?: string;
   read_only?: boolean;
   requires_approval?: boolean;
+  may_require_approval?: boolean;
+  route_status?: string;
+  callable_now?: boolean;
+  block_reason?: string;
 }
 
 export interface MCPToolsByServer {
@@ -1163,6 +1372,7 @@ export interface ConfigUpdateRequest {
   };
   security?: {
     default_policy?: 'allow' | 'ask' | 'deny';
+    permission_mode?: 'minimal' | 'strict';
     exec_rules?: ExecRule[];
   };
 }

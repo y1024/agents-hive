@@ -1,11 +1,24 @@
 package qualityworkbench
 
-import "sort"
+import (
+	"sort"
+
+	"github.com/chef-guo/agents-hive/internal/agentquality"
+)
 
 type CaseRunResult struct {
-	CaseID string `json:"case_id"`
-	Passed bool   `json:"passed"`
-	Reason string `json:"reason,omitempty"`
+	CaseID        string                           `json:"case_id"`
+	Passed        bool                             `json:"passed"`
+	Reason        string                           `json:"reason,omitempty"`
+	RunnerInfo    agentquality.RunnerInfo          `json:"runner_info,omitempty"`
+	EvidenceLevel agentquality.RunnerEvidenceLevel `json:"evidence_level,omitempty"`
+	JudgeVerdict  agentquality.JudgeVerdict        `json:"judge_verdict,omitempty"`
+	GateMetrics   agentquality.GateMetrics         `json:"gate_metrics,omitempty"`
+	TraceRef      string                           `json:"trace_ref,omitempty"`
+	ReplayRef     string                           `json:"replay_ref,omitempty"`
+	DomainID      string                           `json:"domain_id,omitempty"`
+	SourceKind    string                           `json:"source_kind,omitempty"`
+	SourceName    string                           `json:"source_name,omitempty"`
 }
 
 type VersionMatrixInput struct {

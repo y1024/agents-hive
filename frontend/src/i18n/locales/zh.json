@@ -585,16 +585,16 @@
       },
       "runtimeSecurity": {
         "title": "运行时与安全",
-        "desc": "管理节点信息、权限规则、命令执行规则、MCP、外部资源和 IM 设置。",
+        "desc": "管理节点信息、Legacy HITL 回滚规则、命令执行规则、MCP、外部资源和 IM 设置。",
         "systemSettings": {
           "title": "1. 系统设置页结构",
           "desc": "后台设置分为系统、安全和集成三个 Tab。",
-          "detail": "## 系统 Tab\n\n显示节点 ID、运行模式、健康状态、版本和运行时长，并提供 Agent 超时设置。\n\n## 安全 Tab\n\n包含权限规则和命令执行规则。\n\n## 集成 Tab\n\n包含 IM 通道、MCP Servers、外部资源和远程 Agent。"
+          "detail": "## 系统 Tab\n\n显示节点 ID、运行模式、健康状态、版本和运行时长，并提供 Agent 超时设置。\n\n## 安全 Tab\n\n包含 Legacy HITL 回滚规则和命令执行规则。\n\n## 集成 Tab\n\n包含 IM 通道、MCP Servers、外部资源和远程 Agent。"
         },
         "permissionRules": {
-          "title": "2. 权限规则",
-          "desc": "权限规则用于控制工具动作是允许、询问还是拒绝。",
-          "detail": "## 规则含义\n\n每条规则通常由工具名、动作、匹配模式和策略组成。策略包括 allow、ask、deny。\n\n## 建议\n\n对读操作可以更宽松；对写文件、外部发送、删除、执行命令等有副作用动作应默认 ask 或 deny。\n\n## 生效方式\n\n修改后点击应用，前端会通过运行时配置接口提交到后端。"
+          "title": "2. Legacy HITL 回滚规则",
+          "desc": "这些规则只用于 HITL 执行通道和 strict 回滚，不是统一工具策略入口。",
+          "detail": "## 规则含义\n\n每条规则通常由工具名、动作和匹配模式组成。策略包括 allow、ask、deny。\n\n## 生效边界\n\nminimal 模式下，普通工具是否可调用由统一 ToolPolicy 决定；这些规则不能把统一 allow 降级成 ask 或 deny。strict 模式下，它们作为生产回滚/收紧规则生效。\n\n## 建议\n\n不要在这里给 MCP 或未知工具授信。能力授予、路由召回和危险动作判断应进入统一策略层。修改后点击应用，前端会通过运行时配置接口提交到后端。"
         },
         "execRules": {
           "title": "3. 命令执行规则",
@@ -714,8 +714,8 @@
   },
   "runtimeConfig": {
     "title": "运行时配置",
-    "permissionRules": "工具权限规则",
-    "hitlEnabled": "启用人工审批",
+    "permissionRules": "Legacy HITL 回滚规则",
+    "hitlEnabled": "启用 HITL 通道",
     "toolName": "工具名",
     "action": "权限",
     "pattern": "模式",
@@ -733,9 +733,12 @@
     "taskTimeout": "任务超时",
     "shellTimeout": "Shell 命令超时",
     "planApproval": "计划需要审批",
-    "permissionRulesHint": "规则按顺序匹配，第一个匹配的规则生效。工具名支持通配符 *",
+    "permissionRulesHint": "这些规则只用于 HITL 执行通道和 strict 回滚。minimal 模式下统一 ToolPolicy 是主授权源，旧规则不能把普通 allow 降级成 ask/deny，也不能给 MCP 或未知工具授信。",
     "execRules": "命令执行规则",
     "execRulesHint": "定义正则表达式规则，控制命令的允许、询问或拒绝。规则按顺序匹配，第一个匹配的规则生效。",
+    "permissionMode": "权限模式",
+    "permissionModeMinimal": "minimal：统一 ToolPolicy 主路径",
+    "permissionModeStrict": "strict：Legacy HITL 回滚",
     "defaultPolicy": "默认策略（无规则匹配时）",
     "description": "描述",
     "allow": "允许",
@@ -760,6 +763,9 @@
     "mcpNoRuntimeTools": "当前还没有远程 MCP 工具注册到运行时。",
     "mcpToolsLoadFailed": "加载 MCP 工具目录失败",
     "mcpServerRuntimeCounts": "{{tools}} 个工具 / {{resources}} 个资源 / {{prompts}} 个提示",
+    "requiresApproval": "需要审批",
+    "mayRequireApproval": "含高风险动作",
+    "toolUnavailable": "不可调用",
     "addMcpServer": "添加服务端",
     "deleteMcpServer": "删除",
     "mcpNeedRestart": "MCP 配置变更需保存到文件并重启服务",

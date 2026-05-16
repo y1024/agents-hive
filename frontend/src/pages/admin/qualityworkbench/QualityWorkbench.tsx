@@ -2,7 +2,25 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { BarChart3, FileText, GitBranch, Layers3, Play, RefreshCcw, RotateCcw, XCircle } from 'lucide-react';
 import { useNodeClient } from '../../../hooks/useNodeClient';
 import { useToastStore } from '../../../store/toast';
-import type { BatchEvalRun, GroupingRule, GroupingRulePreview, QualityDashboardSnapshot, QualityReport, QualityWorkbenchCluster, ReplayFanoutPlan, ReplayJob, VersionDiff } from '../../../types/api';
+import type {
+  BatchEvalRun,
+  DomainRegressionStatus,
+  GateMetrics,
+  GroupingRule,
+  GroupingRulePreview,
+  QualityCandidateStatus,
+  QualityDashboardSnapshot,
+  QualityEvaluationVerdict,
+  QualityReport,
+  QualityWorkbenchCluster,
+  QualityWorkbenchFilter,
+  ReplayFanoutPlan,
+  ReplayJob,
+  RunnerInfo,
+  ShadowEvalMetrics,
+  ShadowEvalResult,
+  VersionDiff,
+} from '../../../types/api';
 
 const card = 'rounded-2xl border border-[var(--border-color)] bg-[var(--bg-card)] p-4 shadow-sm';
 const heroCard = 'rounded-2xl border border-[var(--accent-border)] bg-[var(--accent-subtle)] p-5';
@@ -13,6 +31,23 @@ const tabActive = 'bg-[var(--accent-600)] text-white';
 const tabIdle = 'text-[var(--text-secondary)] hover:bg-[var(--bg-secondary)]';
 
 type WorkbenchTab = 'replay' | 'eval' | 'report' | 'distribution';
+type WorkbenchFilterDraft = {
+  status: QualityCandidateStatus | '';
+  route: string;
+  domain_id: string;
+  source_kind: string;
+  source_name: string;
+  failure_type: string;
+};
+
+const emptyFilterDraft: WorkbenchFilterDraft = {
+  status: '',
+  route: '',
+  domain_id: '',
+  source_kind: '',
+  source_name: '',
+  failure_type: '',
+};
 
 export function QualityWorkbench() {
   const client = useNodeClient();
@@ -31,16 +66,29 @@ export function QualityWorkbench() {
   const [versionDiff, setVersionDiff] = useState<VersionDiff | null>(null);
   const [casesDir, setCasesDir] = useState('');
   const [activeTab, setActiveTab] = useState<WorkbenchTab>('replay');
+  const [filterDraft, setFilterDraft] = useState<WorkbenchFilterDraft>(emptyFilterDraft);
+  const [appliedFilter, setAppliedFilter] = useState<QualityWorkbenchFilter>({});
+
+  const cleanDraftFilter = useMemo<QualityWorkbenchFilter>(() => {
+    const next: QualityWorkbenchFilter = {};
+    if (filterDraft.status) next.status = filterDraft.status;
+    if (filterDraft.route.trim()) next.route = filterDraft.route.trim();
+    if (filterDraft.domain_id.trim()) next.domain_id = filterDraft.domain_id.trim();
+    if (filterDraft.source_kind.trim()) next.source_kind = filterDraft.source_kind.trim();
+    if (filterDraft.source_name.trim()) next.source_name = filterDraft.source_name.trim();
+    if (filterDraft.failure_type.trim()) next.failure_type = filterDraft.failure_type.trim();
+    return next;
+  }, [filterDraft]);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const [clusterRes, replayRes, evalRes, reportRes, snap, rulesRes] = await Promise.all([
-        client.adminListQualityWorkbenchClusters({ page: 1, size: 100 }),
-        client.adminListReplayJobs({ page: 1, size: 50 }),
-        client.adminListBatchEvals(),
+        client.adminListQualityWorkbenchClusters({ ...appliedFilter, page: 1, size: 100 }),
+        client.adminListReplayJobs({ ...appliedFilter, page: 1, size: 50 }),
+        client.adminListBatchEvals({ ...appliedFilter, page: 1, size: 50 }),
         client.adminListQualityReports(),
-        client.adminGetQualityDashboardSnapshot(),
+        client.adminGetQualityDashboardSnapshot(appliedFilter),
         client.adminListGroupingRules(),
       ]);
       const nextClusters = clusterRes.clusters ?? clusterRes.items ?? [];
@@ -56,7 +104,7 @@ export function QualityWorkbench() {
     } finally {
       setLoading(false);
     }
-  }, [client, addToast]);
+  }, [client, addToast, appliedFilter]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -65,10 +113,23 @@ export function QualityWorkbench() {
     return (counts.new ?? 0) + (counts.reviewing ?? 0);
   }, [snapshot]);
 
+  const applyFilters = () => setAppliedFilter(cleanDraftFilter);
+  const resetFilters = () => {
+    setFilterDraft(emptyFilterDraft);
+    setAppliedFilter({});
+  };
+
   const createReplay = async (cluster: QualityWorkbenchCluster | null) => {
     if (!cluster) return;
     try {
-      await client.adminCreateReplayJobs({ kind: 'cluster', target_ids: [cluster.id], max_attempt: 1 });
+      await client.adminCreateReplayJobs({
+        kind: 'cluster',
+        target_ids: [cluster.id],
+        max_attempt: 1,
+        ...(cluster.domain_id ? { domain_id: cluster.domain_id } : {}),
+        ...(cluster.source_kind ? { source_kind: cluster.source_kind } : {}),
+        ...(cluster.source_name ? { source_name: cluster.source_name } : {}),
+      });
       addToast('success', '已加入 replay queue');
       await load();
     } catch (e: unknown) {
@@ -157,7 +218,7 @@ export function QualityWorkbench() {
   const runBatchEval = async () => {
     try {
       const trimmedCasesDir = casesDir.trim();
-      await client.adminCreateBatchEval({ mode: 'manual', ...(trimmedCasesDir ? { cases_dir: trimmedCasesDir } : {}) });
+      await client.adminCreateBatchEval({ mode: 'manual', ...appliedFilter, ...(trimmedCasesDir ? { cases_dir: trimmedCasesDir } : {}) });
       addToast('success', '已创建批量评测 run');
       await load();
     } catch (e: unknown) {
@@ -215,6 +276,59 @@ export function QualityWorkbench() {
         loading={loading}
       />
 
+      <section className={card}>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-sm font-semibold text-[var(--text-primary)]">归因筛选</h2>
+          <div className="flex flex-wrap gap-2">
+            <button onClick={applyFilters} className={primaryButton} disabled={loading}>
+              <RefreshCcw size={14} />
+              应用
+            </button>
+            <button onClick={resetFilters} className={button} disabled={loading}>
+              <XCircle size={14} />
+              清空
+            </button>
+          </div>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-6 gap-3">
+          <FilterSelect
+            label="Status"
+            value={filterDraft.status}
+            onChange={(value) => setFilterDraft((current) => ({ ...current, status: value as QualityCandidateStatus | '' }))}
+            options={[
+              ['', '全部'],
+              ['new', 'new'],
+              ['reviewing', 'reviewing'],
+              ['approved', 'approved'],
+              ['rejected', 'rejected'],
+              ['promoted', 'promoted'],
+              ['promoted_verified', 'promoted_verified'],
+              ['promoted_regressed', 'promoted_regressed'],
+            ]}
+          />
+          <FilterInput label="Route" value={filterDraft.route} onChange={(route) => setFilterDraft((current) => ({ ...current, route }))} placeholder="web" />
+          <FilterInput label="Domain" value={filterDraft.domain_id} onChange={(domain_id) => setFilterDraft((current) => ({ ...current, domain_id }))} placeholder="generic" />
+          <FilterInput label="Source kind" value={filterDraft.source_kind} onChange={(source_kind) => setFilterDraft((current) => ({ ...current, source_kind }))} placeholder="master" />
+          <FilterInput label="Source name" value={filterDraft.source_name} onChange={(source_name) => setFilterDraft((current) => ({ ...current, source_name }))} placeholder="react" />
+          <FilterSelect
+            label="Failure"
+            value={filterDraft.failure_type}
+            onChange={(failure_type) => setFilterDraft((current) => ({ ...current, failure_type }))}
+            options={[
+              ['', '全部'],
+              ['tool', 'tool'],
+              ['permission', 'permission'],
+              ['context', 'context'],
+              ['prompt', 'prompt'],
+              ['skill', 'skill'],
+              ['model', 'model'],
+              ['runtime', 'runtime'],
+              ['user_input', 'user_input'],
+            ]}
+          />
+        </div>
+      </section>
+
       <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
         <Metric title="待处理 Candidates" value={openCandidateCount} icon={<BarChart3 size={17} />} accent />
         <Metric title="活跃 Clusters" value={snapshot?.open_clusters ?? clusters.filter((c) => c.open_count > 0).length} icon={<GitBranch size={17} />} />
@@ -237,6 +351,8 @@ export function QualityWorkbench() {
                 <tr>
                   <th className="px-3 py-2 text-left font-medium">Cluster</th>
                   <th className="px-3 py-2 text-left font-medium">Failure</th>
+                  <th className="px-3 py-2 text-left font-medium">Domain</th>
+                  <th className="px-3 py-2 text-left font-medium">Source</th>
                   <th className="px-3 py-2 text-left font-medium">Tool/Skill</th>
                   <th className="px-3 py-2 text-left font-medium">Open</th>
                   <th className="px-3 py-2 text-left font-medium">Size</th>
@@ -245,7 +361,7 @@ export function QualityWorkbench() {
               <tbody className="divide-y divide-[var(--border-color)]">
                 {clusters.length === 0 ? (
                   <tr>
-                    <td colSpan={5} className="px-3 py-10 text-center">
+                    <td colSpan={7} className="px-3 py-10 text-center">
                       {loading ? (
                         <p className="text-sm text-[var(--text-secondary)]">加载中...</p>
                       ) : (
@@ -268,6 +384,8 @@ export function QualityWorkbench() {
                   >
                     <td className="px-3 py-2 font-mono text-xs text-[var(--text-primary)]">{cluster.id}</td>
                     <td className="px-3 py-2 text-[var(--text-primary)]">{cluster.failure_type || '-'}</td>
+                    <td className="px-3 py-2 text-[var(--text-secondary)]">{cluster.domain_id || '-'}</td>
+                    <td className="px-3 py-2 text-[var(--text-secondary)]">{[cluster.source_kind, cluster.source_name].filter(Boolean).join('/') || '-'}</td>
                     <td className="px-3 py-2 text-[var(--text-secondary)]">{cluster.tool || cluster.skill || '-'}</td>
                     <td className="px-3 py-2 text-[var(--text-primary)]">{cluster.open_count}</td>
                     <td className="px-3 py-2 text-[var(--text-primary)]">{cluster.size}</td>
@@ -283,6 +401,11 @@ export function QualityWorkbench() {
           {selectedCluster ? (
             <div className="space-y-3 text-sm">
               <p className="font-mono text-xs text-[var(--text-secondary)] break-all">{selectedCluster.key}</p>
+              <div className="flex flex-wrap gap-2">
+                <Badge text={`domain: ${selectedCluster.domain_id || '-'}`} />
+                <Badge text={`source: ${[selectedCluster.source_kind, selectedCluster.source_name].filter(Boolean).join('/') || '-'}`} />
+                <Badge text={`failure: ${selectedCluster.failure_type || '-'}`} />
+              </div>
               <p className="text-[var(--text-primary)]">{selectedCluster.sample_message || '暂无样本错误'}</p>
               <div className="flex flex-wrap gap-2">
                 {selectedCluster.candidate_ids?.map((id) => (
@@ -399,7 +522,7 @@ export function QualityWorkbench() {
               />
               <ListEmpty show={evals.length === 0} text="尚未运行 batch eval — 点上方运行按钮开始" />
               {evals.slice(0, 8).map((run) => (
-                <Row key={run.id} title={run.id} meta={`${run.status} · pass ${run.summary?.passed ?? 0} / fail ${run.summary?.failed ?? 0} / unknown ${run.summary?.unknown ?? 0}`} />
+                <BatchEvalRunRow key={run.id} run={run} />
               ))}
             </div>
           )}
@@ -497,6 +620,246 @@ function FailureDistribution({ counts }: { counts: Record<string, number> }) {
   );
 }
 
+function BatchEvalRunRow({ run }: { run: BatchEvalRun }) {
+  const runnerInfo = batchEvalRunnerInfo(run);
+  const judgeVerdict = batchEvalJudgeVerdict(run);
+  const gateMetrics = batchEvalGateMetrics(run);
+  const shadowMetrics = batchEvalShadowMetrics(run);
+  const shadowResults = run.shadow_results ?? [];
+  const domainRegressions = batchEvalDomainRegressions(run);
+  const summary = run.summary;
+
+  return (
+    <div className="py-3 border-t border-[var(--border-color)] first:border-t-0">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-sm text-[var(--text-primary)] font-mono truncate">{run.id}</p>
+          <p className="text-xs text-[var(--text-secondary)] truncate">
+            {run.kind} · {run.status} · {formatAttribution(run)} · pass {summary?.passed ?? 0} / fail {summary?.failed ?? 0} / unknown {summary?.unknown ?? 0}
+          </p>
+        </div>
+        <EvidenceBadge level={runnerInfo?.evidence_level} />
+      </div>
+      <RunnerEvidenceLine runnerInfo={runnerInfo} />
+      <div className="mt-3 grid grid-cols-1 lg:grid-cols-3 gap-2">
+        <EvidenceCard title="Judge">
+          <JudgeEvidence verdict={judgeVerdict} metrics={gateMetrics} />
+        </EvidenceCard>
+        <EvidenceCard title="Shadow">
+          <ShadowEvidence metrics={shadowMetrics} results={shadowResults} kind={run.kind} />
+        </EvidenceCard>
+        <EvidenceCard title="Domain Regression">
+          <DomainRegressionEvidence items={domainRegressions} domainId={run.domain_id} />
+        </EvidenceCard>
+      </div>
+      {summary?.reasons?.length ? (
+        <p className="mt-2 text-xs text-[var(--text-secondary)] truncate">reasons: {summary.reasons.slice(0, 3).join(' · ')}</p>
+      ) : null}
+    </div>
+  );
+}
+
+function EvidenceCard({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="rounded-lg border border-[var(--border-color)] bg-[var(--bg-primary)] px-3 py-2">
+      <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-[var(--text-secondary)]">{title}</p>
+      {children}
+    </div>
+  );
+}
+
+function RunnerEvidenceLine({ runnerInfo }: { runnerInfo?: RunnerInfo }) {
+  const level = runnerInfo?.evidence_level;
+  const name = runnerInfo?.name || 'runner 未返回';
+  const version = runnerInfo?.version ? ` v${runnerInfo.version}` : '';
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+      <span className="text-[var(--text-secondary)]">runner</span>
+      <span className="font-mono text-[var(--text-primary)]">{name}{version}</span>
+      <EvidenceBadge level={level} />
+      <span className={evidenceMessageClass(level)}>{evidenceMessage(level)}</span>
+    </div>
+  );
+}
+
+function EvidenceBadge({ level }: { level?: string }) {
+  const normalized = normalizeEvidenceLevel(level);
+  const cls = normalized === 'static_schema' || normalized === 'unknown'
+    ? 'border-red-200 bg-red-50 text-red-700'
+    : normalized === 'real_runner' || normalized === 'production_shadow' || normalized === 'human_verified'
+      ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+      : 'border-amber-200 bg-amber-50 text-amber-700';
+  return <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-mono ${cls}`}>{normalized}</span>;
+}
+
+function JudgeEvidence({ verdict, metrics }: { verdict?: QualityEvaluationVerdict; metrics?: GateMetrics }) {
+  if (!verdict && !metrics) {
+    return <p className="text-xs text-[var(--text-secondary)]">未返回 judge verdict 或 gate metrics。</p>;
+  }
+  return (
+    <div className="space-y-1 text-xs text-[var(--text-secondary)]">
+      {verdict ? (
+        <p>
+          score <span className="font-mono text-[var(--text-primary)]">{verdict.score ?? '-'}</span>
+          {verdict.failure_type ? <> · failure <span className="font-mono text-[var(--text-primary)]">{verdict.failure_type}</span></> : null}
+          {typeof verdict.should_optimize === 'boolean' ? <> · optimize <span className="font-mono text-[var(--text-primary)]">{String(verdict.should_optimize)}</span></> : null}
+        </p>
+      ) : null}
+      {verdict?.verdict ? <p className="truncate">{verdict.verdict}</p> : null}
+      {metrics ? (
+        <p>
+          semantic <span className="font-mono text-[var(--text-primary)]">{formatOptionalNumber(metrics.semantic_score)}</span>
+          {metrics.judge_missing ? <span className="ml-1 text-red-700">judge_missing</span> : null}
+          {metrics.judge_required_domain ? <> · domain <span className="font-mono text-[var(--text-primary)]">{metrics.judge_required_domain}</span></> : null}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function ShadowEvidence({ metrics, results, kind }: { metrics: ShadowEvalMetrics[]; results: ShadowEvalResult[]; kind: string }) {
+  if (metrics.length === 0 && results.length === 0) {
+    return <p className="text-xs text-[var(--text-secondary)]">{kind === 'shadow' ? 'shadow run 未返回 metrics。' : '未返回 shadow metrics。'}</p>;
+  }
+  if (metrics.length > 0) {
+    return (
+      <div className="space-y-1 text-xs text-[var(--text-secondary)]">
+        {metrics.slice(0, 2).map((item, index) => (
+          <p key={`${item.domain_id || 'shadow'}-${index}`} className="truncate">
+            <span className="font-mono text-[var(--text-primary)]">{item.domain_id || 'domain:-'}</span>
+            {' '}samples {item.sample_count ?? '-'} · pass {formatOptionalPercent(item.pass_rate)} · semantic {formatOptionalNumber(item.avg_semantic_score)}
+          </p>
+        ))}
+      </div>
+    );
+  }
+  const passed = results.filter((item) => item.passed).length;
+  const avgScore = averageShadowScore(results);
+  return (
+    <p className="text-xs text-[var(--text-secondary)]">
+      results {results.length} · pass {passed}/{results.length} · semantic {formatOptionalNumber(avgScore)}
+    </p>
+  );
+}
+
+function DomainRegressionEvidence({ items, domainId }: { items: DomainRegressionStatus[]; domainId?: string }) {
+  if (items.length === 0) {
+    return <p className="text-xs text-[var(--text-secondary)]">{domainId ? `${domainId}: 未返回 regression status。` : '未返回 domain regression status。'}</p>;
+  }
+  return (
+    <div className="space-y-1 text-xs text-[var(--text-secondary)]">
+      {items.slice(0, 3).map((item, index) => (
+        <p key={`${item.domain_id || 'domain'}-${index}`} className="truncate">
+          <span className={domainStatusClass(item.status)}>{item.status || 'unknown'}</span>
+          {' '}<span className="font-mono text-[var(--text-primary)]">{item.domain_id || '-'}</span>
+          {' '}cases {item.active_cases ?? '-'} · safety {item.safety_failures ?? '-'} · evidence {normalizeEvidenceLevel(item.evidence_level)}
+        </p>
+      ))}
+    </div>
+  );
+}
+
+function batchEvalRunnerInfo(run: BatchEvalRun): RunnerInfo | undefined {
+  const evidenceLevel = run.runner_info?.evidence_level || run.evidence_level || run.summary?.evidence_level;
+  if (!run.runner_info && !evidenceLevel) return undefined;
+  return { ...run.runner_info, evidence_level: evidenceLevel };
+}
+
+function batchEvalJudgeVerdict(run: BatchEvalRun): QualityEvaluationVerdict | undefined {
+  return run.judge_verdict || run.summary?.judge_verdict;
+}
+
+function batchEvalGateMetrics(run: BatchEvalRun): GateMetrics | undefined {
+  return run.gate_metrics || run.summary?.gate_metrics;
+}
+
+function batchEvalShadowMetrics(run: BatchEvalRun): ShadowEvalMetrics[] {
+  const value = run.shadow_metrics || run.summary?.shadow_metrics || run.diff?.shadow_metrics;
+  if (!value) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function batchEvalDomainRegressions(run: BatchEvalRun): DomainRegressionStatus[] {
+  const value = run.domain_regressions || run.domain_regression || run.summary?.domain_regressions || run.summary?.domain_regression || run.diff?.domain_regressions;
+  if (!value) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function normalizeEvidenceLevel(level?: string) {
+  const trimmed = level?.trim();
+  return trimmed || 'unknown';
+}
+
+function evidenceMessage(level?: string) {
+  const normalized = normalizeEvidenceLevel(level);
+  if (normalized === 'static_schema') return '仅静态结构检查，不能授权优化或上线。';
+  if (normalized === 'unknown') return '未返回 runner 证据，不能作为审批依据。';
+  if (normalized === 'real_runner' || normalized === 'production_shadow' || normalized === 'human_verified') return '真实执行证据，仍需审批复核。';
+  return '有限证据，需结合 judge、shadow 和回放结果复核。';
+}
+
+function evidenceMessageClass(level?: string) {
+  const normalized = normalizeEvidenceLevel(level);
+  if (normalized === 'static_schema' || normalized === 'unknown') return 'text-red-700';
+  if (normalized === 'real_runner' || normalized === 'production_shadow' || normalized === 'human_verified') return 'text-emerald-700';
+  return 'text-amber-700';
+}
+
+function domainStatusClass(status?: string) {
+  if (status === 'pass') return 'font-mono text-emerald-700';
+  if (status === 'fail') return 'font-mono text-red-700';
+  return 'font-mono text-amber-700';
+}
+
+function formatOptionalNumber(value?: number) {
+  return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) : '-';
+}
+
+function formatOptionalPercent(value?: number) {
+  return typeof value === 'number' && Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : '-';
+}
+
+function averageShadowScore(results: ShadowEvalResult[]) {
+  const scores = results.map((item) => item.judge_verdict?.score).filter((score): score is number => typeof score === 'number');
+  if (scores.length === 0) return undefined;
+  return scores.reduce((sum, score) => sum + score, 0) / scores.length;
+}
+
+function FilterInput({ label, value, placeholder, onChange }: { label: string; value: string; placeholder: string; onChange: (value: string) => void }) {
+  return (
+    <label className="block">
+      <span className="mb-1 block text-xs font-medium text-[var(--text-secondary)]">{label}</span>
+      <input
+        className="w-full rounded-[10px] border border-[var(--border-color)] bg-[var(--bg-primary)] px-3 py-2 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)]"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+      />
+    </label>
+  );
+}
+
+function FilterSelect({ label, value, options, onChange }: { label: string; value: string; options: Array<[string, string]>; onChange: (value: string) => void }) {
+  return (
+    <label className="block">
+      <span className="mb-1 block text-xs font-medium text-[var(--text-secondary)]">{label}</span>
+      <select
+        className="w-full rounded-[10px] border border-[var(--border-color)] bg-[var(--bg-primary)] px-3 py-2 text-sm text-[var(--text-primary)]"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      >
+        {options.map(([optionValue, labelText]) => (
+          <option key={optionValue || 'all'} value={optionValue}>{labelText}</option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function Badge({ text }: { text: string }) {
+  return <span className="px-2 py-1 rounded-full bg-[var(--bg-secondary)] text-xs font-mono text-[var(--text-secondary)]">{text}</span>;
+}
+
 function Row({ title, meta }: { title: string; meta: string }) {
   return (
     <div className="py-2 border-t border-[var(--border-color)] first:border-t-0">
@@ -521,12 +884,13 @@ function WorkbenchResult({ title, empty, content }: { title: string; empty: stri
 
 function ReplayRow({ job, running, onRun }: { job: ReplayJob; running: boolean; onRun: () => void }) {
   const canRun = job.status === 'queued' || job.status === 'failed';
+  const runnerInfo = job.result?.runner_info;
   return (
     <div className="py-3 border-t border-[var(--border-color)] first:border-t-0">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="text-sm text-[var(--text-primary)] font-mono truncate">{job.id}</p>
-          <p className="text-xs text-[var(--text-secondary)] truncate">{job.kind} · {job.status} · attempt {job.attempt}/{job.max_attempt}</p>
+          <p className="text-xs text-[var(--text-secondary)] truncate">{job.kind} · {job.status} · {formatAttribution(job)} · attempt {job.attempt}/{job.max_attempt}</p>
           <p className="text-xs text-[var(--text-secondary)] truncate">{job.target_ids?.join(', ') || '-'}</p>
         </div>
         <button className={button} onClick={onRun} disabled={!canRun || running}>
@@ -534,6 +898,7 @@ function ReplayRow({ job, running, onRun }: { job: ReplayJob; running: boolean; 
           {running ? '运行中' : 'Run'}
         </button>
       </div>
+      {runnerInfo ? <RunnerEvidenceLine runnerInfo={runnerInfo} /> : null}
       {job.error ? (
         <p className="mt-2 rounded-md bg-red-50 px-2 py-1 text-xs text-red-700">{job.error}</p>
       ) : null}
@@ -544,6 +909,11 @@ function ReplayRow({ job, running, onRun }: { job: ReplayJob; running: boolean; 
       ) : null}
     </div>
   );
+}
+
+function formatAttribution(item: Pick<ReplayJob | BatchEvalRun, 'domain_id' | 'source_kind' | 'source_name'>) {
+  const source = [item.source_kind, item.source_name].filter(Boolean).join('/');
+  return [item.domain_id, source].filter(Boolean).join(' · ') || 'generic';
 }
 
 function ListEmpty({ show, text }: { show: boolean; text: string }) {

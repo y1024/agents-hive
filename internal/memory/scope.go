@@ -39,6 +39,11 @@ func (DefaultScopePolicy) Allow(record MemoryRecord, rctx RuntimeContext, _ time
 			return true, "same_owner_fail_closed"
 		}
 		return false, "membership_unavailable"
+	case TargetScopeDomain:
+		if rctx.UserID != "" && ownerID == rctx.UserID && target.DomainID != "" && target.DomainID == rctx.DomainID {
+			return true, "same_domain"
+		}
+		return false, "domain_scope_mismatch"
 	case TargetScopeAgent:
 		if rctx.UserID != "" && ownerID == rctx.UserID && target.AgentName != "" && target.AgentName == rctx.AgentName {
 			return true, "same_agent"
@@ -68,16 +73,17 @@ func (DefaultScopePolicy) SQLFilter(rctx RuntimeContext) ScopeSQLFilter {
 			OR (
 				? <> ''
 				AND user_id = ?
-				AND COALESCE(NULLIF(metadata->'target'->>'target_scope', ''), '') IN ('team', 'org', 'workspace', 'project', 'repo', 'session', 'agent', 'skill')
+				AND COALESCE(NULLIF(metadata->'target'->>'target_scope', ''), '') IN ('team', 'org', 'workspace', 'project', 'repo', 'session', 'agent', 'skill', 'domain')
 				AND COALESCE(NULLIF(metadata->'target'->>'visibility', ''), 'private') = 'private'
 				AND (
-					COALESCE(NULLIF(metadata->'target'->>'target_scope', ''), '') NOT IN ('agent', 'skill')
+					COALESCE(NULLIF(metadata->'target'->>'target_scope', ''), '') NOT IN ('agent', 'skill', 'domain')
 					OR (COALESCE(NULLIF(metadata->'target'->>'target_scope', ''), '') = 'agent' AND metadata->'target'->>'agent_name' = ?)
 					OR (COALESCE(NULLIF(metadata->'target'->>'target_scope', ''), '') = 'skill' AND metadata->'target'->>'skill_name' = ?)
+					OR (COALESCE(NULLIF(metadata->'target'->>'target_scope', ''), '') = 'domain' AND metadata->'target'->>'domain_id' = ?)
 				)
 			)
 		)`,
-		Args: []any{userID, userID, userID, rctx.AgentName, rctx.SkillName},
+		Args: []any{userID, userID, userID, rctx.AgentName, rctx.SkillName, rctx.DomainID},
 	}
 }
 

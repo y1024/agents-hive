@@ -9,6 +9,7 @@ import (
 	"github.com/chef-guo/agents-hive/internal/mcphost"
 	"github.com/chef-guo/agents-hive/internal/sandbox"
 	"github.com/chef-guo/agents-hive/internal/search"
+	"github.com/chef-guo/agents-hive/internal/toolruntime"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
@@ -69,7 +70,7 @@ func setupTestExecutorNoChecker(t *testing.T) func() {
 	}
 }
 
-// TestBash_SecurityDeny 测试 bash 工具通过 SafeExecutorWrapper 的 deny 策略
+// TestBash_SecurityDeny 测试 bash 工具通过全局安全策略把 deny 转入审批。
 func TestBash_SecurityDeny(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	host := mcphost.NewHost(logger)
@@ -77,6 +78,14 @@ func TestBash_SecurityDeny(t *testing.T) {
 	checker := &mockSafeExec{rules: map[string]string{"rm -rf": "deny"}}
 	cleanup := setupTestExecutorWithChecker(t, checker)
 	defer cleanup()
+	oldSafeExec := globalSafeExec
+	oldApprovalBridge := globalApprovalBridge
+	globalSafeExec = checker
+	globalApprovalBridge = nil
+	defer func() {
+		globalSafeExec = oldSafeExec
+		globalApprovalBridge = oldApprovalBridge
+	}()
 
 	registerBash(host, logger, nil)
 
@@ -87,7 +96,7 @@ func TestBash_SecurityDeny(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.True(t, result.IsError)
-	assert.Contains(t, string(result.Content), "命令被安全策略拒绝")
+	assert.Contains(t, result.DecodeContent(), toolruntime.RecoverableToolCallErrorMarker)
 }
 
 // TestBash_SecurityAsk 测试 bash 工具的 ask 策略：
@@ -199,7 +208,7 @@ func TestFormatCommandFailure_GenericPermissionAsksForApproval(t *testing.T) {
 	assert.Contains(t, content, "Permission denied")
 }
 
-// TestGrep_SecurityCheck 测试 grep 工具通过 SafeExecutorWrapper 的 deny 策略
+// TestGrep_SecurityCheck 测试 grep 工具不再由 SafeExecutorWrapper 硬拒绝。
 func TestGrep_SecurityCheck(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	host := mcphost.NewHost(logger)
@@ -216,8 +225,7 @@ func TestGrep_SecurityCheck(t *testing.T) {
 	result, err := host.ExecuteTool(context.Background(), "grep", inputJSON)
 	require.NoError(t, err)
 
-	assert.True(t, result.IsError)
-	assert.Contains(t, string(result.Content), "命令被安全策略拒绝")
+	assert.NotContains(t, string(result.Content), "命令被安全策略拒绝")
 }
 
 // TestGrep_SecurityAsk 测试 grep 工具的 ask 策略：SafeExecutorWrapper 层透传，不拦截。
@@ -241,13 +249,21 @@ func TestGrep_SecurityAsk(t *testing.T) {
 	assert.NotContains(t, string(result.Content), "命令需要审批")
 }
 
-// TestCustomLoader_SecurityCheck 测试自定义工具通过 SafeExecutorWrapper 的安全检查
+// TestCustomLoader_SecurityCheck 测试自定义 shell 工具通过全局安全策略转入审批。
 func TestCustomLoader_SecurityCheck(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 
 	checker := &mockSafeExec{rules: map[string]string{"rm -rf": "deny"}}
 	cleanup := setupTestExecutorWithChecker(t, checker)
 	defer cleanup()
+	oldSafeExec := globalSafeExec
+	oldApprovalBridge := globalApprovalBridge
+	globalSafeExec = checker
+	globalApprovalBridge = nil
+	defer func() {
+		globalSafeExec = oldSafeExec
+		globalApprovalBridge = oldApprovalBridge
+	}()
 
 	tool := CustomTool{
 		Name:        "test_tool",
@@ -260,7 +276,7 @@ func TestCustomLoader_SecurityCheck(t *testing.T) {
 
 	_, err := executeShellTool(tool, nil, logger)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "命令被安全策略拒绝")
+	assert.Contains(t, err.Error(), toolruntime.RecoverableToolCallErrorMarker)
 }
 
 // TestSecurity_NoRules 测试没有安全检查器时的正常行为

@@ -1,9 +1,6 @@
 package sandbox
 
-import (
-	"context"
-	"fmt"
-)
+import "context"
 
 // SafeExecChecker 安全策略检查接口（与 tools.SafeExecChecker 一致）。
 type SafeExecChecker interface {
@@ -29,13 +26,10 @@ func (w *SafeExecutorWrapper) SetChecker(checker SafeExecChecker) {
 }
 
 // Execute 先检查安全策略，通过后委托给底层 Executor。
-// 注意：ask 策略由上层（bash tool）负责处理 HITL 审批，此处只拦截 deny。
+// deny/ask 都由上层工具和 HITL 处理；这里不再做不可越过的硬拒绝。
 func (w *SafeExecutorWrapper) Execute(ctx context.Context, req ExecRequest) (ExecResult, error) {
 	if w.checker != nil {
-		policy := w.checker.MatchPolicy(req.Command)
-		if policy == "deny" {
-			return ExecResult{}, fmt.Errorf("命令被安全策略拒绝: %s", req.Command)
-		}
+		_ = w.checker.MatchPolicy(req.Command)
 	}
 	return w.inner.Execute(ctx, req)
 }

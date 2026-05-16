@@ -11,6 +11,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/chef-guo/agents-hive/internal/auth"
 	"github.com/chef-guo/agents-hive/internal/config"
 	"github.com/chef-guo/agents-hive/internal/master"
 	"github.com/chef-guo/agents-hive/internal/skills"
@@ -55,6 +56,30 @@ func TestSessionTrajectoryGetReturnsSnapshot(t *testing.T) {
 	}
 	if string(got.Messages) != string(messages) {
 		t.Fatalf("messages = %s, want %s", got.Messages, messages)
+	}
+}
+
+func TestTrajectoryRejectsCrossOwner(t *testing.T) {
+	handler, _, trajStore, cleanup := newTestServerForSessionTrajectory(t)
+	defer cleanup()
+
+	sessionID := createTrajectoryTestSession(t, handler, "trajectory-owner")
+	if err := trajStore.Save(t.Context(), trajectory.Snapshot{
+		SessionID:    sessionID,
+		SnapshotSeq:  9,
+		MessageCount: 1,
+		Messages:     json.RawMessage(`[{"role":"user","content":"secret"}]`),
+	}); err != nil {
+		t.Fatalf("save snapshot: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/sessions/"+sessionID+"/trajectory/9", nil)
+	req = req.WithContext(auth.WithUser(auth.WithAuthEnabled(req.Context()), &auth.User{ID: "other-1", Role: "user"}))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("GET trajectory cross-owner status = %d, want 404; body = %s", rec.Code, rec.Body.String())
 	}
 }
 

@@ -82,6 +82,16 @@ func TestPlanVectorSpaceMigrationOffsetResumeAfterInterruption(t *testing.T) {
 	}
 }
 
+func TestPlanVectorSpaceMigrationUsesEmptyUpdatesSliceWhenNoChanges(t *testing.T) {
+	plan := PlanVectorSpaceMigration(nil, VectorSpaceMigrationOptions{TargetSpace: "space-a"})
+	if plan.Updates == nil {
+		t.Fatal("Updates is nil, want empty slice")
+	}
+	if len(plan.Updates) != 0 {
+		t.Fatalf("Updates len = %d, want 0", len(plan.Updates))
+	}
+}
+
 func encodeVectorSpaceMeta(t *testing.T, name string, state EmbeddingState) json.RawMessage {
 	t.Helper()
 	return EncodeVectorSpace(nil, VectorSpaceMetadata{Name: name, EmbeddingState: state})

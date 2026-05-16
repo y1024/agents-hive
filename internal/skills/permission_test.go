@@ -3,10 +3,14 @@ package skills
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/chef-guo/agents-hive/internal/errs"
 	"github.com/chef-guo/agents-hive/internal/plugin"
+	"github.com/chef-guo/agents-hive/internal/router"
+	"github.com/chef-guo/agents-hive/internal/toolruntime"
 	"go.uber.org/zap"
 )
 
@@ -237,18 +241,24 @@ func TestGrantSession_GetGrants(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCheckPermission_SessionGrantOverridesRules(t *testing.T) {
-	// 规则拒绝 bash rm *
+	// 规则命中高风险 bash rm *，应转入审批；用户批准后执行。
 	rules := []PermissionRule{
 		{ToolName: "bash", Pattern: "rm *", Action: PermissionDeny},
 	}
 
-	pm := NewPermissionManager(rules, nil)
+	promptCalled := 0
+	pm := NewPermissionManager(rules, func(context.Context, PermissionRequest) (PermissionResponse, error) {
+		promptCalled++
+		return PermissionResponse{Granted: true}, nil
+	})
 	input := json.RawMessage(`{"command": "rm -rf /tmp/test"}`)
 
-	// 规则应拒绝
 	err := pm.CheckPermission(context.Background(), "bash", input)
-	if err == nil {
-		t.Fatal("规则应拒绝 rm 命令")
+	if err != nil {
+		t.Fatalf("规则 deny 应转入审批并在用户批准后成功: %v", err)
+	}
+	if promptCalled != 1 {
+		t.Fatalf("规则 deny 应触发 1 次审批, got %d", promptCalled)
 	}
 
 	// 用户 "always allow" 覆盖规则
@@ -278,19 +288,18 @@ func TestPermissionManager_CheckPermission_Deny(t *testing.T) {
 		{ToolName: "dangerous_tool", Action: PermissionDeny},
 	}
 
-	mgr := NewPermissionManager(rules, nil)
+	promptCalled := false
+	mgr := NewPermissionManager(rules, func(context.Context, PermissionRequest) (PermissionResponse, error) {
+		promptCalled = true
+		return PermissionResponse{Granted: true}, nil
+	})
 
 	err := mgr.CheckPermission(context.Background(), "dangerous_tool", json.RawMessage(`{}`))
-	if err == nil {
-		t.Error("deny 工具应返回错误")
+	if err != nil {
+		t.Errorf("deny 工具经用户批准后不应返回错误, got: %v", err)
 	}
-
-	if e, ok := err.(*errs.Error); ok {
-		if e.Code != errs.CodePermissionDenied {
-			t.Errorf("期望 CodePermissionDenied, 得到 %d", e.Code)
-		}
-	} else {
-		t.Error("期望 *errs.Error 类型")
+	if !promptCalled {
+		t.Error("deny 规则应转入人工审批")
 	}
 }
 
@@ -319,6 +328,71 @@ func TestPermissionManager_CheckPermission_Ask_Granted(t *testing.T) {
 	}
 }
 
+func TestPermissionManager_UnifiedPolicyPrimaryAllowSkipsLegacyRules(t *testing.T) {
+	mgr := NewPermissionManager([]PermissionRule{
+		{ToolName: "send_im_message", Action: PermissionDeny},
+	}, func(context.Context, PermissionRequest) (PermissionResponse, error) {
+		t.Fatal("unified allow should not trigger legacy prompt")
+		return PermissionResponse{}, nil
+	}, WithPermissionPolicyEvaluatorFunc(func(context.Context, string, json.RawMessage) router.ToolPolicyDecision {
+		return router.ToolPolicyDecision{
+			Action:      router.ToolPolicyAllow,
+			CallableNow: true,
+			Reason:      "routine_external_send",
+			Source:      "tool_policy",
+		}
+	}), WithUnifiedPolicyPrimary(true))
+
+	err := mgr.CheckPermission(context.Background(), "send_im_message", json.RawMessage(`{"content":"hi"}`))
+	if err != nil {
+		t.Fatalf("unified allow should skip legacy deny in primary mode: %v", err)
+	}
+}
+
+func TestPermissionManager_UnifiedPolicyPrimaryAskUsesPrompt(t *testing.T) {
+	promptCalled := false
+	mgr := NewPermissionManager([]PermissionRule{
+		{ToolName: "feishu_api", Action: PermissionAllow},
+	}, func(context.Context, PermissionRequest) (PermissionResponse, error) {
+		promptCalled = true
+		return PermissionResponse{Granted: true}, nil
+	}, WithPermissionPolicyEvaluatorFunc(func(context.Context, string, json.RawMessage) router.ToolPolicyDecision {
+		return router.ToolPolicyDecision{
+			Action:           router.ToolPolicyAsk,
+			CallableNow:      true,
+			RequiresApproval: true,
+			Reason:           "privileged_external_action",
+			Source:           "tool_policy",
+		}
+	}), WithUnifiedPolicyPrimary(true))
+
+	err := mgr.CheckPermission(context.Background(), "feishu_api", json.RawMessage(`{"action":"upload_file"}`))
+	if err != nil {
+		t.Fatalf("unified ask should be approvable: %v", err)
+	}
+	if !promptCalled {
+		t.Fatal("unified ask should trigger prompt even when legacy rule says allow")
+	}
+}
+
+func TestPermissionManager_LegacyModeRulesStillApply(t *testing.T) {
+	mgr := NewPermissionManager([]PermissionRule{
+		{ToolName: "send_im_message", Action: PermissionDeny},
+	}, nil, WithPermissionPolicyEvaluatorFunc(func(context.Context, string, json.RawMessage) router.ToolPolicyDecision {
+		return router.ToolPolicyDecision{
+			Action:      router.ToolPolicyAllow,
+			CallableNow: true,
+			Reason:      "routine_external_send",
+			Source:      "tool_policy",
+		}
+	}), WithUnifiedPolicyPrimary(false))
+
+	err := mgr.CheckPermission(context.Background(), "send_im_message", json.RawMessage(`{"content":"hi"}`))
+	if err == nil {
+		t.Fatal("legacy mode should still let permission_rules deny as strict rollback")
+	}
+}
+
 func TestPermissionManager_CheckPermission_Ask_Denied(t *testing.T) {
 	rules := []PermissionRule{
 		{ToolName: "bash", Action: PermissionAsk},
@@ -339,6 +413,25 @@ func TestPermissionManager_CheckPermission_Ask_Denied(t *testing.T) {
 		if e.Code != errs.CodePermissionDenied {
 			t.Errorf("期望 CodePermissionDenied, 得到 %d", e.Code)
 		}
+	}
+}
+
+func TestPermissionManager_CheckPermission_PromptErrorRecoverable(t *testing.T) {
+	mgr := NewPermissionManager([]PermissionRule{
+		{ToolName: "bash", Action: PermissionAsk},
+	}, func(context.Context, PermissionRequest) (PermissionResponse, error) {
+		return PermissionResponse{}, errors.New("approval unavailable")
+	})
+
+	err := mgr.CheckPermission(context.Background(), "bash", json.RawMessage(`{"command":"curl https://example.com"}`))
+	if err == nil {
+		t.Fatal("审批请求失败应返回错误")
+	}
+	if !errs.IsCode(err, errs.CodeExecApprovalTimeout) {
+		t.Fatalf("err = %v, want CodeExecApprovalTimeout", err)
+	}
+	if !strings.Contains(err.Error(), toolruntime.RecoverableToolCallErrorMarker) {
+		t.Fatalf("审批请求失败应返回可恢复错误, got: %v", err)
 	}
 }
 
@@ -464,7 +557,11 @@ func TestPermissionManager_PluginCannotAutoAllowShellAsk(t *testing.T) {
 }
 
 func TestPermissionManager_Grant(t *testing.T) {
-	mgr := NewPermissionManager(nil, nil)
+	promptCalled := false
+	mgr := NewPermissionManager(nil, func(context.Context, PermissionRequest) (PermissionResponse, error) {
+		promptCalled = true
+		return PermissionResponse{Granted: false}, nil
+	})
 
 	// 授予权限
 	mgr.Grant("test_tool", PermissionAllow)
@@ -479,7 +576,10 @@ func TestPermissionManager_Grant(t *testing.T) {
 	mgr.Grant("test_tool", PermissionDeny)
 	err = mgr.CheckPermission(context.Background(), "test_tool", json.RawMessage(`{}`))
 	if err == nil {
-		t.Error("deny grant 应拒绝工具")
+		t.Error("用户拒绝审批后应返回错误")
+	}
+	if !promptCalled {
+		t.Error("deny grant 应转入人工审批")
 	}
 }
 
@@ -558,14 +658,14 @@ func TestPermissionManager_RememberDeny(t *testing.T) {
 		t.Error("第一次调用应被拒绝")
 	}
 
-	// 第二次调用 - 应该直接拒绝，不提示
+	// 第二次调用 - remembered deny 仍应转入审批，由用户当前确认决定
 	err = mgr.CheckPermission(context.Background(), "risky", json.RawMessage(`{}`))
 	if err == nil {
 		t.Error("第二次调用应被拒绝")
 	}
 
-	if callCount != 1 {
-		t.Errorf("期望仅 1 次 prompt 调用 (deny remembered), 得到 %d", callCount)
+	if callCount != 2 {
+		t.Errorf("期望 2 次 prompt 调用 (remembered deny 仍需用户确认), 得到 %d", callCount)
 	}
 }
 
@@ -609,7 +709,11 @@ func TestCheckPermission_PatternMatchWithInput(t *testing.T) {
 		{ToolName: "edit", Pattern: "src/**/*.go", Action: PermissionAllow},
 		{ToolName: "edit", Action: PermissionDeny}, // 其他路径拒绝
 	}
-	pm := NewPermissionManager(rules, nil)
+	promptCalled := false
+	pm := NewPermissionManager(rules, func(context.Context, PermissionRequest) (PermissionResponse, error) {
+		promptCalled = true
+		return PermissionResponse{Granted: true}, nil
+	})
 
 	// src 下的 .go 文件应被允许
 	input := json.RawMessage(`{"file_path": "src/main.go"}`)
@@ -623,10 +727,13 @@ func TestCheckPermission_PatternMatchWithInput(t *testing.T) {
 		t.Fatalf("src/pkg/handler.go 应被允许: %v", err)
 	}
 
-	// 非 src 目录应被拒绝
+	// 非 src 目录命中 deny 规则时应转入审批，用户批准后允许执行
 	input = json.RawMessage(`{"file_path": "config.yaml"}`)
-	if err := pm.CheckPermission(context.Background(), "edit", input); err == nil {
-		t.Fatal("config.yaml 应被拒绝")
+	if err := pm.CheckPermission(context.Background(), "edit", input); err != nil {
+		t.Fatalf("config.yaml 经用户批准后应允许执行: %v", err)
+	}
+	if !promptCalled {
+		t.Fatal("config.yaml 应触发审批")
 	}
 }
 
@@ -651,10 +758,13 @@ func TestCheckPermission_BashCommandPattern(t *testing.T) {
 		t.Fatalf("git status 应被允许: %v", err)
 	}
 
-	// rm 命令拒绝
+	// rm 命令命中 deny 规则时应转入审批
 	input = json.RawMessage(`{"command": "rm -rf /tmp"}`)
-	if err := pm.CheckPermission(context.Background(), "bash", input); err == nil {
-		t.Fatal("rm 命令应被拒绝")
+	if err := pm.CheckPermission(context.Background(), "bash", input); err != nil {
+		t.Fatalf("rm 命令经用户批准后应成功: %v", err)
+	}
+	if !promptCalled {
+		t.Fatal("rm 命令应触发 prompt")
 	}
 
 	// 其他命令需要 ask
@@ -682,7 +792,7 @@ func TestEvaluationOrder(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			"粗粒度allow_grant不能覆盖配置deny规则",
+			"粗粒度allow_grant不能覆盖配置deny规则_无审批通道时报错",
 			[]PermissionRule{{ToolName: "bash", Action: PermissionDeny}},
 			[]grantEntry{{key: grantKey{tool: "bash"}, action: PermissionAllow}},
 			"bash",
@@ -848,5 +958,8 @@ func TestCheckPermission_NoPromptFn(t *testing.T) {
 	err := pm.CheckPermission(context.Background(), "tool", nil)
 	if err == nil {
 		t.Fatal("无 promptFn 时应返回错误")
+	}
+	if !strings.Contains(err.Error(), toolruntime.RecoverableToolCallErrorMarker) {
+		t.Fatalf("无 promptFn 应返回可恢复错误, got: %v", err)
 	}
 }

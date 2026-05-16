@@ -39,6 +39,46 @@ func LoadCases(dir string) ([]LoadedCase, error) {
 	return out, nil
 }
 
+// LoadCasesByDomain 从目录加载 case 并按 domain_id 过滤。
+// 如果 domainID 为空，返回所有 case。
+func LoadCasesByDomain(dir string, domainID string) ([]LoadedCase, error) {
+	all, err := LoadCases(dir)
+	if err != nil {
+		return nil, err
+	}
+	if domainID == "" {
+		return all, nil
+	}
+	var filtered []LoadedCase
+	for _, lc := range all {
+		if lc.Case.DomainID == domainID {
+			filtered = append(filtered, lc)
+		}
+	}
+	return filtered, nil
+}
+
+// LoadCasesBySuiteID 从目录加载 case 并按 suite_id (存储在 Tags 中) 过滤。
+func LoadCasesBySuiteID(dir string, suiteID string) ([]LoadedCase, error) {
+	all, err := LoadCases(dir)
+	if err != nil {
+		return nil, err
+	}
+	if suiteID == "" {
+		return all, nil
+	}
+	var filtered []LoadedCase
+	for _, lc := range all {
+		for _, tag := range lc.Case.Tags {
+			if tag == "suite:"+suiteID {
+				filtered = append(filtered, lc)
+				break
+			}
+		}
+	}
+	return filtered, nil
+}
+
 func ValidateCase(c Case) error {
 	if c.ID == "" {
 		return fmt.Errorf("id missing")

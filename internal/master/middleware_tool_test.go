@@ -132,9 +132,9 @@ func TestExecuteTool_RechecksRouteDecisionAfterMiddlewareMutatesToolName(t *test
 	}, "", "")
 
 	require.True(t, result.IsError)
-	require.True(t, result.Terminal)
+	require.False(t, result.Terminal)
 	assert.False(t, called, "middleware 改写后的工具仍必须经过 RouteDecision")
-	assert.Contains(t, result.Content, "RouteDecision 拒绝")
+	assert.Contains(t, result.Content, recoverableToolCallErrorMarker)
 	assert.Contains(t, result.Content, "write_file")
 }
 
@@ -162,9 +162,9 @@ func TestExecuteTool_RechecksRouteDecisionAfterMiddlewareMutatesArgs(t *testing.
 	}, "", "")
 
 	require.True(t, result.IsError)
-	require.True(t, result.Terminal)
+	require.False(t, result.Terminal)
 	assert.False(t, called, "middleware 改写后的参数仍必须经过 RouteDecision")
-	assert.Contains(t, result.Content, "RouteDecision 拒绝")
+	assert.Contains(t, result.Content, recoverableToolCallErrorMarker)
 	assert.Contains(t, result.Content, "send_message")
 }
 
@@ -200,9 +200,9 @@ func TestExecuteTool_RechecksRouteDecisionAfterToolBridgePluginMutatesArgs(t *te
 	}, "", "")
 
 	require.True(t, result.IsError)
-	require.True(t, result.Terminal)
+	require.False(t, result.Terminal)
 	assert.False(t, called, "ToolBridge 插件改写后的参数仍必须经过 RouteDecision")
-	assert.Contains(t, result.Content, "RouteDecision 拒绝")
+	assert.Contains(t, result.Content, recoverableToolCallErrorMarker)
 	assert.Contains(t, result.Content, "send_message")
 }
 
@@ -226,9 +226,9 @@ func TestExecuteTool_RejectsSkillNameOutsideRouteDecision(t *testing.T) {
 	}, "", "")
 
 	require.True(t, result.IsError)
-	require.True(t, result.Terminal)
-	assert.False(t, called, "RouteDecision 拒绝时不应执行 skill 工具")
-	assert.Contains(t, result.Content, "RouteDecision 拒绝")
+	require.False(t, result.Terminal)
+	assert.False(t, called, "RouteDecision 参数不匹配时不应执行 skill 工具，应交回模型修复")
+	assert.Contains(t, result.Content, recoverableToolCallErrorMarker)
 	assert.Contains(t, result.Content, "mcp-builder")
 	assert.Contains(t, result.Content, "skill-creator")
 }
@@ -260,8 +260,8 @@ func TestExecuteTool_DefaultSkillConstraintAllowsListOnly(t *testing.T) {
 		Arguments: json.RawMessage(`{"name":"frontend-design"}`),
 	}, "", "")
 	require.True(t, denied.IsError)
-	require.True(t, denied.Terminal)
-	assert.Equal(t, 1, calls, "skill invoke should be rejected before executing")
+	require.False(t, denied.Terminal)
+	assert.Equal(t, 1, calls, "skill invoke should be returned for argument repair before executing")
 	assert.Contains(t, denied.Content, "frontend-design")
 }
 
@@ -285,9 +285,9 @@ func TestExecuteTool_RejectsToolOutsideRouteDecision(t *testing.T) {
 	}, "", "")
 
 	require.True(t, result.IsError)
-	require.True(t, result.Terminal)
+	require.False(t, result.Terminal)
 	assert.False(t, called, "RouteDecision 未允许 tool 时不应执行底层工具")
-	assert.Contains(t, result.Content, "RouteDecision 拒绝")
+	assert.Contains(t, result.Content, recoverableToolCallErrorMarker)
 	assert.Contains(t, result.Content, "write_file")
 	assert.Contains(t, result.Content, "memory|tool_search")
 }
@@ -312,9 +312,9 @@ func TestExecuteTool_RejectsFeishuActionOutsideRouteDecision(t *testing.T) {
 	}, "", "")
 
 	require.True(t, result.IsError)
-	require.True(t, result.Terminal)
-	assert.False(t, called, "RouteDecision 拒绝 action 时不应执行 feishu_api")
-	assert.Contains(t, result.Content, "RouteDecision 拒绝")
+	require.False(t, result.Terminal)
+	assert.False(t, called, "RouteDecision action 不匹配时不应执行 feishu_api，应交回模型修复")
+	assert.Contains(t, result.Content, recoverableToolCallErrorMarker)
 	assert.Contains(t, result.Content, "send_message")
 	assert.Contains(t, result.Content, "get_doc_content|read_sheet")
 }
@@ -339,9 +339,9 @@ func TestExecuteTool_RejectsMemoryOperationOutsideRouteDecision(t *testing.T) {
 	}, "", "")
 
 	require.True(t, result.IsError)
-	require.True(t, result.Terminal)
-	assert.False(t, called, "RouteDecision 拒绝 operation 时不应执行 memory 工具")
-	assert.Contains(t, result.Content, "RouteDecision 拒绝")
+	require.False(t, result.Terminal)
+	assert.False(t, called, "RouteDecision operation 不匹配时不应执行 memory 工具，应交回模型修复")
+	assert.Contains(t, result.Content, recoverableToolCallErrorMarker)
 	assert.Contains(t, result.Content, "save")
 	assert.Contains(t, result.Content, "search|list")
 }
@@ -371,9 +371,9 @@ func TestExecuteTool_RejectsBrowserNestedActionOutsideRouteDecision(t *testing.T
 	}, "", "")
 
 	require.True(t, result.IsError)
-	require.True(t, result.Terminal)
-	assert.False(t, called, "RouteDecision 拒绝嵌套 action 时不应执行 browser_interact")
-	assert.Contains(t, result.Content, "RouteDecision 拒绝")
+	require.False(t, result.Terminal)
+	assert.False(t, called, "RouteDecision 嵌套 action 不匹配时不应执行 browser_interact，应交回模型修复")
+	assert.Contains(t, result.Content, recoverableToolCallErrorMarker)
 	assert.Contains(t, result.Content, "click")
 	assert.Contains(t, result.Content, "navigate|snapshot|wait|screenshot")
 }
@@ -391,7 +391,7 @@ func TestCheckNestedToolInputAllowedRejectsRouteDecisionBypass(t *testing.T) {
 	err := m.CheckNestedToolInputAllowed(ctx, "memory", json.RawMessage(`{"operation":"delete","id":1}`))
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "route decision denied nested tool")
+	assert.Contains(t, err.Error(), recoverableToolCallErrorMarker)
 	assert.Contains(t, err.Error(), "delete")
 	assert.Contains(t, err.Error(), "search|list")
 }
@@ -408,7 +408,7 @@ func TestCheckNestedToolInputAllowedRejectsToolOutsideRouteDecision(t *testing.T
 	err := m.CheckNestedToolInputAllowed(ctx, "write_file", json.RawMessage(`{"path":"/tmp/x","content":"x"}`))
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "route decision denied nested tool")
+	assert.Contains(t, err.Error(), recoverableToolCallErrorMarker)
 	assert.Contains(t, err.Error(), "write_file")
 	assert.Contains(t, err.Error(), "memory|tool_search")
 }
@@ -445,5 +445,5 @@ func TestNewMasterInjectsNestedToolGateIntoToolBridge(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, result)
 	assert.False(t, called, "NewMaster 注入的执行层 gate 应阻断 RouteDecision 外的子 Agent 工具调用")
-	assert.Contains(t, err.Error(), "route decision denied nested tool")
+	assert.Contains(t, err.Error(), recoverableToolCallErrorMarker)
 }

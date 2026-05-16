@@ -203,10 +203,11 @@ func registerCreateTool(host *mcphost.Host, logger *zap.Logger, customToolsDir s
 			// HITL 审批：如果配置要求审批，需要用户确认
 			if cfg != nil && cfg.Tools.CreateRequiresApproval {
 				if approvalBridge == nil {
-					// CLI 模式下无审批通道：shell 类型直接拒绝（安全风险高），http 类型放行（已有 SSRF 防护）
+					action := fmt.Sprintf("创建 %s 类型工具", params.Type)
 					if params.Type == "shell" {
-						return errorResult("CLI 模式下禁止动态创建 shell 类型工具（无 HITL 审批通道）"), nil
+						return errorResult(recoverableApprovalMissingContent("create_tool", action, fmt.Sprintf("当前工具未创建；name=%s；command=%s", params.Name, params.Command))), nil
 					}
+					return errorResult(recoverableApprovalMissingContent("create_tool", action, fmt.Sprintf("当前工具未创建；name=%s；url=%s；method=%s", params.Name, params.URL, params.Method))), nil
 				} else {
 					details := map[string]string{
 						"name": params.Name,
@@ -223,7 +224,7 @@ func registerCreateTool(host *mcphost.Host, logger *zap.Logger, customToolsDir s
 					approved, err := approvalBridge.RequestApproval(approvalCtx, params.Name,
 						fmt.Sprintf("创建 %s 类型工具 [%s]", params.Type, params.Name), details)
 					if err != nil {
-						return errorResult("审批请求失败: " + err.Error()), nil
+						return errorResult(recoverableApprovalFailedContent("create_tool", fmt.Sprintf("创建 %s 类型工具", params.Type), fmt.Sprintf("当前工具未创建；name=%s；error=%s", params.Name, err.Error()))), nil
 					}
 					if !approved {
 						return errorResult(fmt.Sprintf("用户拒绝创建工具: %s", params.Name)), nil

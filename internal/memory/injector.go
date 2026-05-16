@@ -54,6 +54,15 @@ type InjectionConfig struct {
 	MemoryMaxTokens   int
 }
 
+// InjectionRequest 是 memory 注入的稳定入口，显式携带 owner/domain/source 边界。
+type InjectionRequest struct {
+	Query     string
+	SessionID string
+	UserID    string
+	Target    MemoryTarget
+	Runtime   RuntimeContext
+}
+
 func DefaultInjectionConfig() InjectionConfig {
 	return InjectionConfig{
 		MinConfidence:     0.5,
@@ -148,18 +157,59 @@ func (inj *Injector) InjectContext(ctx context.Context, userMessage string, sess
 
 // InjectContextDetailed 基于用户消息查询相关记忆，返回结构化注入结果。
 func (inj *Injector) InjectContextDetailed(ctx context.Context, userMessage string, sessionID string, userID string) (InjectionResult, error) {
+	return inj.InjectContextWithTarget(ctx, InjectionRequest{
+		Query:     userMessage,
+		SessionID: sessionID,
+		UserID:    userID,
+	})
+}
+
+// InjectContextWithTarget 基于显式 owner/domain/source 目标查询相关记忆。
+func (inj *Injector) InjectContextWithTarget(ctx context.Context, req InjectionRequest) (InjectionResult, error) {
 	var out InjectionResult
-	if userMessage == "" {
+	if strings.TrimSpace(req.Query) == "" {
 		return out, nil
 	}
+	rctx := MergeRuntimeContext(RuntimeContextFromContext(ctx), req.Runtime)
+	if rctx.UserID == "" {
+		rctx.UserID = req.UserID
+	}
+	if rctx.SessionID == "" {
+		rctx.SessionID = req.SessionID
+	}
+	rctx = MergeRuntimeContext(rctx, RuntimeContext{
+		DomainID:   req.Target.DomainID,
+		SourceKind: req.Target.SourceKind,
+		SourceName: req.Target.SourceName,
+	})
+	if rctx.DomainID == "" {
+		rctx.DomainID = "generic"
+	}
+	if rctx.SourceKind == "" {
+		rctx.SourceKind = "master"
+	}
+	if rctx.SourceName == "" {
+		rctx.SourceName = "memory_injection"
+	}
+	target := normalizeTarget(req.Target, rctx, "")
+	if err := validateTarget(target); err != nil {
+		return out, err
+	}
+	out.Target = target
+	out.DomainID = target.DomainID
+	out.SourceKind = target.SourceKind
+	out.SourceName = target.SourceName
+	out.OwnerScope = target.Scope
+	out.OwnerID = target.ID
+	ctx = WithRuntimeContext(ctx, rctx)
 
-	feedback, err := inj.searchMemories(ctx, userMessage, userID, MemoryTypeFeedback, inj.feedbackTopK)
+	feedback, err := inj.searchMemories(ctx, req.Query, rctx.UserID, MemoryTypeFeedback, inj.feedbackTopK)
 	if err != nil {
 		inj.logger.Warn("搜索 feedback 记忆失败", zap.Error(err))
 		return out, err
 	}
 	feedback = filterOnlyMemoryType(feedback, MemoryTypeFeedback)
-	regular, err := inj.searchMemories(ctx, userMessage, userID, "", inj.memoryTopK)
+	regular, err := inj.searchMemories(ctx, req.Query, rctx.UserID, "", inj.memoryTopK)
 	if err != nil {
 		inj.logger.Warn("搜索相关记忆失败", zap.Error(err))
 		return out, err
@@ -167,18 +217,18 @@ func (inj *Injector) InjectContextDetailed(ctx context.Context, userMessage stri
 	regular = filterOutMemoryType(regular, MemoryTypeFeedback)
 
 	if len(feedback) == 0 && len(regular) == 0 {
-		inj.logger.Debug("无相关记忆", zap.String("query", userMessage))
+		inj.logger.Debug("无相关记忆", zap.String("query", req.Query))
 		return out, nil
 	}
 
 	now := time.Now()
 	var sections []string
 	var totalTokens int
-	if text, tokens := inj.buildSection(&out, "## 工作方式反馈", feedback, inj.feedbackMaxTokens, now, userID, true); text != "" {
+	if text, tokens := inj.buildSection(&out, "## 工作方式反馈", feedback, inj.feedbackMaxTokens, now, rctx, true); text != "" {
 		sections = append(sections, text)
 		totalTokens += tokens
 	}
-	if text, tokens := inj.buildSection(&out, "## 相关记忆", regular, inj.memoryMaxTokens, now, userID, false); text != "" {
+	if text, tokens := inj.buildSection(&out, "## 相关记忆", regular, inj.memoryMaxTokens, now, rctx, false); text != "" {
 		sections = append(sections, text)
 		totalTokens += tokens
 	}
@@ -277,13 +327,12 @@ func filterOnlyMemoryType(memories []MemoryRecord, memType MemoryType) []MemoryR
 	return out
 }
 
-func (inj *Injector) buildSection(out *InjectionResult, title string, memories []MemoryRecord, maxTokens int, now time.Time, userID string, feedback bool) (string, int) {
+func (inj *Injector) buildSection(out *InjectionResult, title string, memories []MemoryRecord, maxTokens int, now time.Time, rctx RuntimeContext, feedback bool) (string, int) {
 	var sb strings.Builder
 	sb.WriteString(title)
 	sb.WriteString("\n\n")
 	headerTokens := estimateTokens(sb.String())
 	totalTokens := headerTokens
-	rctx := RuntimeContext{UserID: userID}
 	if inj.scopePolicy == nil {
 		inj.scopePolicy = DefaultScopePolicy{}
 	}
@@ -298,7 +347,7 @@ func (inj *Injector) buildSection(out *InjectionResult, title string, memories [
 			}
 			continue
 		}
-		if userID != "" && mem.UserID != "" && mem.UserID != userID {
+		if rctx.UserID != "" && mem.UserID != "" && mem.UserID != rctx.UserID {
 			out.recordSkipped(mem.ID, "cross_user", feedback)
 			continue
 		}

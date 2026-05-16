@@ -1,6 +1,8 @@
 package router
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
 
@@ -33,6 +35,11 @@ type ToolProfile struct {
 	SideEffect         bool              `json:"side_effect,omitempty"`
 	Capabilities       []Capability      `json:"capabilities,omitempty"`
 	AllowedIntentKinds []IntentKind      `json:"allowed_intent_kinds,omitempty"`
+	Version            string            `json:"version,omitempty"`
+	OwnerUserID        string            `json:"owner_user_id,omitempty"`
+	Visibility         string            `json:"visibility,omitempty"`
+	PolicyProfile      string            `json:"policy_profile,omitempty"`
+	InputSchemaHash    string            `json:"input_schema_hash,omitempty"`
 	Metadata           map[string]string `json:"metadata,omitempty"`
 	RawDescription     string            `json:"raw_description,omitempty"`
 }
@@ -242,12 +249,26 @@ func riskTokenSequenceContains(tokens, parts []string) bool {
 // Entry 转换为 typed catalog 条目，供召回与审计共用。
 func (p ToolProfile) Entry() CapabilityEntry {
 	return CapabilityEntry{
-		Name:         p.Name,
-		Kind:         p.Kind,
-		Domain:       p.Domain,
-		Source:       p.Source,
-		Invocation:   p.Invocation,
-		Risk:         p.Risk,
-		Capabilities: append([]Capability(nil), p.Capabilities...),
+		Name:            p.Name,
+		Kind:            p.Kind,
+		Domain:          p.Domain,
+		Source:          p.Source,
+		Invocation:      p.Invocation,
+		Risk:            p.Risk,
+		Capabilities:    append([]Capability(nil), p.Capabilities...),
+		Description:     p.Metadata["description"],
+		Version:         p.Version,
+		OwnerUserID:     p.OwnerUserID,
+		Visibility:      p.Visibility,
+		PolicyProfile:   p.PolicyProfile,
+		InputSchemaHash: p.InputSchemaHash,
 	}
+}
+
+func toolSchemaHash(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
 }

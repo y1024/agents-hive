@@ -15,6 +15,7 @@ import (
 	"github.com/chef-guo/agents-hive/internal/errs"
 	"github.com/chef-guo/agents-hive/internal/mcphost"
 	"github.com/chef-guo/agents-hive/internal/plugin"
+	"github.com/chef-guo/agents-hive/internal/toolruntime"
 )
 
 // SkipToolCallCallbackKey 是 context key，用于主会话直接执行工具时跳过 onToolCall 回调，
@@ -117,7 +118,7 @@ func (b *ToolBridge) CallTool(ctx context.Context, filter *ToolFilter, perm *Per
 			return nil, err
 		}
 		if hookInput.ToolName != toolName {
-			return nil, errs.New(errs.CodePermissionDenied, fmt.Sprintf("插件不允许改写工具名: %s -> %s", toolName, hookInput.ToolName))
+			return nil, errs.New(errs.CodePermissionDenied, recoverablePluginToolRewriteContent(toolName, hookInput.ToolName))
 		}
 		// hook 可能修改了参数
 		input = hookInput.Args
@@ -164,7 +165,7 @@ func (b *ToolBridge) CallTool(ctx context.Context, filter *ToolFilter, perm *Per
 
 	// 5. 执行工具（捕获不存在的工具名，返回友好提示而非硬错误）
 	start := time.Now()
-	result, err := b.host.ExecuteTool(ctx, toolName, input)
+	result, err := toolruntime.InvokeHostTool(ctx, b.host, toolName, input)
 	if b.metrics != nil {
 		b.metrics.RecordToolCall(toolName, time.Since(start), err)
 	}
@@ -175,7 +176,8 @@ func (b *ToolBridge) CallTool(ctx context.Context, filter *ToolFilter, perm *Per
 		for _, t := range available {
 			names = append(names, t.Name)
 		}
-		hint := fmt.Sprintf("工具 %q 不存在。可用工具: %s", toolName, strings.Join(names, ", "))
+		hint := toolruntime.RecoverableToolCallErrorContent("tool_not_found",
+			fmt.Sprintf("工具 %q 不存在，当前调用未执行。可用工具: %s。请重新选择已注册工具并按其 schema 重构参数。", toolName, strings.Join(names, ", ")))
 		b.logger.Warn("LLM 调用了不存在的工具",
 			zap.String("tool", toolName),
 		)
@@ -265,7 +267,7 @@ func (b *ToolBridge) ExecuteDirect(ctx context.Context, toolName string, input j
 			return nil, err
 		}
 		if hookInput.ToolName != toolName {
-			return nil, errs.New(errs.CodePermissionDenied, fmt.Sprintf("插件不允许改写工具名: %s -> %s", toolName, hookInput.ToolName))
+			return nil, errs.New(errs.CodePermissionDenied, recoverablePluginToolRewriteContent(toolName, hookInput.ToolName))
 		}
 		input = hookInput.Args
 	}
@@ -295,7 +297,7 @@ func (b *ToolBridge) ExecuteDirect(ctx context.Context, toolName string, input j
 
 	// 3. 执行工具（tool-not-found 友好提示）
 	start := time.Now()
-	result, err := b.host.ExecuteTool(ctx, toolName, input)
+	result, err := toolruntime.InvokeHostTool(ctx, b.host, toolName, input)
 	if b.metrics != nil {
 		b.metrics.RecordToolCall(toolName, time.Since(start), err)
 	}
@@ -305,7 +307,8 @@ func (b *ToolBridge) ExecuteDirect(ctx context.Context, toolName string, input j
 		for _, t := range available {
 			names = append(names, t.Name)
 		}
-		hint := fmt.Sprintf("工具 %q 不存在。可用工具: %s", toolName, strings.Join(names, ", "))
+		hint := toolruntime.RecoverableToolCallErrorContent("tool_not_found",
+			fmt.Sprintf("工具 %q 不存在，当前调用未执行。可用工具: %s。请重新选择已注册工具并按其 schema 重构参数。", toolName, strings.Join(names, ", ")))
 		b.logger.Warn("LLM 调用了不存在的工具", zap.String("tool", toolName))
 		data, _ := json.Marshal(hint)
 		return &mcphost.ToolResult{Content: data, IsError: true}, nil
@@ -375,6 +378,11 @@ func cloneRawMessage(in json.RawMessage) json.RawMessage {
 
 func sameRawJSON(left, right json.RawMessage) bool {
 	return bytes.Equal(bytes.TrimSpace(left), bytes.TrimSpace(right))
+}
+
+func recoverablePluginToolRewriteContent(original, rewritten string) string {
+	return toolruntime.RecoverableToolCallErrorContent("plugin_tool_name_rewrite",
+		fmt.Sprintf("插件试图将工具名从 %q 改写为 %q，当前调用未执行。请按原始工具名和当前可见工具列表重新构造工具调用。", original, rewritten))
 }
 
 // AvailableTools 返回经 ToolFilter 过滤的工具列表

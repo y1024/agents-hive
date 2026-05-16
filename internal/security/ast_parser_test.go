@@ -12,15 +12,15 @@ func TestASTAnalyzer_Analyze(t *testing.T) {
 	analyzer := NewASTAnalyzer("/home/project", zap.NewNop())
 
 	tests := []struct {
-		name        string
-		command     string
-		wantCmds    []string
-		wantPiped   bool
-		wantRedir   bool
-		wantSubs    int
-		wantExt     bool
-		wantPaths   []string // 期望包含的路径（子集检查）
-		wantErr     bool
+		name      string
+		command   string
+		wantCmds  []string
+		wantPiped bool
+		wantRedir bool
+		wantSubs  int
+		wantExt   bool
+		wantPaths []string // 期望包含的路径（子集检查）
+		wantErr   bool
 	}{
 		{
 			name:     "简单命令",
@@ -69,10 +69,10 @@ func TestASTAnalyzer_Analyze(t *testing.T) {
 			wantExt:  false,
 		},
 		{
-			name:      "多个子 shell",
-			command:   "(echo a) && (echo b)",
-			wantCmds:  []string{"echo"},
-			wantSubs:  2,
+			name:     "多个子 shell",
+			command:  "(echo a) && (echo b)",
+			wantCmds: []string{"echo"},
+			wantSubs: 2,
 		},
 		{
 			name:     "带引号参数",
@@ -151,7 +151,7 @@ func TestSafeExecutorWithAST(t *testing.T) {
 		{
 			name:     "AST 拦截危险命令 rm -rf /",
 			command:  "rm -rf /",
-			expected: PolicyDeny,
+			expected: PolicyAsk,
 		},
 		{
 			name:     "AST 提升项目外路径为 ask",
@@ -323,8 +323,8 @@ func TestASTAnalyzer_DangerousVarExpansion(t *testing.T) {
 	analyzer := NewASTAnalyzer("/home/project", zap.NewNop())
 
 	tests := []struct {
-		name                 string
-		command              string
+		name                  string
+		command               string
 		wantIndirectExpansion bool
 	}{
 		{

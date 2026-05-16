@@ -365,6 +365,85 @@ func TestInjector_InjectContextDetailedGovernance(t *testing.T) {
 	}
 }
 
+func TestInjector_InjectContextDetailedLegacyWrapperUsesGenericDomain(t *testing.T) {
+	store := &mockMemoryStore{
+		searchResultsByType: map[MemoryType]*SearchResult{
+			MemoryTypeFeedback: {Memories: nil},
+			"": {
+				Memories: []MemoryRecord{
+					{ID: 1, UserID: "user-1", Type: MemoryTypeUser, Content: "通用记忆", Metadata: mustGovernance(t, Governance{Confidence: 0.9})},
+				},
+			},
+		},
+	}
+	inj := NewInjector(store, 2000, 10, zap.NewNop())
+
+	got, err := inj.InjectContextDetailed(context.Background(), "查询", "s1", "user-1")
+
+	if err != nil {
+		t.Fatalf("InjectContextDetailed returned error: %v", err)
+	}
+	if got.DomainID != "generic" || got.SourceKind != "master" || got.SourceName != "memory_injection" {
+		t.Fatalf("source metadata = domain %q source %q/%q, want generic master/memory_injection", got.DomainID, got.SourceKind, got.SourceName)
+	}
+	if got.OwnerScope != TargetScopeUser || got.OwnerID != "user-1" {
+		t.Fatalf("owner = %s/%s, want user/user-1", got.OwnerScope, got.OwnerID)
+	}
+}
+
+func TestInjector_InjectContextWithTargetCarriesDomainAndFiltersScope(t *testing.T) {
+	targetMeta := func(domain string) json.RawMessage {
+		raw := EncodeGovernance(nil, Governance{Confidence: 0.9})
+		return EncodeMemoryTarget(raw, MemoryTarget{
+			Scope:      TargetScopeDomain,
+			Visibility: TargetVisibilityPrivate,
+			UserID:     "user-1",
+			DomainID:   domain,
+		})
+	}
+	store := &mockMemoryStore{
+		searchResultsByType: map[MemoryType]*SearchResult{
+			MemoryTypeFeedback: {Memories: nil},
+			"": {
+				Memories: []MemoryRecord{
+					{ID: 1, UserID: "user-1", Type: MemoryTypeProject, Content: "客服 SOP", Metadata: targetMeta("customer_service")},
+					{ID: 2, UserID: "user-1", Type: MemoryTypeProject, Content: "技能 SOP", Metadata: targetMeta("skill_authoring")},
+				},
+			},
+		},
+	}
+	inj := NewInjector(store, 2000, 10, zap.NewNop())
+
+	got, err := inj.InjectContextWithTarget(context.Background(), InjectionRequest{
+		Query:     "查询",
+		SessionID: "s1",
+		UserID:    "user-1",
+		Target: MemoryTarget{
+			Scope:      TargetScopeDomain,
+			UserID:     "user-1",
+			DomainID:   "customer_service",
+			SourceKind: "workflow",
+			SourceName: "case_triage",
+		},
+	})
+
+	if err != nil {
+		t.Fatalf("InjectContextWithTarget returned error: %v", err)
+	}
+	if got.DomainID != "customer_service" || got.SourceKind != "workflow" || got.SourceName != "case_triage" {
+		t.Fatalf("source metadata = domain %q source %q/%q", got.DomainID, got.SourceKind, got.SourceName)
+	}
+	if !strings.Contains(got.Text, "客服 SOP") || strings.Contains(got.Text, "技能 SOP") {
+		t.Fatalf("unexpected text: %s", got.Text)
+	}
+	if got.SkippedScope != 1 {
+		t.Fatalf("SkippedScope = %d, want 1", got.SkippedScope)
+	}
+	if len(store.searchOptions) < 2 || store.searchOptions[1].UserID != "user-1" {
+		t.Fatalf("search options = %+v, want user scoped search", store.searchOptions)
+	}
+}
+
 func TestInjector_InjectContextDetailedRecordsTokenBudgetSkips(t *testing.T) {
 	store := &mockMemoryStore{
 		searchResultsByType: map[MemoryType]*SearchResult{

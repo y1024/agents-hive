@@ -66,7 +66,7 @@ func TestPgTracker_Record(t *testing.T) {
 
 	entry := accounting.UsageEntry{
 		SessionID:        "sess-1",
-		Model:            "gpt-4o",
+		Model:            "gpt-5",
 		PromptTokens:     100,
 		CompletionTokens: 50,
 		CostUSD:          0.0025,
@@ -104,8 +104,8 @@ func TestPgTracker_GetTotalCost_ByModel(t *testing.T) {
 	ctx := context.Background()
 
 	entries := []accounting.UsageEntry{
-		{SessionID: "sess-2", Model: "gpt-4o", PromptTokens: 100, CompletionTokens: 50, CostUSD: 0.001},
-		{SessionID: "sess-2", Model: "gpt-4o", PromptTokens: 200, CompletionTokens: 100, CostUSD: 0.002},
+		{SessionID: "sess-2", Model: "gpt-5", PromptTokens: 100, CompletionTokens: 50, CostUSD: 0.001},
+		{SessionID: "sess-2", Model: "gpt-5", PromptTokens: 200, CompletionTokens: 100, CostUSD: 0.002},
 		{SessionID: "sess-2", Model: "claude-3-5-sonnet", PromptTokens: 300, CompletionTokens: 150, CostUSD: 0.003},
 	}
 	for _, e := range entries {
@@ -122,9 +122,9 @@ func TestPgTracker_GetTotalCost_ByModel(t *testing.T) {
 	assert.Equal(t, int64(300), summary.TotalCompletionTokens)
 
 	// ByModel 明细
-	require.Contains(t, summary.ByModel, "gpt-4o")
+	require.Contains(t, summary.ByModel, "gpt-5")
 	require.Contains(t, summary.ByModel, "claude-3-5-sonnet")
-	assert.Equal(t, int64(2), summary.ByModel["gpt-4o"].RequestCount)
+	assert.Equal(t, int64(2), summary.ByModel["gpt-5"].RequestCount)
 	assert.Equal(t, int64(1), summary.ByModel["claude-3-5-sonnet"].RequestCount)
 
 	// Total == sum(ByModel)
@@ -150,7 +150,7 @@ func TestPgTracker_GetTotalCost_ConsistencyUnderConcurrentWrites(t *testing.T) {
 			defer wg.Done()
 			_ = tracker.Record(ctx, accounting.UsageEntry{
 				SessionID:    "sess-concurrent",
-				Model:        "gpt-4o",
+				Model:        "gpt-5",
 				PromptTokens: 10, CompletionTokens: 5, CostUSD: 0.0001,
 			})
 		}()
@@ -166,7 +166,7 @@ func TestPgTracker_GetTotalCost_ConsistencyUnderConcurrentWrites(t *testing.T) {
 		sumCost += mc.CostUSD
 	}
 	assert.InDelta(t, summary.TotalCostUSD, sumCost, 1e-9, "TotalCostUSD 与 ByModel 之和不一致")
-	assert.Equal(t, summary.RequestCount, summary.ByModel["gpt-4o"].RequestCount)
+	assert.Equal(t, summary.RequestCount, summary.ByModel["gpt-5"].RequestCount)
 }
 
 func TestPgTracker_GetSessionCost_IsolatesSession(t *testing.T) {
@@ -273,7 +273,7 @@ func TestAsyncRecorder_SubmitAndStop(t *testing.T) {
 	rec := accounting.NewAsyncRecorder(tracker, nil)
 	for i := 0; i < 10; i++ {
 		rec.Submit(accounting.UsageEntry{
-			SessionID: "sess-async", Model: "gpt-4o",
+			SessionID: "sess-async", Model: "gpt-5",
 			PromptTokens: 10, CompletionTokens: 5, CostUSD: 0.0001,
 		})
 	}

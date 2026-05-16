@@ -12,6 +12,7 @@ import type {
   OptimizationReviewSuggestion,
   OptimizationSuggestionStatus,
   QualityCandidateRecord,
+  RunnerInfo,
   RollbackAlert,
   RollbackRecord,
 } from '../../types/api';
@@ -45,6 +46,15 @@ export function AutoOptimization() {
   const [approvals, setApprovals] = useState<OptimizationApprovalRecord[]>([]);
   const [rollbackAlerts, setRollbackAlerts] = useState<RollbackAlert[]>([]);
   const [rollbacks, setRollbacks] = useState<RollbackRecord[]>([]);
+
+  const rememberCandidate = useCallback((candidate?: QualityCandidateRecord | null) => {
+    if (!candidate) return;
+    setCandidates((current) => {
+      const existing = current.find((item) => item.id === candidate.id);
+      if (!existing) return [candidate, ...current];
+      return current.map((item) => item.id === candidate.id ? { ...item, ...candidate } : item);
+    });
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -129,14 +139,20 @@ export function AutoOptimization() {
   const createApproval = async () => {
     const subjectId = evalDiff?.id ?? selected?.id;
     if (!subjectId) return;
+    const guard = evalDiff ? evidenceGuard(evalDiff.treatment_runner_info) : evidenceGuard(selected?.runner_info);
+    if (evalDiff && !guard.canApprove) {
+      addToast('warning', guard.message);
+      return;
+    }
     try {
-      await client.adminCreateOptimizationApproval({
+      const approval = await client.adminCreateOptimizationApproval({
         subject_id: subjectId,
         subject_type: evalDiff ? 'eval_diff' : 'suggestion',
         action: 'approve',
         reviewer_role: 'lead',
         note: note || '前端最小入口记录',
       });
+      rememberCandidate(approval.candidate);
       addToast('success', '已创建审批记录');
       await refreshOptimizationGuards(subjectId);
     } catch (e: unknown) {
@@ -173,11 +189,17 @@ export function AutoOptimization() {
 
   const review = async (action: 'approve' | 'reject') => {
     if (!selected) return;
+    const guard = evidenceGuard(selected.runner_info);
+    if (action === 'approve' && selected.source_eval_diff_id && !guard.canApprove) {
+      addToast('warning', guard.message);
+      return;
+    }
     try {
       const updated = action === 'approve'
         ? await client.adminApproveOptimizationSuggestion(selected.id, note)
         : await client.adminRejectOptimizationSuggestion(selected.id, note);
       setSelected(updated);
+      rememberCandidate(updated.candidate);
       addToast('success', action === 'approve' ? '已批准；不会自动写生产配置' : '已拒绝建议');
       setNote('');
       await load();
@@ -188,9 +210,15 @@ export function AutoOptimization() {
 
   const applySuggestion = async () => {
     if (!selected) return;
+    const guard = evidenceGuard(selected.runner_info);
+    if (selected.source_eval_diff_id && !guard.canApply) {
+      addToast('warning', guard.message);
+      return;
+    }
     try {
       const updated = await client.adminApplyOptimizationSuggestion(selected.id);
       setSelected(updated);
+      rememberCandidate(updated.candidate);
       addToast('success', '已应用建议并记录审计状态');
       await load();
     } catch (e: unknown) {
@@ -203,6 +231,7 @@ export function AutoOptimization() {
     if (!selected) return;
     try {
       const rollout = await client.adminRollbackOptimizationSuggestion(selected.id);
+      rememberCandidate(rollout.candidate);
       setRollbackStatus(`${rollout.status}${rollout.rolled_back_at ? ` · ${new Date(rollout.rolled_back_at).toLocaleString()}` : ''}`);
       addToast('success', '已回滚应用结果');
       await load();
@@ -278,6 +307,7 @@ export function AutoOptimization() {
                   <ApplyBadge status={selected.apply_status || 'unapplied'} />
                 </div>
               </div>
+              <EvidenceGuardPanel runnerInfo={selected.runner_info} source={selected.source_eval_diff_id ? 'eval diff' : 'candidate'} />
               <p className="text-sm text-[var(--text-secondary)]">{selected.rationale}</p>
               {selected.apply_error ? (
                 <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
@@ -307,7 +337,7 @@ export function AutoOptimization() {
               <div className="flex flex-wrap gap-2">
                 <button className={successButton} disabled={selected.status !== 'pending'} onClick={() => review('approve')}>
                   <CheckCircle2 size={14} />
-                  批准记录
+                  记录批准
                 </button>
                 <button className={dangerButton} disabled={selected.status !== 'pending'} onClick={() => review('reject')}>
                   <XCircle size={14} />
@@ -316,7 +346,7 @@ export function AutoOptimization() {
                 {selected.status === 'approved' && (selected.apply_status || 'unapplied') === 'unapplied' ? (
                   <button className={successButton} onClick={applySuggestion}>
                     <PlayCircle size={14} />
-                    应用
+                    执行应用
                   </button>
                 ) : null}
                 {(selected.apply_status || 'unapplied') === 'applied' ? (
@@ -396,6 +426,8 @@ export function AutoOptimization() {
                 <p className="font-mono text-xs truncate">{evalDiff.id}</p>
                 <p>success Δ {formatPercent(evalDiff.success_rate_delta)} · latency Δ {evalDiff.average_latency_delta_ms.toFixed(0)}ms</p>
                 <p className="text-xs text-[var(--text-secondary)]">case diffs: {evalDiff.case_diffs.length}</p>
+                <RunnerEvidenceInline label="baseline" runnerInfo={evalDiff.baseline_runner_info} />
+                <RunnerEvidenceInline label="treatment" runnerInfo={evalDiff.treatment_runner_info} />
               </div>
             ) : (
               <p className="mt-2 text-sm text-[var(--text-secondary)]">基于最近两次带 case_results 的 batch eval 计算后，可生成建议、AB report 和 rollback alert。</p>
@@ -452,6 +484,36 @@ function ApplyBadge({ status }: { status: OptimizationReviewSuggestion['apply_st
   return <span className={`px-2 py-0.5 rounded-full text-[11px] font-medium ${cls}`}>{status}</span>;
 }
 
+function EvidenceGuardPanel({ runnerInfo, source }: { runnerInfo?: RunnerInfo; source: string }) {
+  const guard = evidenceGuard(runnerInfo);
+  const isEvalDiff = source === 'eval diff';
+  const cls = guard.level === 'static_schema' || guard.level === 'unknown'
+    ? 'border-red-200 bg-red-50 text-red-700'
+    : guard.canApply
+      ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+      : 'border-amber-200 bg-amber-50 text-amber-700';
+  return (
+    <div className={`rounded-lg border px-3 py-2 text-sm ${cls}`}>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs uppercase tracking-wide">证据级别</span>
+        <span className="font-mono text-xs">{guard.level}</span>
+        <span className="font-mono text-xs">{runnerLabel(runnerInfo)}</span>
+      </div>
+      <p className="mt-1 text-xs">{isEvalDiff ? guard.message : '候选生成建议未绑定 eval diff runner；需人工审批，不能据此判断可上线。'}</p>
+    </div>
+  );
+}
+
+function RunnerEvidenceInline({ label, runnerInfo }: { label: string; runnerInfo?: RunnerInfo }) {
+  const guard = evidenceGuard(runnerInfo);
+  return (
+    <p className="text-xs text-[var(--text-secondary)]">
+      {label} runner <span className="font-mono text-[var(--text-primary)]">{runnerLabel(runnerInfo)}</span>
+      {' '}· evidence <span className={guard.canApprove ? 'font-mono text-emerald-700' : 'font-mono text-red-700'}>{guard.level}</span>
+    </p>
+  );
+}
+
 function DiffBlock({ title, value }: { title: string; value: string }) {
   return (
     <div>
@@ -468,6 +530,7 @@ function formatPercent(value: number) {
 function batchEvalRunToEvalRun(run: BatchEvalRun): EvalRun {
   return {
     id: run.id,
+    runner_info: run.runner_info,
     created_at: run.created_at,
     results: (run.case_results ?? []).map((result): EvalResult => ({
       case_id: result.case_id,
@@ -478,4 +541,50 @@ function batchEvalRunToEvalRun(run: BatchEvalRun): EvalRun {
       reason: result.reason,
     })),
   };
+}
+
+function evidenceGuard(runnerInfo?: RunnerInfo) {
+  const level = normalizeEvidenceLevel(runnerInfo?.evidence_level);
+  const canApprove = level === 'real_runner' || level === 'production_shadow' || level === 'human_verified';
+  const canApply = canApprove;
+  if (level === 'static_schema') {
+    return {
+      level,
+      canApprove,
+      canApply,
+      message: 'static_schema 仅代表静态结构检查，不能批准优化，也不能作为上线或执行应用依据。',
+    };
+  }
+  if (level === 'unknown') {
+    return {
+      level,
+      canApprove,
+      canApply,
+      message: '未返回 runner evidence，不能批准优化，也不能作为执行应用依据。',
+    };
+  }
+  if (canApprove) {
+    return {
+      level,
+      canApprove,
+      canApply,
+      message: '具备真实执行证据；仍需审批记录和回滚观察，不代表自动可上线。',
+    };
+  }
+  return {
+    level,
+    canApprove,
+    canApply,
+    message: `${level} 是有限证据，需补充 real_runner 或 production_shadow 后再批准或执行应用。`,
+  };
+}
+
+function normalizeEvidenceLevel(level?: string) {
+  const trimmed = level?.trim();
+  return trimmed || 'unknown';
+}
+
+function runnerLabel(runnerInfo?: RunnerInfo) {
+  if (!runnerInfo?.name) return 'runner:-';
+  return `${runnerInfo.name}${runnerInfo.version ? `@${runnerInfo.version}` : ''}`;
 }

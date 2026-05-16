@@ -237,9 +237,9 @@ func TestDetectProvider(t *testing.T) {
 
 func TestGetModelMeta(t *testing.T) {
 	t.Run("已注册模型返回元数据", func(t *testing.T) {
-		meta := GetModelMeta("gpt-4o")
+		meta := GetModelMeta("gpt-5")
 		require.NotNil(t, meta)
-		assert.Equal(t, "GPT-4o", meta.Name)
+		assert.Equal(t, "gpt-5", meta.Name)
 		assert.Equal(t, 128000, meta.ContextWindow)
 		assert.True(t, meta.SupportsVision())
 		assert.True(t, meta.SupportsTools())
@@ -439,13 +439,13 @@ func TestPromptCachingTransformer_OpenAI(t *testing.T) {
 			openai.UserMessage("hello"),
 		}
 		params := &openai.ChatCompletionNewParams{
-			Model:    "gpt-4o",
+			Model:    "gpt-5",
 			Messages: messages,
 		}
 
 		ctx := &RequestTransformContext{
 			Provider: "openai",
-			Model:    "gpt-4o",
+			Model:    "gpt-5",
 			Messages: messages,
 			Params:   params,
 		}
@@ -453,16 +453,16 @@ func TestPromptCachingTransformer_OpenAI(t *testing.T) {
 		transformer.TransformRequest(ctx)
 
 		// 验证 prompt_cache_key 被设置为稳定分桶 key
-		assert.Equal(t, openai.String(stablePromptCacheKey("gpt-4o", "", nil, nil)), ctx.Params.PromptCacheKey)
+		assert.Equal(t, openai.String(stablePromptCacheKey("gpt-5", "", nil, nil)), ctx.Params.PromptCacheKey)
 	})
 }
 
 func TestStablePromptCacheKey(t *testing.T) {
-	key := stablePromptCacheKey("gpt-4o", "user-123", []string{"b", "a"}, []mcphost.ToolDefinition{
+	key := stablePromptCacheKey("gpt-5", "user-123", []string{"b", "a"}, []mcphost.ToolDefinition{
 		{Name: "zeta", InputSchema: []byte(`{"type":"object"}`)},
 		{Name: "alpha", InputSchema: []byte(`{"type":"object"}`)},
 	})
-	same := stablePromptCacheKey("gpt-4o", "user-123", []string{"a", "b"}, []mcphost.ToolDefinition{
+	same := stablePromptCacheKey("gpt-5", "user-123", []string{"a", "b"}, []mcphost.ToolDefinition{
 		{Name: "alpha", InputSchema: []byte(`{"type":"object"}`)},
 		{Name: "zeta", InputSchema: []byte(`{"type":"object"}`)},
 	})
@@ -747,13 +747,13 @@ func TestChainRequestTransformer(t *testing.T) {
 			openai.UserMessage("hello"),
 		}
 		params := &openai.ChatCompletionNewParams{
-			Model:    "gpt-4o",
+			Model:    "gpt-5",
 			Messages: messages,
 		}
 
 		ctx := &RequestTransformContext{
 			Provider: "openai",
-			Model:    "gpt-4o",
+			Model:    "gpt-5",
 			Messages: messages,
 			Params:   params,
 		}
@@ -761,7 +761,7 @@ func TestChainRequestTransformer(t *testing.T) {
 		chain.TransformRequest(ctx)
 
 		// 缓存转换器应执行
-		assert.Equal(t, openai.String(stablePromptCacheKey("gpt-4o", "", nil, nil)), ctx.Params.PromptCacheKey)
+		assert.Equal(t, openai.String(stablePromptCacheKey("gpt-5", "", nil, nil)), ctx.Params.PromptCacheKey)
 
 		// reasoning 不应设置
 		assert.Empty(t, string(ctx.Params.ReasoningEffort))
@@ -908,8 +908,8 @@ func TestModalityFilterTransformer(t *testing.T) {
 	})
 
 	t.Run("模型支持 vision 时不替换图片", func(t *testing.T) {
-		// gpt-4o 支持 vision
-		transformer := NewModalityFilterTransformer("gpt-4o", logger)
+		// gpt-5 支持 vision
+		transformer := NewModalityFilterTransformer("gpt-5", logger)
 
 		messages := []MessageWithTools{
 			{
@@ -1037,11 +1037,11 @@ func TestTemperatureDefaultsTransformer(t *testing.T) {
 
 	t.Run("OpenAI 默认温度 1.0", func(t *testing.T) {
 		params := &openai.ChatCompletionNewParams{
-			Model: "gpt-4o",
+			Model: "gpt-5",
 		}
 		ctx := &RequestTransformContext{
 			Provider: "openai",
-			Model:    "gpt-4o",
+			Model:    "gpt-5",
 			Params:   params,
 		}
 
@@ -1138,17 +1138,17 @@ func TestMaxOutputTokensTransformer(t *testing.T) {
 
 	t.Run("未设置 MaxTokens 时使用默认值", func(t *testing.T) {
 		params := &openai.ChatCompletionNewParams{
-			Model: "gpt-4o",
+			Model: "gpt-5",
 		}
 		ctx := &RequestTransformContext{
 			Provider: "openai",
-			Model:    "gpt-4o",
+			Model:    "gpt-5",
 			Params:   params,
 		}
 
 		transformer.TransformRequest(ctx)
 
-		// gpt-4o MaxOutput=16384, defaultMaxOutputTokens=16384, min=16384
+		// gpt-5 MaxOutput=16384, defaultMaxOutputTokens=16384, min=16384
 		assert.True(t, ctx.Params.MaxTokens.Valid())
 		assert.Equal(t, int64(16384), ctx.Params.MaxTokens.Value)
 	})
@@ -1172,12 +1172,12 @@ func TestMaxOutputTokensTransformer(t *testing.T) {
 
 	t.Run("MaxTokens 未超过模型限制时保持不变", func(t *testing.T) {
 		params := &openai.ChatCompletionNewParams{
-			Model:     "gpt-4o",
+			Model:     "gpt-5",
 			MaxTokens: openai.Int(8000),
 		}
 		ctx := &RequestTransformContext{
 			Provider: "openai",
-			Model:    "gpt-4o", // MaxOutput=16384
+			Model:    "gpt-5", // MaxOutput=16384
 			Params:   params,
 		}
 
@@ -1253,8 +1253,8 @@ func TestIsReasoningModel(t *testing.T) {
 		{"o1", true},
 		{"o3-mini", true},
 		{"deepseek-reasoner", true},
-		{"gpt-4o", false},
-		{"gpt-4o-mini", false},
+		{"gpt-5", false},
+		{"gpt-5-mini", false},
 		{"claude-3-5-sonnet-20241022", false},
 		{"deepseek-chat", false},
 		{"gemini-1.5-pro", false},

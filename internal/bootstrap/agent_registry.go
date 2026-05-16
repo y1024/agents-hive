@@ -89,7 +89,9 @@ func RegisterFixedAgents(m *master.Master, cfg AgentRegistryConfig) *compaction.
 	if compactionAgent != nil && cfg.PromptLoader != nil {
 		compactionAgent.SetPromptLoader(cfg.PromptLoader)
 	}
-	m.RegisterAgent(compactionAgent)
+	if compactionAgent != nil {
+		m.RegisterAgent(compactionAgent)
+	}
 
 	logger.Info("固定 Agent 注册完成",
 		zap.Strings("agents", []string{"explore", "compaction", "title", "summary"}),

@@ -21,10 +21,22 @@ func TestPGInitSQLIncludesAgentQualityCandidates(t *testing.T) {
 		"CREATE TABLE IF NOT EXISTS agentquality_optimization_suggestions",
 		"source_candidate_id TEXT NOT NULL DEFAULT ''",
 		"source_eval_diff_id TEXT NOT NULL DEFAULT ''",
+		"runner_info JSONB NOT NULL DEFAULT '{}'",
 		"proposed_value TEXT NOT NULL DEFAULT ''",
 		"CREATE INDEX IF NOT EXISTS idx_agentquality_opt_suggestions_status_created",
 		"CREATE INDEX IF NOT EXISTS idx_agentquality_opt_suggestions_source_candidate",
 		"CREATE INDEX IF NOT EXISTS idx_agentquality_opt_suggestions_target",
+		"CREATE TABLE IF NOT EXISTS agentquality_shadow_eval_results",
+		"ALTER TABLE agentquality_shadow_eval_results ADD COLUMN IF NOT EXISTS case_id TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE agentquality_shadow_eval_results ADD COLUMN IF NOT EXISTS domain_id TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE agentquality_shadow_eval_results ADD COLUMN IF NOT EXISTS source_kind TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE agentquality_shadow_eval_results ADD COLUMN IF NOT EXISTS passed BOOLEAN NOT NULL DEFAULT FALSE",
+		"judge_verdict JSONB NOT NULL DEFAULT '{}'",
+		"runner_info JSONB NOT NULL DEFAULT '{}'",
+		"evaluated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+		"CREATE INDEX IF NOT EXISTS idx_agentquality_shadow_eval_results_domain",
+		"CREATE INDEX IF NOT EXISTS idx_agentquality_shadow_eval_results_trace",
+		"CREATE INDEX IF NOT EXISTS idx_agentquality_shadow_eval_results_runner",
 		"CREATE TABLE IF NOT EXISTS optimization_eval_diffs",
 		"CREATE TABLE IF NOT EXISTS optimization_approvals",
 		"CREATE TABLE IF NOT EXISTS optimization_rollback_alerts",
@@ -64,6 +76,77 @@ func TestPGInitSQLDoesNotCreateIndexesBeforeCompatColumns(t *testing.T) {
 	}
 }
 
+func TestPGInitSQLAddsQualityWorkbenchAttributionColumnsBeforeIndexes(t *testing.T) {
+	sql := strings.Join(strings.Fields(pgInitSQL), " ")
+	requiredOrder := []struct {
+		column string
+		index  string
+	}{
+		{
+			column: "ALTER TABLE qualityworkbench_replay_jobs ADD COLUMN IF NOT EXISTS domain_id TEXT NOT NULL DEFAULT ''",
+			index:  "CREATE INDEX IF NOT EXISTS idx_qualityworkbench_replay_jobs_attribution",
+		},
+		{
+			column: "ALTER TABLE qualityworkbench_replay_jobs ADD COLUMN IF NOT EXISTS source_kind TEXT NOT NULL DEFAULT ''",
+			index:  "CREATE INDEX IF NOT EXISTS idx_qualityworkbench_replay_jobs_attribution",
+		},
+		{
+			column: "ALTER TABLE qualityworkbench_replay_jobs ADD COLUMN IF NOT EXISTS source_name TEXT NOT NULL DEFAULT ''",
+			index:  "CREATE INDEX IF NOT EXISTS idx_qualityworkbench_replay_jobs_attribution",
+		},
+		{
+			column: "ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS domain_id TEXT NOT NULL DEFAULT ''",
+			index:  "CREATE INDEX IF NOT EXISTS idx_qualityworkbench_batch_eval_runs_attribution",
+		},
+		{
+			column: "ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS source_kind TEXT NOT NULL DEFAULT ''",
+			index:  "CREATE INDEX IF NOT EXISTS idx_qualityworkbench_batch_eval_runs_attribution",
+		},
+		{
+			column: "ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS source_name TEXT NOT NULL DEFAULT ''",
+			index:  "CREATE INDEX IF NOT EXISTS idx_qualityworkbench_batch_eval_runs_attribution",
+		},
+		{
+			column: "ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS runner_info JSONB NOT NULL DEFAULT '{}'",
+			index:  "CREATE INDEX IF NOT EXISTS idx_qualityworkbench_batch_eval_runs_attribution",
+		},
+		{
+			column: "ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS gate_metrics JSONB NOT NULL DEFAULT '{}'",
+			index:  "CREATE INDEX IF NOT EXISTS idx_qualityworkbench_batch_eval_runs_attribution",
+		},
+		{
+			column: "ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS judge_verdict JSONB NOT NULL DEFAULT '{}'",
+			index:  "CREATE INDEX IF NOT EXISTS idx_qualityworkbench_batch_eval_runs_attribution",
+		},
+		{
+			column: "ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS shadow_metrics JSONB NOT NULL DEFAULT '[]'",
+			index:  "CREATE INDEX IF NOT EXISTS idx_qualityworkbench_batch_eval_runs_attribution",
+		},
+		{
+			column: "ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS shadow_results JSONB NOT NULL DEFAULT '[]'",
+			index:  "CREATE INDEX IF NOT EXISTS idx_qualityworkbench_batch_eval_runs_attribution",
+		},
+		{
+			column: "ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS domain_regressions JSONB NOT NULL DEFAULT '[]'",
+			index:  "CREATE INDEX IF NOT EXISTS idx_qualityworkbench_batch_eval_runs_attribution",
+		},
+	}
+
+	for _, tt := range requiredOrder {
+		columnPos := strings.Index(sql, tt.column)
+		if columnPos < 0 {
+			t.Fatalf("pgInitSQL missing compatibility column %q", tt.column)
+		}
+		indexPos := strings.Index(sql, tt.index)
+		if indexPos < 0 {
+			t.Fatalf("pgInitSQL missing attribution index %q", tt.index)
+		}
+		if columnPos > indexPos {
+			t.Fatalf("pgInitSQL creates %q before compatibility column %q", tt.index, tt.column)
+		}
+	}
+}
+
 func TestPGAddUserColumnsCreatesIndexesAfterCompatColumns(t *testing.T) {
 	sql := strings.Join(strings.Fields(pgAddUserColumns), " ")
 	required := []string{
@@ -72,7 +155,19 @@ func TestPGAddUserColumnsCreatesIndexesAfterCompatColumns(t *testing.T) {
 		"ALTER TABLE agentquality_candidates ADD COLUMN IF NOT EXISTS cluster_id TEXT NOT NULL DEFAULT ''",
 		"CREATE INDEX IF NOT EXISTS idx_agentquality_candidates_cluster",
 		"ALTER TABLE agentquality_optimization_suggestions ADD COLUMN IF NOT EXISTS source_eval_diff_id TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE agentquality_optimization_suggestions ADD COLUMN IF NOT EXISTS runner_info JSONB NOT NULL DEFAULT '{}'",
 		"CREATE INDEX IF NOT EXISTS idx_agentquality_opt_suggestions_source_eval_diff",
+		"CREATE TABLE IF NOT EXISTS agentquality_shadow_eval_results",
+		"ALTER TABLE agentquality_shadow_eval_results ADD COLUMN IF NOT EXISTS case_id TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE agentquality_shadow_eval_results ADD COLUMN IF NOT EXISTS domain_id TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE agentquality_shadow_eval_results ADD COLUMN IF NOT EXISTS evaluated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+		"CREATE INDEX IF NOT EXISTS idx_agentquality_shadow_eval_results_domain",
+		"ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS runner_info JSONB NOT NULL DEFAULT '{}'",
+		"ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS gate_metrics JSONB NOT NULL DEFAULT '{}'",
+		"ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS judge_verdict JSONB NOT NULL DEFAULT '{}'",
+		"ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS shadow_metrics JSONB NOT NULL DEFAULT '[]'",
+		"ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS shadow_results JSONB NOT NULL DEFAULT '[]'",
+		"ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS domain_regressions JSONB NOT NULL DEFAULT '[]'",
 	}
 
 	for _, needle := range required {

@@ -9,12 +9,14 @@ import (
 	"github.com/chef-guo/agents-hive/internal/mcphost"
 	"github.com/chef-guo/agents-hive/internal/router"
 	"github.com/chef-guo/agents-hive/internal/security"
+	"github.com/chef-guo/agents-hive/internal/toolruntime"
 )
 
 const (
-	ActionGuardAllow = "allow"
-	ActionGuardAsk   = "ask"
-	ActionGuardDeny  = "deny"
+	ActionGuardAllow  = "allow"
+	ActionGuardAsk    = "ask"
+	ActionGuardDeny   = "deny"
+	ActionGuardRepair = "repair"
 )
 
 // ActionGuardInput 是确定性动作守卫的最小输入。
@@ -27,6 +29,8 @@ type ActionGuardInput struct {
 
 	SafeExecutor *security.SafeExecutor
 	ToolDef      *mcphost.ToolDefinition
+	Intent       router.IntentFrame
+	Route        router.RouteDecision
 }
 
 // ActionGuardDecision 描述一次工具调用的确定性安全决策。
@@ -36,6 +40,7 @@ type ActionGuardDecision struct {
 	Source               string
 	Pattern              string
 	RequiresConfirmation bool
+	Policy               router.ToolPolicyDecision
 }
 
 // ActionGuard 不依赖 LLM，按工具名和结构化参数作确定性 allow/ask/deny。
@@ -54,101 +59,106 @@ func newDeterministicActionGuard() ActionGuard {
 func (deterministicActionGuard) Decide(_ context.Context, input ActionGuardInput) ActionGuardDecision {
 	toolName := strings.TrimSpace(strings.ToLower(input.ToolName))
 	if toolName == "" {
-		return actionGuardDecision(ActionGuardDeny, "empty_tool_name", "policy", "")
+		return actionGuardDecision(ActionGuardRepair, "empty_tool_name", "policy", "")
 	}
 
 	if router.IsShellCommandTool(toolName) {
 		return decideShellAction(input)
 	}
 
-	if input.ToolDef != nil {
-		profile := router.InferToolProfile(*input.ToolDef, router.ProfileHint{})
-		policy := router.EvaluateToolPolicy(profile, router.ToolPolicyContext{
-			Input:     input.Arguments,
-			ForAction: true,
-		})
-		if policy.Action == router.ToolPolicyDeny {
-			return actionGuardDecision(ActionGuardDeny, policy.Reason, "tool_policy", "")
-		}
-		if isPlainTextIMSendAction(toolName, input.Arguments) {
-			return actionGuardDecision(ActionGuardAllow, "plain_text_im_send", "tool_policy", "")
-		}
-		if externalSendActionRequiresApproval(toolName, input.Arguments) {
-			return actionGuardDecision(ActionGuardAsk, "external_send", "tool_policy", "")
-		}
-		if toolArgumentsRequireApproval(input.Arguments) {
-			return actionGuardDecision(ActionGuardAsk, "argument_side_effect", "tool_policy", "")
-		}
-		if router.StructuredDangerousOperation(toolName, input.Arguments) {
-			return actionGuardDecision(ActionGuardAsk, "structured_dangerous_operation", "tool_policy", "")
-		}
-		switch policy.Action {
-		case router.ToolPolicyAllow:
-			return actionGuardDecision(ActionGuardAllow, policy.Reason, "tool_policy", "")
-		case router.ToolPolicyAsk:
-			return actionGuardDecision(ActionGuardAsk, policy.Reason, "tool_policy", "")
-		default:
-			return actionGuardDecision(ActionGuardDeny, policy.Reason, "tool_policy", "")
-		}
+	descriptor, ok := actionGuardDescriptor(toolName, input.ToolDef)
+	if !ok {
+		return actionGuardDecision(ActionGuardRepair, "unknown_tool", "policy", "")
 	}
 
+	return actionGuardDecisionFromRuntime(toolName, input.Arguments, toolruntime.DecideExecution(descriptor, toolruntime.Invocation{
+		Name:      toolName,
+		Arguments: input.Arguments,
+		Intent:    input.Intent,
+		Route:     input.Route,
+	}))
+}
+
+func actionGuardDescriptor(toolName string, def *mcphost.ToolDefinition) (toolruntime.Descriptor, bool) {
+	if def != nil {
+		return toolruntime.DescriptorFromDefinition(*def), true
+	}
 	profile, ok := router.BuiltinToolProfile(toolName)
 	if !ok {
-		return actionGuardDecision(ActionGuardDeny, "unknown_tool", "policy", "")
+		return toolruntime.Descriptor{}, false
 	}
+	return toolruntime.Descriptor{
+		Definition: mcphost.ToolDefinition{Name: toolName, Core: true},
+		Profile:    profile,
+		Entry:      profile.Entry(),
+	}, true
+}
 
-	policy := router.EvaluateToolPolicy(profile, router.ToolPolicyContext{
-		Input:     input.Arguments,
-		ForAction: true,
-	})
-	if policy.Action == router.ToolPolicyDeny {
-		return actionGuardDecision(ActionGuardDeny, policy.Reason, "tool_policy", "")
+func actionGuardDecisionFromRuntime(toolName string, args json.RawMessage, decision toolruntime.ExecutionDecision) ActionGuardDecision {
+	if reason, invalid := invalidIMSendAction(toolName, args); invalid {
+		out := actionGuardDecision(ActionGuardRepair, reason, "tool_policy", "")
+		out.Policy = decision.Policy
+		return out
 	}
-	if isPlainTextIMSendAction(toolName, input.Arguments) {
-		return actionGuardDecision(ActionGuardAllow, "plain_text_im_send", "tool_policy", "")
+	if decision.Action == toolruntime.ExecutionActionDeny {
+		out := actionGuardDecision(ActionGuardAsk, decision.Reason, decision.Source, "")
+		out.Policy = decision.Policy
+		return out
 	}
-	if externalSendActionRequiresApproval(toolName, input.Arguments) {
-		return actionGuardDecision(ActionGuardAsk, "external_send", "tool_policy", "")
+	if decision.Action == toolruntime.ExecutionActionRepair {
+		out := actionGuardDecision(ActionGuardRepair, decision.Reason, decision.Source, "")
+		out.Policy = decision.Policy
+		return out
 	}
-	if toolArgumentsRequireApproval(input.Arguments) {
-		return actionGuardDecision(ActionGuardAsk, "argument_side_effect", "tool_policy", "")
+	if toolArgumentsRequireApproval(toolName, args) {
+		out := actionGuardDecision(ActionGuardAsk, "argument_side_effect", "tool_policy", "")
+		out.Policy = decision.Policy
+		return out
 	}
-	if router.StructuredDangerousOperation(toolName, input.Arguments) {
-		return actionGuardDecision(ActionGuardAsk, "structured_dangerous_operation", "tool_policy", "")
+	if router.StructuredDangerousOperation(toolName, args) {
+		out := actionGuardDecision(ActionGuardAsk, "structured_dangerous_operation", "tool_policy", "")
+		out.Policy = decision.Policy
+		return out
 	}
-	switch policy.Action {
-	case router.ToolPolicyAllow:
-		return actionGuardDecision(ActionGuardAllow, policy.Reason, "tool_policy", "")
-	case router.ToolPolicyAsk:
-		return actionGuardDecision(ActionGuardAsk, policy.Reason, "tool_policy", "")
+	switch decision.Action {
+	case toolruntime.ExecutionActionAllow:
+		out := actionGuardDecision(ActionGuardAllow, decision.Reason, decision.Source, "")
+		out.Policy = decision.Policy
+		return out
+	case toolruntime.ExecutionActionAsk:
+		out := actionGuardDecision(ActionGuardAsk, decision.Reason, decision.Source, "")
+		out.Policy = decision.Policy
+		return out
 	default:
-		return actionGuardDecision(ActionGuardDeny, policy.Reason, "tool_policy", "")
+		out := actionGuardDecision(ActionGuardRepair, decision.Reason, decision.Source, "")
+		out.Policy = decision.Policy
+		return out
 	}
 }
 
 func decideShellAction(input ActionGuardInput) ActionGuardDecision {
 	cmd, ok := extractShellCommand(input.Arguments)
 	if !ok {
-		return actionGuardDecision(ActionGuardDeny, "malformed_shell_input", "safe_executor", "")
+		return actionGuardDecision(ActionGuardRepair, "malformed_shell_input", "safe_executor", "")
 	}
 	if input.SafeExecutor == nil {
-		return actionGuardDecision(ActionGuardDeny, "safe_executor_missing", "safe_executor", "")
+		return actionGuardDecision(ActionGuardAsk, "safe_executor_missing", "safe_executor", "")
 	}
 
 	policy, pattern := input.SafeExecutor.MatchPolicyWithRule(cmd)
 	switch policy {
 	case security.PolicyDeny:
-		return actionGuardDecision(ActionGuardDeny, "shell_policy_deny", "safe_executor", pattern)
+		return actionGuardDecision(ActionGuardAsk, "shell_policy_ask", "safe_executor", pattern)
 	case security.PolicyAsk:
 		return actionGuardDecision(ActionGuardAsk, "shell_policy_ask", "safe_executor", pattern)
 	case security.PolicyAllow:
 		return actionGuardDecision(ActionGuardAllow, "shell_policy_allow", "safe_executor", pattern)
 	default:
-		return actionGuardDecision(ActionGuardDeny, "shell_policy_unknown", "safe_executor", pattern)
+		return actionGuardDecision(ActionGuardRepair, "shell_policy_unknown", "safe_executor", pattern)
 	}
 }
 
-func toolArgumentsRequireApproval(input json.RawMessage) bool {
+func toolArgumentsRequireApproval(toolName string, input json.RawMessage) bool {
 	if len(input) == 0 {
 		return false
 	}
@@ -156,21 +166,21 @@ func toolArgumentsRequireApproval(input json.RawMessage) bool {
 	if err := json.Unmarshal(input, &payload); err != nil {
 		return false
 	}
-	return toolValueRequiresApproval("", payload)
+	return toolValueRequiresApproval(toolName, "", payload)
 }
 
-func toolValueRequiresApproval(key string, value any) bool {
+func toolValueRequiresApproval(toolName, key string, value any) bool {
 	keyLower := strings.ToLower(strings.TrimSpace(key))
 	switch v := value.(type) {
 	case map[string]any:
 		for k, child := range v {
-			if toolValueRequiresApproval(k, child) {
+			if toolValueRequiresApproval(toolName, k, child) {
 				return true
 			}
 		}
 	case []any:
 		for _, child := range v {
-			if toolValueRequiresApproval(keyLower, child) {
+			if toolValueRequiresApproval(toolName, keyLower, child) {
 				return true
 			}
 		}
@@ -184,7 +194,13 @@ func toolValueRequiresApproval(key string, value any) bool {
 		}
 		if toolActionKeyRequiresApproval(keyLower) {
 			action := strings.ToLower(text)
-			return router.StructuredDangerousAction("tool_policy", action) || toolActionLooksDangerous(action)
+			if router.StructuredDangerousAction(toolName, action) {
+				return true
+			}
+			if router.StructuredRoutineSideEffectAction(toolName, action) {
+				return false
+			}
+			return toolActionLooksDangerous(action)
 		}
 	}
 	return false
@@ -215,54 +231,88 @@ func toolActionLooksDangerous(action string) bool {
 	return false
 }
 
-func isPlainTextIMSendAction(toolName string, input json.RawMessage) bool {
+func invalidIMSendAction(toolName string, input json.RawMessage) (string, bool) {
+	if !isIMSendMessageAction(toolName, input) {
+		return "", false
+	}
+	payload, ok := actionGuardObject(input)
+	if !ok {
+		return "im_send_missing_content", true
+	}
+	if !actionGuardHasString(payload, "content", "text", "message") {
+		return "im_send_missing_content", true
+	}
+	if !actionGuardHasRecipientSignal(payload) {
+		return "im_send_missing_recipient", true
+	}
+	return "", false
+}
+
+func isIMSendMessageAction(toolName string, input json.RawMessage) bool {
 	switch toolName {
 	case "send_im_message":
-		return hasPlainTextIMSendContent(input)
-	case "feishu_api":
-		return actionGuardStructuredAction(input) == "send_message" && hasPlainTextIMSendContent(input)
-	case "im_api":
-		return actionGuardStructuredAction(input) == "send_message" && hasPlainTextIMSendContent(input)
+		return true
+	case "feishu_api", "im_api":
+		return actionGuardStructuredAction(input) == "send_message"
 	default:
 		return false
 	}
 }
 
-func externalSendActionRequiresApproval(toolName string, input json.RawMessage) bool {
-	switch toolName {
-	case "send_im_message":
-		return !hasPlainTextIMSendContent(input)
-	case "feishu_api":
-		action := actionGuardStructuredAction(input)
-		switch action {
-		case "send_message":
-			return !hasPlainTextIMSendContent(input)
-		case "send_file", "send_image", "upload_file", "upload_image":
-			return true
-		default:
-			return false
-		}
-	case "im_api":
-		return actionGuardStructuredAction(input) == "send_message" && !hasPlainTextIMSendContent(input)
-	default:
-		return false
-	}
-}
-
-func hasPlainTextIMSendContent(input json.RawMessage) bool {
+func actionGuardObject(input json.RawMessage) (map[string]any, bool) {
 	if len(input) == 0 {
-		return false
+		return nil, false
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(input, &payload); err != nil {
-		return false
+		return nil, false
 	}
-	for _, key := range []string{"content", "text", "message"} {
+	return payload, true
+}
+
+func actionGuardHasString(payload map[string]any, keys ...string) bool {
+	for _, key := range keys {
 		if value, ok := payload[key].(string); ok && strings.TrimSpace(value) != "" {
 			return true
 		}
 	}
 	return false
+}
+
+func actionGuardHasRecipientSignal(payload map[string]any) bool {
+	for _, key := range []string{"receive_id", "chat_id", "open_id", "user_id", "email", "recipient", "to", "recipient_id", "conversation_id"} {
+		if value, ok := payload[key].(string); ok && strings.TrimSpace(value) != "" {
+			return true
+		}
+		if value, ok := payload[key]; ok && actionGuardNonEmptyValue(value) {
+			return true
+		}
+	}
+	for _, key := range []string{"receive_ids", "chat_ids", "open_ids", "user_ids", "emails", "recipients", "recipient_ids", "tos", "to_list", "conversation_ids", "targets", "target_ids"} {
+		if value, ok := payload[key]; ok && actionGuardNonEmptyValue(value) {
+			return true
+		}
+	}
+	return false
+}
+
+func actionGuardNonEmptyValue(value any) bool {
+	switch v := value.(type) {
+	case nil:
+		return false
+	case string:
+		return strings.TrimSpace(v) != ""
+	case bool:
+		return v
+	case []any:
+		return len(v) > 0
+	case map[string]any:
+		return len(v) > 0
+	case float64:
+		return v != 0
+	default:
+		return true
+	}
 }
 
 func actionGuardStructuredAction(input json.RawMessage) string {

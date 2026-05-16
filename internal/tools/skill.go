@@ -81,10 +81,8 @@ func (e *approvalGuardedShellExecutor) Execute(command string) (string, string, 
 		decision := matchSkillShellPolicy(command)
 		switch decision.policy {
 		case "deny":
-			return "", "", errs.New(errs.CodeExecDenied, "permission denied: 命令被安全策略拒绝: "+decision.command)
-		case "ask":
 			if globalApprovalBridge == nil {
-				return "", "", errs.New(errs.CodePermissionDenied, "permission denied: 命令需要审批但审批系统未初始化: "+decision.command)
+				return "", "", recoverableApprovalMissingError("skill", "执行技能 shell 命令", "当前命令未执行；command="+decision.command)
 			}
 			details := map[string]string{
 				"command": decision.command,
@@ -98,7 +96,28 @@ func (e *approvalGuardedShellExecutor) Execute(command string) (string, string, 
 				details,
 			)
 			if err != nil {
-				return "", "", errs.Wrap(errs.CodeExecApprovalTimeout, "技能命令审批请求失败", err)
+				return "", "", recoverableApprovalFailedError("skill", "执行技能 shell 命令", "当前命令未执行；command="+decision.command, err)
+			}
+			if !approved {
+				return "", "", errs.New(errs.CodePermissionDenied, "permission denied: 命令审批被拒绝: "+decision.command)
+			}
+		case "ask":
+			if globalApprovalBridge == nil {
+				return "", "", recoverableApprovalMissingError("skill", "执行技能 shell 命令", "当前命令未执行；command="+decision.command)
+			}
+			details := map[string]string{
+				"command": decision.command,
+				"source":  "skill",
+			}
+			if decision.command != command {
+				details["execution_command"] = command
+			}
+			approved, err := globalApprovalBridge.RequestApproval(e.ctx, "bash",
+				"执行技能中的 shell 命令需要审批",
+				details,
+			)
+			if err != nil {
+				return "", "", recoverableApprovalFailedError("skill", "执行技能 shell 命令", "当前命令未执行；command="+decision.command, err)
 			}
 			if !approved {
 				return "", "", errs.New(errs.CodePermissionDenied, "permission denied: 命令审批被拒绝: "+decision.command)

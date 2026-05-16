@@ -172,11 +172,11 @@ func (s *PostgresStore) CreateSession(ctx context.Context, record *SessionRecord
 
 	_, err = s.pool.Exec(ctx,
 		`INSERT INTO sessions (id, name, created_at, updated_at, last_accessed_at,
-			message_count, total_tokens, profile_name, deleted,
+			selected_model, message_count, total_tokens, profile_name, deleted,
 			tags, parent_id, fork_point, children, user_id, is_starred)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
 		record.ID, record.Name, record.CreatedAt, record.UpdatedAt, record.LastAccessedAt,
-		record.MessageCount, record.TotalTokens, "", boolToInt(record.Deleted),
+		record.SelectedModel, record.MessageCount, record.TotalTokens, "", boolToInt(record.Deleted),
 		string(tagsJSON), record.ParentID, record.ForkPoint, string(childrenJSON),
 		record.UserID, record.IsStarred,
 	)
@@ -201,19 +201,20 @@ func (s *PostgresStore) SaveSession(ctx context.Context, record *SessionRecord) 
 
 	_, err = s.pool.Exec(ctx,
 		`INSERT INTO sessions (id, name, created_at, updated_at, last_accessed_at,
-			message_count, total_tokens, profile_name, deleted,
+			selected_model, message_count, total_tokens, profile_name, deleted,
 			tags, parent_id, fork_point, children, user_id, is_starred)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
 		ON CONFLICT(id) DO UPDATE SET
 			name=EXCLUDED.name, updated_at=EXCLUDED.updated_at,
 			last_accessed_at=EXCLUDED.last_accessed_at,
+			selected_model=CASE WHEN EXCLUDED.selected_model != '' THEN EXCLUDED.selected_model ELSE sessions.selected_model END,
 			total_tokens=EXCLUDED.total_tokens,
 			profile_name=EXCLUDED.profile_name, deleted=EXCLUDED.deleted,
 			parent_id=EXCLUDED.parent_id,
 			fork_point=EXCLUDED.fork_point, children=EXCLUDED.children,
 			user_id=CASE WHEN EXCLUDED.user_id != '' THEN EXCLUDED.user_id ELSE sessions.user_id END`,
 		record.ID, record.Name, record.CreatedAt, record.UpdatedAt, record.LastAccessedAt,
-		record.MessageCount, record.TotalTokens, "", boolToInt(record.Deleted),
+		record.SelectedModel, record.MessageCount, record.TotalTokens, "", boolToInt(record.Deleted),
 		string(tagsJSON), record.ParentID, record.ForkPoint, string(childrenJSON), record.UserID, record.IsStarred,
 	)
 	if err != nil {
@@ -230,12 +231,12 @@ func (s *PostgresStore) LoadSession(ctx context.Context, sessionID string) (*Ses
 
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, name, created_at::text, updated_at::text, last_accessed_at::text,
-			message_count, total_tokens, profile_name, deleted,
+			selected_model, message_count, total_tokens, profile_name, deleted,
 			tags, parent_id, fork_point, children, user_id, is_starred
 		FROM sessions WHERE id = $1 AND deleted = 0`, sessionID,
 	).Scan(
 		&record.ID, &record.Name, &record.CreatedAt, &record.UpdatedAt, &record.LastAccessedAt,
-		&record.MessageCount, &record.TotalTokens, &_profileName, &deletedInt,
+		&record.SelectedModel, &record.MessageCount, &record.TotalTokens, &_profileName, &deletedInt,
 		&tagsJSON, &record.ParentID, &record.ForkPoint, &childrenJSON,
 		&record.UserID, &record.IsStarred,
 	)
@@ -282,7 +283,7 @@ func (s *PostgresStore) DeleteSession(ctx context.Context, sessionID string) err
 func (s *PostgresStore) ListSessions(ctx context.Context) ([]*SessionRecord, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, name, created_at::text, updated_at::text, last_accessed_at::text,
-			message_count, total_tokens, profile_name, deleted,
+			selected_model, message_count, total_tokens, profile_name, deleted,
 			tags, parent_id, fork_point, children, user_id, is_starred
 		FROM sessions WHERE deleted = 0
 		ORDER BY last_accessed_at DESC`)
@@ -299,7 +300,7 @@ func (s *PostgresStore) ListSessions(ctx context.Context) ([]*SessionRecord, err
 		var _profileName string
 		if err := rows.Scan(
 			&record.ID, &record.Name, &record.CreatedAt, &record.UpdatedAt, &record.LastAccessedAt,
-			&record.MessageCount, &record.TotalTokens, &_profileName, &deletedInt,
+			&record.SelectedModel, &record.MessageCount, &record.TotalTokens, &_profileName, &deletedInt,
 			&tagsJSON, &record.ParentID, &record.ForkPoint, &childrenJSON,
 			&record.UserID, &record.IsStarred,
 		); err != nil {
@@ -335,7 +336,7 @@ func (s *PostgresStore) ListSessionsByUser(ctx context.Context, userID string, _
 
 	// 严格按 user_id 过滤，遗留无主 session 不可见
 	query := `SELECT s.id, s.name, s.created_at::text, s.updated_at::text, s.last_accessed_at::text,
-		s.message_count, s.total_tokens, s.deleted, s.tags, s.parent_id, s.fork_point, s.children,
+		s.selected_model, s.message_count, s.total_tokens, s.deleted, s.tags, s.parent_id, s.fork_point, s.children,
 		s.user_id, COALESCE(p.is_starred, false) AS is_starred
 		FROM sessions s
 		LEFT JOIN user_session_prefs p ON s.id = p.session_id AND p.user_id = $1
@@ -356,7 +357,7 @@ func (s *PostgresStore) ListSessionsByUser(ctx context.Context, userID string, _
 		var deletedInt int
 		if err := rows.Scan(
 			&r.ID, &r.Name, &r.CreatedAt, &r.UpdatedAt, &r.LastAccessedAt,
-			&r.MessageCount, &r.TotalTokens, &deletedInt, &tagsJSON,
+			&r.SelectedModel, &r.MessageCount, &r.TotalTokens, &deletedInt, &tagsJSON,
 			&r.ParentID, &r.ForkPoint, &childrenJSON,
 			&r.UserID, &r.IsStarred,
 		); err != nil {
@@ -382,13 +383,13 @@ func (s *PostgresStore) GetLastActiveSession(ctx context.Context) (*SessionRecor
 
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, name, created_at::text, updated_at::text, last_accessed_at::text,
-			message_count, total_tokens, profile_name, deleted,
+			selected_model, message_count, total_tokens, profile_name, deleted,
 			tags, parent_id, fork_point, children
 		FROM sessions WHERE deleted = 0 AND id NOT LIKE 'im-%'
 		ORDER BY last_accessed_at DESC LIMIT 1`,
 	).Scan(
 		&record.ID, &record.Name, &record.CreatedAt, &record.UpdatedAt, &record.LastAccessedAt,
-		&record.MessageCount, &record.TotalTokens, &_profileName, &deletedInt,
+		&record.SelectedModel, &record.MessageCount, &record.TotalTokens, &_profileName, &deletedInt,
 		&tagsJSON, &record.ParentID, &record.ForkPoint, &childrenJSON,
 	)
 	if err != nil {
@@ -548,11 +549,11 @@ func (s *PostgresStore) ForkSession(ctx context.Context, parentID string, forkPo
 
 	_, err = tx.Exec(ctx,
 		`INSERT INTO sessions (id, name, created_at, updated_at, last_accessed_at,
-			message_count, total_tokens, profile_name, deleted,
+			selected_model, message_count, total_tokens, profile_name, deleted,
 			tags, parent_id, fork_point, children, user_id)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
 		newSessionID, newName, now, now, now,
-		forkPoint, 0, "", 0,
+		parent.SelectedModel, forkPoint, 0, "", 0,
 		string(tagsJSON), parentID, forkPoint, string(childrenJSON), userID,
 	)
 	if err != nil {

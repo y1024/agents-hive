@@ -208,4 +208,34 @@ describe('chat store message normalization', () => {
     expect(toolMessages[0].content).toBe('已写入 1194 字节到 /tmp/SKILL.md');
     expect(toolMessages[0].timestamp).toBe('2026-05-04T01:00:00.000Z');
   });
+
+  it('preserves recoverable tool error metadata while merging duplicate results', () => {
+    useChatStore.getState().addMessage({
+      role: 'tool',
+      content: '[可恢复工具调用错误: approval_channel_missing] 需要审批',
+      timestamp: '2026-05-04T01:00:00.000Z',
+      tool_call_id: 'call-send',
+      tool_name: 'feishu_api',
+      is_error: true,
+      recoverable: true,
+      terminal: false,
+      error_kind: 'approval_channel_missing',
+    });
+    useChatStore.getState().addMessage({
+      role: 'tool',
+      content: '[可恢复工具调用错误: approval_channel_missing] 仍需审批',
+      timestamp: '2026-05-04T01:00:01.000Z',
+      tool_call_id: 'call-send',
+      tool_name: 'feishu_api',
+      is_error: true,
+    });
+
+    const toolMessages = useChatStore.getState().messages.filter((m) => m.role === 'tool');
+    expect(toolMessages).toHaveLength(1);
+    expect(toolMessages[0]).toMatchObject({
+      recoverable: true,
+      terminal: false,
+      error_kind: 'approval_channel_missing',
+    });
+  });
 });

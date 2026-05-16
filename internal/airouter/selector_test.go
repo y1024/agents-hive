@@ -20,7 +20,7 @@ func newTestRouter(models []ModelScore, userModelName string) *Router {
 
 func TestSelector_TaskPlanning_PrefersCheapestJSON(t *testing.T) {
 	models := []ModelScore{
-		{Name: "main", Model: "gpt-4o", CostTier: TierMedium, Capabilities: []string{"tools", "json", "vision"}},
+		{Name: "main", Model: "gpt-5", CostTier: TierMedium, Capabilities: []string{"tools", "json", "vision"}},
 		{Name: "haiku", Model: "claude-haiku", CostTier: TierCheap, Capabilities: []string{"tools", "json"}},
 		{Name: "opus", Model: "claude-opus", CostTier: TierExpensive, Capabilities: []string{"tools", "json", "reasoning"}},
 	}
@@ -33,8 +33,8 @@ func TestSelector_TaskPlanning_PrefersCheapestJSON(t *testing.T) {
 func TestSelector_TaskPlanning_FallbackToCheapestTools(t *testing.T) {
 	// 场景：没有任何模型带 json capability
 	models := []ModelScore{
-		{Name: "main", Model: "gpt-4o", CostTier: TierMedium, Capabilities: []string{"tools"}},
-		{Name: "cheap-tools", Model: "gpt-4o-mini", CostTier: TierCheap, Capabilities: []string{"tools"}},
+		{Name: "main", Model: "gpt-5", CostTier: TierMedium, Capabilities: []string{"tools"}},
+		{Name: "cheap-tools", Model: "gpt-5-mini", CostTier: TierCheap, Capabilities: []string{"tools"}},
 	}
 	r := newTestRouter(models, "main")
 	m := r.selectBestModel(TaskPlanning)
@@ -58,7 +58,7 @@ func TestSelector_TaskPlanning_FallbackToUserModel(t *testing.T) {
 // 只要环境里有更便宜且带 json/tools 的模型。
 func TestSelector_TaskPlanning_NeverStealsMainBudget(t *testing.T) {
 	models := []ModelScore{
-		{Name: "main", Model: "gpt-4o", CostTier: TierMedium, Capabilities: []string{"tools", "json"}},
+		{Name: "main", Model: "gpt-5", CostTier: TierMedium, Capabilities: []string{"tools", "json"}},
 		{Name: "haiku", Model: "claude-haiku", CostTier: TierCheap, Capabilities: []string{"tools", "json"}},
 	}
 	r := newTestRouter(models, "main")

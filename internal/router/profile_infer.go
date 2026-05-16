@@ -46,6 +46,10 @@ func InferToolProfile(def mcphost.ToolDefinition, hint ProfileHint) ToolProfile 
 		Metadata: map[string]string{
 			"description": desc,
 		},
+		Version:         "v1",
+		Visibility:      "system",
+		PolicyProfile:   "default",
+		InputSchemaHash: toolSchemaHash(def.InputSchema),
 	}
 
 	switch {
@@ -94,6 +98,18 @@ func InferToolProfile(def mcphost.ToolDefinition, hint ProfileHint) ToolProfile 
 	if profile.Metadata == nil {
 		profile.Metadata = map[string]string{}
 	}
+	if profile.Version == "" {
+		profile.Version = "v1"
+	}
+	if profile.Visibility == "" {
+		profile.Visibility = defaultToolVisibility(profile)
+	}
+	if profile.PolicyProfile == "" {
+		profile.PolicyProfile = "default"
+	}
+	if profile.InputSchemaHash == "" {
+		profile.InputSchemaHash = toolSchemaHash(def.InputSchema)
+	}
 	if def.Description != "" {
 		profile.Metadata["raw_description_present"] = "true"
 	}
@@ -135,6 +151,9 @@ func InferSkillWorkflowProfile(name, description string) ToolProfile {
 		AllowedIntentKinds: inferSkillWorkflowAllowedIntents(domain),
 		Metadata:           map[string]string{"description": desc},
 		RawDescription:     description,
+		Version:            "v1",
+		Visibility:         "system",
+		PolicyProfile:      "default",
 	}
 	var sanitizeReasons []string
 	sanitizeReasons = append(sanitizeReasons, descResult.Reasons...)
@@ -148,6 +167,39 @@ func InferSkillWorkflowProfile(name, description string) ToolProfile {
 		markProfileSanitizeBlocked(&profile, sanitizeReasons...)
 	}
 	return profile
+}
+
+// InferSkillWorkflowProfileFromMetadata preserves tenant-scope metadata when
+// turning a local skill into a route profile.
+func InferSkillWorkflowProfileFromMetadata(meta SkillWorkflowMetadata) ToolProfile {
+	profile := InferSkillWorkflowProfile(meta.Name, meta.Description)
+	switch strings.TrimSpace(meta.Scope) {
+	case "personal":
+		profile.Visibility = "personal"
+		profile.OwnerUserID = strings.TrimSpace(meta.UserID)
+	case "public":
+		profile.Visibility = "workspace"
+		profile.OwnerUserID = ""
+	}
+	return profile
+}
+
+type SkillWorkflowMetadata struct {
+	Name        string
+	Description string
+	Scope       string
+	UserID      string
+}
+
+func defaultToolVisibility(profile ToolProfile) string {
+	switch profile.Source {
+	case CapabilitySourceLocalSkill, CapabilitySourceCustomDir:
+		return "workspace"
+	case CapabilitySourceMCPServer:
+		return "workspace"
+	default:
+		return "system"
+	}
 }
 
 func applyProfileHint(profile *ToolProfile, hint ProfileHint) {
@@ -164,6 +216,15 @@ func applyProfileHint(profile *ToolProfile, hint ProfileHint) {
 	profile.SideEffect = hint.SideEffect
 	profile.Capabilities = append([]Capability(nil), hint.Capabilities...)
 	profile.AllowedIntentKinds = append([]IntentKind(nil), hint.AllowedIntentKinds...)
+	if profile.Version == "" {
+		profile.Version = "v1"
+	}
+	if profile.Visibility == "" {
+		profile.Visibility = defaultToolVisibility(*profile)
+	}
+	if profile.PolicyProfile == "" {
+		profile.PolicyProfile = "default"
+	}
 }
 
 func isBuiltinToolName(nameLower string) bool {

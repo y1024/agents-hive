@@ -424,7 +424,7 @@ func NewApp(cfg *config.Config, logger *zap.Logger) *App {
 	})
 
 	// 设置记忆提取器（压缩摘要时自动提取记忆）
-	if memStore != nil && cfg.Memory.AutoExtract {
+	if compactionAgent != nil && memStore != nil && cfg.Memory.AutoExtract {
 		extractor := memory.NewExtractor(memStore, logger)
 		compactionAgent.SetMemoryExtractor(extractor)
 		logger.Info("记忆提取器已设置")

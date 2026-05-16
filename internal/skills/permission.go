@@ -16,6 +16,8 @@ import (
 	"github.com/chef-guo/agents-hive/internal/router"
 	"github.com/chef-guo/agents-hive/internal/security"
 	"github.com/chef-guo/agents-hive/internal/store"
+	"github.com/chef-guo/agents-hive/internal/toolctx"
+	"github.com/chef-guo/agents-hive/internal/toolruntime"
 	"go.uber.org/zap"
 )
 
@@ -75,6 +77,18 @@ type llmClassifier interface {
 	Classify(ctx context.Context, toolName string, input json.RawMessage) security.ClassifyResult
 }
 
+// PermissionPolicyEvaluator 把 PermissionManager 接到统一工具策略层。
+// Legacy rules 只能收紧该裁决，不能放宽 unified deny/ask。
+type PermissionPolicyEvaluator interface {
+	EvaluatePermission(ctx context.Context, toolName string, input json.RawMessage) router.ToolPolicyDecision
+}
+
+type permissionPolicyEvaluatorFunc func(context.Context, string, json.RawMessage) router.ToolPolicyDecision
+
+func (f permissionPolicyEvaluatorFunc) EvaluatePermission(ctx context.Context, toolName string, input json.RawMessage) router.ToolPolicyDecision {
+	return f(ctx, toolName, input)
+}
+
 // PermissionManager 管理工具执行权限
 type PermissionManager struct {
 	rules      []PermissionRule
@@ -84,7 +98,11 @@ type PermissionManager struct {
 	pluginMgr  *plugin.Manager // 插件管理器（可选，用于 PermissionAsk hook）
 	store      PermissionStore // 权限持久化存储（可选，用于跨会话持久化）
 	classifier llmClassifier   // LLM 分类器（可选，域E Phase 2）
-	logger     *zap.Logger
+	evaluator  PermissionPolicyEvaluator
+	// unifiedPolicyPrimary=true 时，统一工具策略是主授权源；
+	// legacy permission_rules 只保留给 strict 回滚路径。
+	unifiedPolicyPrimary bool
+	logger               *zap.Logger
 }
 
 // NewPermissionManager 创建新的 PermissionManager
@@ -123,6 +141,29 @@ func WithLLMClassifier(c llmClassifier) PermissionManagerOption {
 	}
 }
 
+// WithPermissionPolicyEvaluator 注入统一工具策略裁决。
+func WithPermissionPolicyEvaluator(evaluator PermissionPolicyEvaluator) PermissionManagerOption {
+	return func(pm *PermissionManager) {
+		pm.evaluator = evaluator
+	}
+}
+
+// WithPermissionPolicyEvaluatorFunc 注入函数形式的统一工具策略裁决。
+func WithPermissionPolicyEvaluatorFunc(fn func(context.Context, string, json.RawMessage) router.ToolPolicyDecision) PermissionManagerOption {
+	return func(pm *PermissionManager) {
+		if fn != nil {
+			pm.evaluator = permissionPolicyEvaluatorFunc(fn)
+		}
+	}
+}
+
+// WithUnifiedPolicyPrimary 控制 legacy permission_rules 是否还能降级统一策略。
+func WithUnifiedPolicyPrimary(primary bool) PermissionManagerOption {
+	return func(pm *PermissionManager) {
+		pm.unifiedPolicyPrimary = primary
+	}
+}
+
 // SetPluginManager 设置插件管理器（用于 PermissionAsk hook）
 func (m *PermissionManager) SetPluginManager(mgr *plugin.Manager) {
 	m.pluginMgr = mgr
@@ -136,11 +177,34 @@ func (m *PermissionManager) SetLLMClassifier(c llmClassifier) {
 	m.classifier = c
 }
 
+// SetPolicyEvaluator 动态设置统一工具策略裁决器。
+func (m *PermissionManager) SetPolicyEvaluator(evaluator PermissionPolicyEvaluator) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.evaluator = evaluator
+}
+
+// SetPolicyEvaluatorFunc 动态设置函数形式的统一工具策略裁决器。
+func (m *PermissionManager) SetPolicyEvaluatorFunc(fn func(context.Context, string, json.RawMessage) router.ToolPolicyDecision) {
+	if fn == nil {
+		m.SetPolicyEvaluator(nil)
+		return
+	}
+	m.SetPolicyEvaluator(permissionPolicyEvaluatorFunc(fn))
+}
+
 // SetPromptFn 动态设置权限提示函数（需加锁，用于 ACP 权限桥接）
 func (m *PermissionManager) SetPromptFn(fn func(context.Context, PermissionRequest) (PermissionResponse, error)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.promptFn = fn
+}
+
+// SetUnifiedPolicyPrimary 动态切换统一策略是否作为主授权源。
+func (m *PermissionManager) SetUnifiedPolicyPrimary(primary bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.unifiedPolicyPrimary = primary
 }
 
 // SetStore 设置权限持久化存储，并从存储中加载已有的权限授予记录
@@ -199,8 +263,37 @@ func (m *PermissionManager) GetRules() []PermissionRule {
 
 // CheckPermission 检查工具执行权限
 func (m *PermissionManager) CheckPermission(ctx context.Context, toolName string, input json.RawMessage) error {
+	if toolctx.ShouldSkipPermission(ctx) {
+		return nil
+	}
 	inputValue := extractInputValue(toolName, input)
 	inputGrantPattern := permissionInputGrantPattern(input)
+	policy, hasPolicy := m.evaluateUnifiedPermissionPolicy(ctx, toolName, input)
+	needsPrompt := hasPolicy && policy.Action == router.ToolPolicyAsk && policy.CallableNow
+	promptRequired := false
+	if hasPolicy && policy.Action == router.ToolPolicyDeny {
+		if policy.CallableNow {
+			promptRequired = true
+		} else {
+			return errs.New(errs.CodePermissionDenied, toolruntime.RecoverableToolCallErrorContent(policy.Reason,
+				fmt.Sprintf("工具 %q 当前不可调用，调用未执行。请按当前路由允许的工具和参数重新构造工具调用。", toolName)))
+		}
+	}
+	if hasPolicy && m.unifiedPolicyPrimary {
+		switch policy.Action {
+		case router.ToolPolicyAllow:
+			if !promptRequired {
+				return nil
+			}
+		case router.ToolPolicyAsk:
+			if needsPrompt {
+				promptRequired = true
+				break
+			}
+			return errs.New(errs.CodePermissionDenied, toolruntime.RecoverableToolCallErrorContent(policy.Reason,
+				fmt.Sprintf("工具 %q 当前不可调用，调用未执行。请按当前路由允许的工具和参数重新构造工具调用。", toolName)))
+		}
+	}
 
 	// 内置放行：skill 空 name 仅列出技能，属于只读操作，无需审批
 	if toolName == "skill" && inputValue == "" {
@@ -216,7 +309,10 @@ func (m *PermissionManager) CheckPermission(ctx context.Context, toolName string
 			zap.String("action", string(action)),
 		)
 		if action == PermissionDeny {
-			return errs.New(errs.CodePermissionDenied, fmt.Sprintf("工具 %q 被拒绝", toolName))
+			promptRequired = true
+		}
+		if promptRequired || needsPrompt {
+			return m.promptPermission(ctx, toolName, input, inputValue, inputGrantPattern)
 		}
 		return nil
 	}
@@ -229,25 +325,33 @@ func (m *PermissionManager) CheckPermission(ctx context.Context, toolName string
 			zap.String("action", string(action)),
 		)
 		if action == PermissionAllow {
-			return nil
+			if !needsPrompt {
+				return nil
+			}
+			promptRequired = true
 		}
 		if action == PermissionDeny {
-			return errs.New(errs.CodePermissionDenied, fmt.Sprintf("工具 %q 被规则拒绝", toolName))
+			promptRequired = true
 		}
 		if grantAction, grantPattern, grantMatched := m.checkGrantsDetailed(toolName, inputValue, inputGrantPattern); grantMatched {
 			if grantAction == PermissionDeny {
-				return errs.New(errs.CodePermissionDenied, fmt.Sprintf("工具 %q 被拒绝", toolName))
+				promptRequired = true
 			}
 			if grantAction == PermissionAllow && (grantPattern != "" || rulePattern == "") {
+				if promptRequired || needsPrompt {
+					return m.promptPermission(ctx, toolName, input, inputValue, inputGrantPattern)
+				}
 				return nil
 			}
 		}
 		// action == PermissionAsk, 继续到第 3 步
 	} else if action, _, matched := m.checkGrantsDetailed(toolName, inputValue, inputGrantPattern); matched {
 		if action == PermissionDeny {
-			return errs.New(errs.CodePermissionDenied, fmt.Sprintf("工具 %q 被拒绝", toolName))
+			promptRequired = true
 		}
-		return nil
+		if !promptRequired && !needsPrompt {
+			return nil
+		}
 	}
 
 	// 3. 插件 PermissionAsk hook：在提示用户前，给插件机会自动处理权限决策
@@ -277,11 +381,16 @@ func (m *PermissionManager) CheckPermission(ctx context.Context, toolName string
 						zap.String("tool", toolName),
 						zap.String("reason", hookOut.Reason),
 					)
-					goto prompt
+					promptRequired = true
+				} else {
+					return nil
 				}
-				return nil
 			}
-			return errs.New(errs.CodePermissionDenied, fmt.Sprintf("插件拒绝工具 %q: %s", toolName, hookOut.Reason))
+			if hookOut.Decision == "deny" {
+				promptRequired = true
+			} else if hookOut.Decision != "allow" {
+				promptRequired = true
+			}
 		}
 	}
 
@@ -304,9 +413,13 @@ func (m *PermissionManager) CheckPermission(ctx context.Context, toolName string
 	}
 
 	// 4. 默认行为：提示用户
-prompt:
+	return m.promptPermission(ctx, toolName, input, inputValue, inputGrantPattern)
+}
+
+func (m *PermissionManager) promptPermission(ctx context.Context, toolName string, input json.RawMessage, inputValue, inputGrantPattern string) error {
 	if m.promptFn == nil {
-		return errs.New(errs.CodePermissionDenied, fmt.Sprintf("工具 %q 需要人工审批，但 HITL 未开启。请在配置中启用 hitl.enabled 后重试", toolName))
+		return errs.New(errs.CodePermissionDenied, toolruntime.RecoverableToolCallErrorContent("approval_channel_missing",
+			fmt.Sprintf("工具 %q 需要人工审批，但审批通道未初始化。当前调用未执行；请开启 HITL/审批桥后重新发起审批。", toolName)))
 	}
 
 	// 格式化权限提示信息
@@ -324,7 +437,8 @@ prompt:
 
 	resp, err := m.promptFn(ctx, req)
 	if err != nil {
-		return err
+		return errs.Wrap(errs.CodeExecApprovalTimeout, toolruntime.RecoverableToolCallErrorContent("approval_request_failed",
+			fmt.Sprintf("工具 %q 的审批请求失败，当前调用未执行。请恢复审批通道后重新发起审批。", toolName)), err)
 	}
 
 	if !resp.Granted {
@@ -339,6 +453,20 @@ prompt:
 	}
 
 	return nil
+}
+
+func (m *PermissionManager) evaluateUnifiedPermissionPolicy(ctx context.Context, toolName string, input json.RawMessage) (router.ToolPolicyDecision, bool) {
+	m.mu.RLock()
+	evaluator := m.evaluator
+	m.mu.RUnlock()
+	if evaluator == nil {
+		return router.ToolPolicyDecision{}, false
+	}
+	policy := evaluator.EvaluatePermission(ctx, toolName, input)
+	if policy.Source == "" {
+		policy.Source = "tool_policy"
+	}
+	return policy, true
 }
 
 // checkGrants 检查 session grants，返回匹配的动作和是否匹配。
@@ -732,14 +860,18 @@ func canPluginAutoAllowPermission(toolName string, input json.RawMessage) bool {
 	if toolName == "" {
 		return false
 	}
+	if profile, ok := router.BuiltinToolProfile(toolName); ok {
+		policy := router.EvaluateToolPolicy(profile, router.ToolPolicyContext{
+			Input:     input,
+			ForAction: true,
+		})
+		return policy.Action == router.ToolPolicyAllow
+	}
 	if router.IsShellCommandTool(toolName) {
 		return false
 	}
 	if router.StructuredDangerousOperation(toolName, input) {
 		return false
-	}
-	if profile, ok := router.BuiltinToolProfile(toolName); ok {
-		return !router.ProfileHasSideEffect(profile)
 	}
 	return false
 }

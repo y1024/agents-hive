@@ -133,6 +133,25 @@ func TestInMemoryOptimizationSuggestionStore_RecordApplyAudit(t *testing.T) {
 	assert.Equal(t, failedAt, *failed.AppliedAt)
 }
 
+func TestInMemoryOptimizationSuggestionStore_MarkAppliedRequiresAuthorizingEvidence(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemoryOptimizationSuggestionStore()
+	now := time.Date(2026, 4, 30, 10, 0, 0, 0, time.UTC)
+	rec := testReviewSuggestion("sug-apply-no-evidence", SuggestionApproved, TargetPrompt, "candidate-1", "web", now)
+	rec.RunnerInfo = RunnerInfo{}
+	_, err := store.UpsertSuggestion(ctx, rec)
+	require.NoError(t, err)
+
+	_, err = store.MarkSuggestionApplied(ctx, rec.ID, "reviewer-1", now.Add(time.Minute))
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires real_runner, production_shadow, or human_verified evidence")
+	got, ok, err := store.GetSuggestion(ctx, rec.ID)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, SuggestionApplyUnapplied, got.ApplyStatus)
+}
+
 func testReviewSuggestion(id string, status SuggestionStatus, target SuggestionTarget, candidateID, route string, createdAt time.Time) OptimizationReviewSuggestion {
 	return OptimizationReviewSuggestion{
 		ID:                id,
@@ -150,6 +169,7 @@ func testReviewSuggestion(id string, status SuggestionStatus, target SuggestionT
 			FailureType: FailurePrompt,
 			FinalStatus: StatusFail,
 		},
+		RunnerInfo:     RunnerInfo{EvidenceLevel: EvidenceRealRunner},
 		ReviewRequired: true,
 		CreatedBy:      "worker",
 		CreatedAt:      createdAt,

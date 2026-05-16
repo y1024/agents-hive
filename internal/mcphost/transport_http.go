@@ -134,7 +134,7 @@ func (t *HTTPTransport) connect(ctx context.Context, enqueueInit bool) error {
 		t.startListener(ctx)
 	}
 
-	t.logger.Info("HTTP 传输连接成功", zap.String("url", t.cfg.URL))
+	t.logger.Info("HTTP 传输连接成功", zap.String("url", safeURLForLog(t.cfg.URL)))
 	return nil
 }
 

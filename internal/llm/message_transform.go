@@ -934,7 +934,7 @@ func effortToBudgetTokens(effort string) int {
 // TemperatureDefaultsTransformer 按 Provider 设置合理的默认 Temperature。
 //
 // 默认值来源:
-//   - OpenAI GPT-4o: 1.0（默认）
+//   - OpenAI gpt-5: 1.0（默认）
 //   - Anthropic Claude: 1.0（默认）
 //   - Google Gemini: 1.0（默认）
 //   - DeepSeek: 0.7（官方推荐较低温度）
@@ -1243,8 +1243,8 @@ func (m ModelMeta) SupportsJSON() bool { return m.Capabilities.JSON }
 
 // 预定义常用模型的元数据
 var modelRegistry = map[string]ModelMeta{
-	"gpt-4o": {
-		Name:          "GPT-4o",
+	"gpt-5": {
+		Name:          "gpt-5",
 		ContextWindow: 128000,
 		MaxOutput:     16384,
 
@@ -1259,8 +1259,8 @@ var modelRegistry = map[string]ModelMeta{
 			CacheType:     "auto",
 		},
 	},
-	"gpt-4o-mini": {
-		Name:          "GPT-4o Mini",
+	"gpt-5-mini": {
+		Name:          "gpt-5 Mini",
 		ContextWindow: 128000,
 		MaxOutput:     16384,
 

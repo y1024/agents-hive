@@ -8,36 +8,40 @@ import (
 
 // selectBestModel 根据任务类型从可用模型中选最优模型
 func (r *Router) selectBestModel(task LLMTaskType) *ModelScore {
+	return r.selectBestModelWithUserModel(task, "")
+}
+
+func (r *Router) selectBestModelWithUserModel(task LLMTaskType, userModelName string) *ModelScore {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	switch task {
 	case TaskChat:
-		return r.userSelectedModel()
+		return r.userSelectedModelLocked(userModelName)
 	case TaskTitle, TaskSummary:
 		// 最便宜的、支持 tool use 的模型
 		if m := r.cheapestWithCapability("tools"); m != nil {
 			return m
 		}
-		return r.userSelectedModel()
+		return r.userSelectedModelLocked(userModelName)
 	case TaskCodeReview:
 		// 最强的推理模型
 		if m := r.bestWithCapability("tools"); m != nil {
 			return m
 		}
-		return r.userSelectedModel()
+		return r.userSelectedModelLocked(userModelName)
 	case TaskVision:
 		// 有 vision 能力的最优模型
 		if m := r.bestWithCapability("vision"); m != nil {
 			return m
 		}
-		return r.userSelectedModel()
+		return r.userSelectedModelLocked(userModelName)
 	case TaskAgent:
 		// 子代理需要 tool use
 		if m := r.bestWithCapability("tools"); m != nil {
 			return m
 		}
-		return r.userSelectedModel()
+		return r.userSelectedModelLocked(userModelName)
 	case TaskPlanning:
 		// spec-driven planner：需要 JSON 结构化输出，最便宜即可（haiku-tier）。
 		// 硬约束：绝不回落到 TaskChat——否则 main model 会被 planner 流量偷走预算。
@@ -48,22 +52,34 @@ func (r *Router) selectBestModel(task LLMTaskType) *ModelScore {
 		if m := r.cheapestWithCapability("tools"); m != nil {
 			return m
 		}
-		return r.userSelectedModel()
+		return r.userSelectedModelLocked(userModelName)
 	default:
-		return r.userSelectedModel()
+		return r.userSelectedModelLocked(userModelName)
 	}
 }
 
-// userSelectedModel 返回用户选定的主对话模型
-func (r *Router) userSelectedModel() *ModelScore {
-	for i := range r.models {
-		if r.models[i].Name == r.userModel {
-			return &r.models[i]
+// userSelectedModelLocked 返回指定会话选定的主对话模型；调用方必须持有 r.mu。
+func (r *Router) userSelectedModelLocked(modelName string) *ModelScore {
+	if modelName = strings.TrimSpace(modelName); modelName != "" {
+		if m := r.findModelLocked(modelName); m != nil {
+			return m
 		}
+	}
+	if m := r.findModelLocked(r.userModel); m != nil {
+		return m
 	}
 	// 没有匹配的，返回第一个可用的
 	if len(r.models) > 0 {
 		return &r.models[0]
+	}
+	return nil
+}
+
+func (r *Router) findModelLocked(modelName string) *ModelScore {
+	for i := range r.models {
+		if r.models[i].Name == modelName {
+			return &r.models[i]
+		}
 	}
 	return nil
 }

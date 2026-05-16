@@ -43,23 +43,38 @@ const EMPTY_PROVIDER: ProviderFormData = {
 interface ProviderFormProps {
   initial?: Partial<ProviderFormData>;
   isEdit?: boolean;
-  onSubmit: (data: ProviderFormData) => Promise<void>;
+  onSubmit: (data: ProviderFormSubmitData) => Promise<void>;
   onCancel: () => void;
 }
+
+type ProviderFormSubmitData = Partial<ProviderFormData> & { name: string };
+type ModelFormSubmitData = Partial<ModelFormData> & { name: string };
 
 function ProviderForm({ initial, isEdit, onSubmit, onCancel }: ProviderFormProps) {
   const { t } = useTranslation();
   const [form, setForm] = useState<ProviderFormData>({ ...EMPTY_PROVIDER, ...initial });
+  const [touched, setTouched] = useState<Set<keyof ProviderFormData>>(new Set());
   const [saving, setSaving] = useState(false);
 
-  const set = (k: keyof ProviderFormData, v: string | boolean) =>
+  const set = (k: keyof ProviderFormData, v: string | boolean) => {
+    setTouched((prev) => new Set(prev).add(k));
     setForm((f) => ({ ...f, [k]: v }));
+  };
+
+  const buildSubmitPayload = (): ProviderFormSubmitData => {
+    if (!isEdit) return form;
+    const payload: ProviderFormSubmitData = { name: form.name };
+    touched.forEach((key) => {
+      assignProviderField(payload, key, form[key]);
+    });
+    return payload;
+  };
 
   const handleSubmit = async () => {
     if (!form.name.trim()) return;
     setSaving(true);
     try {
-      await onSubmit(form);
+      await onSubmit(buildSubmitPayload());
     } finally {
       setSaving(false);
     }
@@ -96,6 +111,8 @@ function ProviderForm({ initial, isEdit, onSubmit, onCancel }: ProviderFormProps
             value={form.api_key}
             onChange={(e) => set('api_key', e.target.value)}
             placeholder={isEdit ? t('llm.apiKeyPlaceholder', '留空保持不变') : 'sk-...'}
+            autoComplete="new-password"
+            spellCheck={false}
             className="w-full px-3 py-2 text-sm rounded-lg border border-[var(--border-color)] bg-[var(--bg-primary)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-subtle)]"
           />
         </div>
@@ -106,6 +123,8 @@ function ProviderForm({ initial, isEdit, onSubmit, onCancel }: ProviderFormProps
             value={form.base_url}
             onChange={(e) => set('base_url', e.target.value)}
             placeholder="https://www.gmini.xyz/v1"
+            autoComplete="off"
+            spellCheck={false}
             className="w-full px-3 py-2 text-sm rounded-lg border border-[var(--border-color)] bg-[var(--bg-primary)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-subtle)]"
           />
         </div>
@@ -174,26 +193,102 @@ const EMPTY_MODEL: ModelFormData = {
   enabled: true,
 };
 
+function assignProviderField(
+  payload: ProviderFormSubmitData,
+  key: keyof ProviderFormData,
+  value: ProviderFormData[keyof ProviderFormData]
+) {
+  switch (key) {
+    case 'name':
+      payload.name = value as string;
+      break;
+    case 'provider_type':
+      payload.provider_type = value as string;
+      break;
+    case 'api_key':
+      payload.api_key = value as string;
+      break;
+    case 'base_url':
+      payload.base_url = value as string;
+      break;
+    case 'is_default':
+      payload.is_default = value as boolean;
+      break;
+    case 'enabled':
+      payload.enabled = value as boolean;
+      break;
+    case 'api_format':
+      payload.api_format = value as string;
+      break;
+    case 'service_type':
+      payload.service_type = value as string;
+      break;
+  }
+}
+
+function assignModelField(
+  payload: ModelFormSubmitData,
+  key: keyof ModelFormData,
+  value: ModelFormData[keyof ModelFormData]
+) {
+  switch (key) {
+    case 'name':
+      payload.name = value as string;
+      break;
+    case 'provider_name':
+      payload.provider_name = value as string;
+      break;
+    case 'model':
+      payload.model = value as string;
+      break;
+    case 'base_url':
+      payload.base_url = value as string;
+      break;
+    case 'api_key':
+      payload.api_key = value as string;
+      break;
+    case 'is_default':
+      payload.is_default = value as boolean;
+      break;
+    case 'enabled':
+      payload.enabled = value as boolean;
+      break;
+  }
+}
+
 interface ModelFormProps {
   providers: LLMProviderRecord[];
   initial?: Partial<ModelFormData>;
-  onSubmit: (data: ModelFormData) => Promise<void>;
+  isEdit?: boolean;
+  onSubmit: (data: ModelFormSubmitData) => Promise<void>;
   onCancel: () => void;
 }
 
-function ModelForm({ providers, initial, onSubmit, onCancel }: ModelFormProps) {
+function ModelForm({ providers, initial, isEdit, onSubmit, onCancel }: ModelFormProps) {
   const { t } = useTranslation();
   const [form, setForm] = useState<ModelFormData>({ ...EMPTY_MODEL, ...initial });
+  const [touched, setTouched] = useState<Set<keyof ModelFormData>>(new Set());
   const [saving, setSaving] = useState(false);
 
-  const set = (k: keyof ModelFormData, v: string | boolean) =>
+  const set = (k: keyof ModelFormData, v: string | boolean) => {
+    setTouched((prev) => new Set(prev).add(k));
     setForm((f) => ({ ...f, [k]: v }));
+  };
+
+  const buildSubmitPayload = (): ModelFormSubmitData => {
+    if (!isEdit) return form;
+    const payload: ModelFormSubmitData = { name: form.name };
+    touched.forEach((key) => {
+      assignModelField(payload, key, form[key]);
+    });
+    return payload;
+  };
 
   const handleSubmit = async () => {
     if (!form.name.trim() || !form.model.trim()) return;
     setSaving(true);
     try {
-      await onSubmit(form);
+      await onSubmit(buildSubmitPayload());
     } finally {
       setSaving(false);
     }
@@ -208,7 +303,7 @@ function ModelForm({ providers, initial, onSubmit, onCancel }: ModelFormProps) {
             type="text"
             value={form.name}
             onChange={(e) => set('name', e.target.value)}
-            placeholder="gpt-4o-main"
+            placeholder="gpt-5-main"
             className="w-full px-3 py-2 text-sm rounded-lg border border-[var(--border-color)] bg-[var(--bg-primary)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-subtle)]"
           />
         </div>
@@ -218,7 +313,7 @@ function ModelForm({ providers, initial, onSubmit, onCancel }: ModelFormProps) {
             type="text"
             value={form.model}
             onChange={(e) => set('model', e.target.value)}
-            placeholder="gpt-4o-2024-11-20"
+            placeholder="gpt-5-2024-11-20"
             className="w-full px-3 py-2 text-sm rounded-lg border border-[var(--border-color)] bg-[var(--bg-primary)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-subtle)]"
           />
         </div>
@@ -240,6 +335,8 @@ function ModelForm({ providers, initial, onSubmit, onCancel }: ModelFormProps) {
             value={form.base_url}
             onChange={(e) => set('base_url', e.target.value)}
             placeholder={t('llm.optional', '可选')}
+            autoComplete="off"
+            spellCheck={false}
             className="w-full px-3 py-2 text-sm rounded-lg border border-[var(--border-color)] bg-[var(--bg-primary)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-subtle)]"
           />
         </div>
@@ -250,6 +347,8 @@ function ModelForm({ providers, initial, onSubmit, onCancel }: ModelFormProps) {
             value={form.api_key}
             onChange={(e) => set('api_key', e.target.value)}
             placeholder={t('llm.optional', '可选')}
+            autoComplete="new-password"
+            spellCheck={false}
             className="w-full px-3 py-2 text-sm rounded-lg border border-[var(--border-color)] bg-[var(--bg-primary)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-subtle)]"
           />
         </div>
@@ -321,14 +420,17 @@ export function LLMProviders() {
   useEffect(() => { load(); }, [load]);
 
   // ── Provider CRUD ──
-  const handleCreateProvider = async (data: ProviderFormData) => {
-    await client.adminCreateLLMProvider(data);
+  const handleCreateProvider = async (data: ProviderFormSubmitData) => {
+    await client.adminCreateLLMProvider({
+      ...data,
+      provider_type: data.provider_type ?? EMPTY_PROVIDER.provider_type,
+    });
     addToast('success', `Provider "${data.name}" 已创建`);
     setCreatingProvider(false);
     load();
   };
 
-  const handleUpdateProvider = async (name: string, data: ProviderFormData) => {
+  const handleUpdateProvider = async (name: string, data: ProviderFormSubmitData) => {
     await client.adminUpdateLLMProvider(name, data);
     addToast('success', `Provider "${name}" 已更新`);
     setEditingProvider(null);
@@ -360,15 +462,18 @@ export function LLMProviders() {
     });
 
   // ── Model CRUD ──
-  const handleCreateModel = async (data: ModelFormData) => {
-    await client.adminCreateLLMModel(data);
+  const handleCreateModel = async (data: ModelFormSubmitData) => {
+    await client.adminCreateLLMModel({
+      ...data,
+      model: data.model ?? '',
+    });
     addToast('success', `Model "${data.name}" 已创建`);
     setCreatingModelFor(null);
     setCreatingOrphanModel(false);
     load();
   };
 
-  const handleUpdateModel = async (name: string, data: ModelFormData) => {
+  const handleUpdateModel = async (name: string, data: ModelFormSubmitData) => {
     await client.adminUpdateLLMModel(name, data);
     const newName = data.name.trim();
     addToast('success', newName && newName !== name ? `Model "${name}" 已重命名为 "${newName}"` : `Model "${name}" 已更新`);
@@ -552,6 +657,7 @@ export function LLMProviders() {
                               is_default: m.is_default,
                               enabled: m.enabled,
                             }}
+                            isEdit
                             onSubmit={(data) => handleUpdateModel(m.name, data)}
                             onCancel={() => setEditingModel(null)}
                           />
@@ -614,6 +720,7 @@ export function LLMProviders() {
                           is_default: m.is_default,
                           enabled: m.enabled,
                         }}
+                        isEdit
                         onSubmit={(data) => handleUpdateModel(m.name, data)}
                         onCancel={() => setEditingModel(null)}
                       />

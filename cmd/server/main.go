@@ -12,11 +12,13 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/chef-guo/agents-hive/internal/agentquality"
 	"github.com/chef-guo/agents-hive/internal/api"
 	"github.com/chef-guo/agents-hive/internal/bootstrap"
 	"github.com/chef-guo/agents-hive/internal/channel"
 	"github.com/chef-guo/agents-hive/internal/channel/feishu"
 	"github.com/chef-guo/agents-hive/internal/config"
+	"github.com/chef-guo/agents-hive/internal/master"
 	"github.com/chef-guo/agents-hive/internal/security"
 )
 
@@ -139,6 +141,22 @@ func main() {
 	if sc.QualityCandidateStore != nil {
 		server.SetQualityCandidateStore(sc.QualityCandidateStore)
 	}
+	qualityRunner := agentquality.AgentRunEvalRunner{
+		Adapter: master.NewAgentQualityRunAdapter(sc.Master),
+	}
+	server.SetQualityEvalRunner(qualityRunner)
+	shadowStore := server.QualityShadowEvalStore()
+	sc.Master.SetQualityShadowEvalRunner(agentquality.NewShadowEvalRunner(
+		agentquality.NewConfigurableSampler(agentquality.ShadowEvalConfig{
+			Enabled:       true,
+			SamplingRate:  0.05,
+			MaxConcurrent: 2,
+		}),
+		qualityRunner,
+		agentquality.HeuristicReflectionEvaluator{},
+		shadowStore,
+		2,
+	))
 	if sc.OptimizationStore != nil {
 		server.SetOptimizationSuggestionStore(sc.OptimizationStore)
 	}

@@ -1,4 +1,4 @@
-import { useLocation } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useState, useRef, useEffect } from 'react';
 import { PanelLeft } from 'lucide-react';
@@ -42,6 +42,16 @@ export function Header({ connected, onToggleSidebar }: Props) {
     '/admin/agents': t('nav.adminAgents'),
     '/admin/scheduled-tasks': t('nav.adminScheduledTasks'),
     '/admin/skills': t('nav.adminSkills'),
+    '/admin/llm': t('nav.adminLLM'),
+    '/admin/users': t('nav.adminUsers'),
+    '/admin/usage': t('nav.adminUsage'),
+    '/admin/auth-providers': t('nav.adminAuthProviders'),
+    '/admin/prompts': t('nav.adminPrompts'),
+    '/admin/quality-candidates': t('nav.adminQualityCandidates'),
+    '/admin/quality-workbench': t('nav.adminQualityWorkbench'),
+    '/admin/memory-governance': t('nav.adminMemoryGovernance'),
+    '/admin/auto-optimization': t('nav.adminAutoOptimization'),
+    '/admin/multi-agent': t('nav.adminMultiAgent'),
     '/admin/settings': t('nav.adminSettings'),
     '/admin/guide': t('nav.guide'),
   };
@@ -120,14 +130,14 @@ export function Header({ connected, onToggleSidebar }: Props) {
                   <p className="text-xs text-[var(--text-secondary)] truncate">{user.email}</p>
                 </div>
                 {user.role === 'admin' && (
-                  <a
-                    href="/admin"
+                  <Link
+                    to="/admin"
                     role="menuitem"
                     className="block px-3 py-2 text-sm text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
                     onClick={() => setMenuOpen(false)}
                   >
                     管理后台
-                  </a>
+                  </Link>
                 )}
                 <button
                   role="menuitem"

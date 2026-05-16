@@ -17,7 +17,7 @@ func TestLookupProvider_Known(t *testing.T) {
 		{"deepseek", "deepseek", "https://api.deepseek.com", "deepseek-chat"},
 		{"anthropic", "anthropic", "https://api.anthropic.com", "claude-sonnet-4-20250514"},
 		{"google", "google", "https://generativelanguage.googleapis.com", "gemini-1.5-pro-latest"},
-		{"azure", "azure", "", "gpt-4o"},
+		{"azure", "azure", "", "gpt-5"},
 		{"groq", "groq", "https://api.groq.com/openai", "llama3-70b-8192"},
 		{"mistral", "mistral", "https://api.mistral.ai", "mistral-large-latest"},
 		{"bedrock", "bedrock", "", "anthropic.claude-3-sonnet-20240229-v1:0"},
@@ -284,7 +284,7 @@ func TestProviderDefaultModels(t *testing.T) {
 		defaultModel string
 	}{
 		{"google", "gemini-1.5-pro-latest"},
-		{"azure", "gpt-4o"},
+		{"azure", "gpt-5"},
 		{"groq", "llama3-70b-8192"},
 		{"mistral", "mistral-large-latest"},
 		{"bedrock", "anthropic.claude-3-sonnet-20240229-v1:0"},

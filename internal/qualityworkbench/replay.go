@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/chef-guo/agents-hive/internal/agentquality"
 )
 
 type ReplayJobKind string
@@ -31,6 +33,9 @@ type ReplayJob struct {
 	BatchID    string          `json:"batch_id"`
 	Kind       ReplayJobKind   `json:"kind"`
 	TargetIDs  []string        `json:"target_ids"`
+	DomainID   string          `json:"domain_id,omitempty"`
+	SourceKind string          `json:"source_kind,omitempty"`
+	SourceName string          `json:"source_name,omitempty"`
 	Status     ReplayJobStatus `json:"status"`
 	MaxAttempt int             `json:"max_attempt"`
 	Attempt    int             `json:"attempt"`
@@ -41,27 +46,36 @@ type ReplayJob struct {
 }
 
 type ReplayJobResult struct {
-	Total   int      `json:"total"`
-	Passed  int      `json:"passed"`
-	Failed  int      `json:"failed"`
-	Unknown int      `json:"unknown"`
-	CaseIDs []string `json:"case_ids,omitempty"`
-	Reasons []string `json:"reasons,omitempty"`
+	Total        int                       `json:"total"`
+	Passed       int                       `json:"passed"`
+	Failed       int                       `json:"failed"`
+	Unknown      int                       `json:"unknown"`
+	CaseIDs      []string                  `json:"case_ids,omitempty"`
+	Reasons      []string                  `json:"reasons,omitempty"`
+	RunnerInfo   agentquality.RunnerInfo   `json:"runner_info,omitempty"`
+	GateMetrics  agentquality.GateMetrics  `json:"gate_metrics,omitempty"`
+	JudgeVerdict agentquality.JudgeVerdict `json:"judge_verdict,omitempty"`
 }
 
 type ReplayJobCreate struct {
 	BatchID    string
 	Kind       ReplayJobKind
 	TargetIDs  []string
+	DomainID   string
+	SourceKind string
+	SourceName string
 	MaxAttempt int
 }
 
 type ReplayJobListFilter struct {
-	BatchID string
-	Kind    ReplayJobKind
-	Status  ReplayJobStatus
-	Limit   int
-	Offset  int
+	BatchID    string
+	Kind       ReplayJobKind
+	Status     ReplayJobStatus
+	DomainID   string
+	SourceKind string
+	SourceName string
+	Limit      int
+	Offset     int
 }
 
 type ReplayJobStore interface {
@@ -109,6 +123,9 @@ func (s *MemoryReplayJobStore) Create(input ReplayJobCreate) (ReplayJob, error) 
 		BatchID:    input.BatchID,
 		Kind:       input.Kind,
 		TargetIDs:  append([]string(nil), input.TargetIDs...),
+		DomainID:   strings.TrimSpace(input.DomainID),
+		SourceKind: strings.TrimSpace(input.SourceKind),
+		SourceName: strings.TrimSpace(input.SourceName),
 		Status:     ReplayJobQueued,
 		MaxAttempt: input.MaxAttempt,
 		CreatedAt:  now,
@@ -140,6 +157,15 @@ func (s *MemoryReplayJobStore) List(filter ReplayJobListFilter) []ReplayJob {
 			continue
 		}
 		if filter.Status != "" && job.Status != filter.Status {
+			continue
+		}
+		if filter.DomainID != "" && job.DomainID != filter.DomainID {
+			continue
+		}
+		if filter.SourceKind != "" && job.SourceKind != filter.SourceKind {
+			continue
+		}
+		if filter.SourceName != "" && job.SourceName != filter.SourceName {
 			continue
 		}
 		out = append(out, cloneReplayJob(job))

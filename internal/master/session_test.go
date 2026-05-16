@@ -24,6 +24,11 @@ func TestQualityMemoryInjectionConsumedOnce(t *testing.T) {
 	session := &SessionState{ID: "s1"}
 	session.SetQualityMemoryInjection(memory.InjectionResult{
 		Text:            "## 相关记忆\n\n- [user] 可信记忆\n",
+		DomainID:        "generic",
+		SourceKind:      "master",
+		SourceName:      "react",
+		OwnerScope:      memory.TargetScopeUser,
+		OwnerID:         "user-1",
 		Memories:        []memory.InjectedMemory{{ID: 11, Type: memory.MemoryTypeUser}},
 		EstimatedTokens: 9,
 	})
@@ -33,6 +38,11 @@ func TestQualityMemoryInjectionConsumedOnce(t *testing.T) {
 
 	require.Len(t, first.Memories, 1)
 	assert.Equal(t, int64(11), first.Memories[0].ID)
+	assert.Equal(t, "generic", first.DomainID)
+	assert.Equal(t, "master", first.SourceKind)
+	assert.Equal(t, "react", first.SourceName)
+	assert.Equal(t, memory.TargetScopeUser, first.OwnerScope)
+	assert.Equal(t, "user-1", first.OwnerID)
 	assert.Empty(t, second.Memories)
 	assert.Empty(t, second.Text)
 }

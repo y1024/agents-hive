@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Activity, AlertTriangle, Brain, CheckCircle2, Download, Filter, Hash, RefreshCcw, ShieldAlert, ShieldX, Trash2, Upload } from 'lucide-react';
 import { useNodeClient } from '../../hooks/useNodeClient';
 import { useToastStore } from '../../store/toast';
-import type { EmbeddingBacklogStats, MemoryGovernanceStats, MemoryInjectionExplainResponse, MemoryProductionMetrics, MemoryPromotionApplyResponse, MemoryPromotionCandidatesResponse, MemoryPruneResponse, OptimizationApprovalRecord, VectorSpaceMigrationResponse } from '../../types/api';
+import type { EmbeddingBacklogStats, MemoryExportDocument, MemoryGovernanceStats, MemoryInjectionExplainItem, MemoryInjectionExplainResponse, MemoryProductionMetricAlert, MemoryProductionMetrics, MemoryProductionMetricsSeriesPoint, MemoryProductionMetricsSnapshot, MemoryPromotionApplyResponse, MemoryPromotionCandidate, MemoryPromotionCandidatesResponse, MemoryPruneResponse, OptimizationApprovalRecord, VectorSpaceMigrationPlan, VectorSpaceMigrationResponse, VectorSpaceMigrationUpdate } from '../../types/api';
 
 const card = 'rounded-2xl border border-[var(--border-color)] bg-[var(--bg-card)] p-4 shadow-sm';
 const button = 'inline-flex items-center justify-center gap-2 px-3 py-2 rounded-[10px] border border-[var(--border-color)] text-sm text-[var(--text-primary)] hover:bg-[var(--bg-secondary)] disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-150';
@@ -41,6 +41,12 @@ export function MemoryGovernance() {
     target_scope: filterTargetScope || undefined,
     kind: filterKind || undefined,
   }), [filterKind, filterTarget, filterTargetScope, filterUserId]);
+  const normalizedBacklogStats = useMemo(() => normalizeEmbeddingBacklogStats(backlogStats), [backlogStats]);
+  const normalizedInjectionExplain = useMemo(() => normalizeMemoryInjectionExplain(injectionExplain), [injectionExplain]);
+  const normalizedProductionMetrics = useMemo(() => normalizeMemoryProductionMetrics(productionMetrics), [productionMetrics]);
+  const normalizedPromotionCandidates = useMemo(() => normalizeMemoryPromotionCandidates(promotionCandidates), [promotionCandidates]);
+  const normalizedLastPlan = useMemo(() => normalizeMemoryPruneResponse(lastPlan), [lastPlan]);
+  const normalizedVectorPlan = useMemo(() => normalizeVectorSpaceMigrationResponse(vectorPlan), [vectorPlan]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -57,12 +63,13 @@ export function MemoryGovernance() {
         }).catch(() => null),
       ]);
       setStats(governance);
-      setBacklogStats(backlog);
-      setInjectionExplain(explain);
-      setProductionMetrics(metrics);
-      setPromotionCandidates(promotions);
-      if (promotions?.items?.length) {
-        const approvalPairs = await Promise.all(promotions.items.map(async (item) => {
+      const nextPromotions = normalizeMemoryPromotionCandidates(promotions);
+      setBacklogStats(normalizeEmbeddingBacklogStats(backlog));
+      setInjectionExplain(normalizeMemoryInjectionExplain(explain));
+      setProductionMetrics(normalizeMemoryProductionMetrics(metrics));
+      setPromotionCandidates(nextPromotions);
+      if (nextPromotions.items.length) {
+        const approvalPairs = await Promise.all(nextPromotions.items.map(async (item) => {
           try {
             const res = await client.adminListOptimizationApprovals({ subjectId: item.subject_id });
             return [item.subject_id, res.items ?? []] as const;
@@ -92,8 +99,9 @@ export function MemoryGovernance() {
         limit: 5000,
         ...activeFilter,
       });
-      setLastPlan(res);
-      addToast('success', dryRun ? `Dry-run 匹配 ${res.delete_ids.length} 条` : `已删除 ${res.deleted ?? res.delete_ids.length} 条`);
+      const normalized = normalizeMemoryPruneResponse(res);
+      setLastPlan(normalized);
+      addToast('success', dryRun ? `Dry-run 匹配 ${normalized?.delete_ids.length ?? 0} 条` : `已删除 ${normalized?.deleted ?? normalized?.delete_ids.length ?? 0} 条`);
       await load();
     } catch (e: unknown) {
       addToast('error', e instanceof Error ? e.message : '执行治理剪枝失败');
@@ -102,7 +110,7 @@ export function MemoryGovernance() {
 
   const exportMemory = async () => {
     try {
-      const doc = await client.adminExportMemory({ limit: 5000, ...activeFilter });
+      const doc = normalizeMemoryExportDocument(await client.adminExportMemory({ limit: 5000, ...activeFilter }));
       const text = JSON.stringify(doc, null, 2);
       setExportJSON(text);
       setImportJSON((current) => current || text);
@@ -132,14 +140,14 @@ export function MemoryGovernance() {
 
   const planVectorSpace = async () => {
     try {
-      const plan = await client.adminPlanVectorSpaceMigration({
+      const plan = normalizeVectorSpaceMigrationResponse(await client.adminPlanVectorSpaceMigration({
         target_space: targetSpace || 'memory:default',
         batch_size: 25,
         dry_run: true,
         limit: 5000,
-      });
+      }));
       setVectorPlan(plan);
-      addToast('success', `Vector-space dry-run 命中 ${plan.updated} 条`);
+      addToast('success', `Vector-space dry-run 命中 ${plan?.updated ?? 0} 条`);
     } catch (e: unknown) {
       addToast('error', e instanceof Error ? e.message : '生成 vector-space plan 失败');
     }
@@ -223,14 +231,14 @@ export function MemoryGovernance() {
           <div>
             <h2 className="text-sm font-semibold text-[var(--text-primary)]">生产监控</h2>
             <p className="mt-1 text-sm text-[var(--text-secondary)]">
-              数据源：{productionMetrics?.source ?? '未连接'} · 窗口：{productionMetrics?.window_minutes ?? 1440} 分钟
+              数据源：{normalizedProductionMetrics.source} · 窗口：{normalizedProductionMetrics.window_minutes} 分钟
             </p>
           </div>
           <Activity size={18} className="text-[var(--accent-600)]" />
         </div>
-        {productionMetrics?.alerts?.length ? (
+        {normalizedProductionMetrics.alerts.length ? (
           <div className="space-y-2">
-            {productionMetrics.alerts.map((alert) => (
+            {normalizedProductionMetrics.alerts.map((alert) => (
               <div key={alert.code} className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
                 <AlertTriangle size={15} className="mt-0.5 shrink-0" />
                 <span>{alert.message} · {formatNumber(alert.value)}</span>
@@ -239,16 +247,16 @@ export function MemoryGovernance() {
           </div>
         ) : null}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
-          <Metric title="Dropped" value={productionMetrics?.snapshot.embedding_dropped_total ?? 0} icon={<AlertTriangle size={17} />} />
-          <Metric title="Fallback" value={productionMetrics?.snapshot.hybrid_search_fallback_total ?? 0} icon={<Activity size={17} />} />
-          <Metric title="Vector Mismatch" value={productionMetrics?.snapshot.vector_space_mismatch_total ?? 0} icon={<ShieldAlert size={17} />} />
-          <Metric title="Backlog Depth" value={productionMetrics?.snapshot.backlog_depth_total ?? backlogStats?.total ?? 0} icon={<Activity size={17} />} />
-          <Metric title="Embed p95 Sec" value={productionMetrics?.snapshot.embedding_latency_p95_seconds ?? 0} icon={<Activity size={17} />} />
+          <Metric title="Dropped" value={normalizedProductionMetrics.snapshot.embedding_dropped_total} icon={<AlertTriangle size={17} />} />
+          <Metric title="Fallback" value={normalizedProductionMetrics.snapshot.hybrid_search_fallback_total} icon={<Activity size={17} />} />
+          <Metric title="Vector Mismatch" value={normalizedProductionMetrics.snapshot.vector_space_mismatch_total} icon={<ShieldAlert size={17} />} />
+          <Metric title="Backlog Depth" value={normalizedProductionMetrics.snapshot.backlog_depth_total || normalizedBacklogStats.total} icon={<Activity size={17} />} />
+          <Metric title="Embed p95 Sec" value={normalizedProductionMetrics.snapshot.embedding_latency_p95_seconds} icon={<Activity size={17} />} />
         </div>
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-          <Breakdown title="drop reasons" items={productionMetrics?.snapshot.drop_reasons} />
-          <Breakdown title="fallback reasons" items={productionMetrics?.snapshot.fallback_reasons} />
-          <Breakdown title="mismatch operations" items={productionMetrics?.snapshot.mismatch_operations} />
+          <Breakdown title="drop reasons" items={normalizedProductionMetrics.snapshot.drop_reasons} />
+          <Breakdown title="fallback reasons" items={normalizedProductionMetrics.snapshot.fallback_reasons} />
+          <Breakdown title="mismatch operations" items={normalizedProductionMetrics.snapshot.mismatch_operations} />
         </div>
         <div className="overflow-auto rounded-lg border border-[var(--border-color)]">
           <table className="min-w-full text-sm">
@@ -263,7 +271,7 @@ export function MemoryGovernance() {
               </tr>
             </thead>
             <tbody>
-              {(productionMetrics?.series ?? []).slice(-8).map((point) => (
+              {normalizedProductionMetrics.series.slice(-8).map((point) => (
                 <tr key={point.since} className="border-t border-[var(--border-color)]">
                   <td className="px-3 py-2 text-[var(--text-secondary)]">{formatHour(point.since)}</td>
                   <td className="px-3 py-2 text-right text-[var(--text-primary)]">{formatNumber(point.embedding_dropped_total)}</td>
@@ -273,7 +281,7 @@ export function MemoryGovernance() {
                   <td className="px-3 py-2 text-right text-[var(--text-primary)]">{formatNumber(point.backlog_depth_total)}</td>
                 </tr>
               ))}
-              {!productionMetrics?.series?.length ? (
+              {!normalizedProductionMetrics.series.length ? (
                 <tr>
                   <td colSpan={6} className="px-3 py-4 text-center text-[var(--text-secondary)]">暂无生产指标样本。</td>
                 </tr>
@@ -299,9 +307,9 @@ export function MemoryGovernance() {
         <div className="grid grid-cols-1 lg:grid-cols-[260px_minmax(0,1fr)] gap-3">
           <div className="rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] p-3">
             <p className="text-xs text-[var(--text-secondary)]">backlog total</p>
-            <p className="mt-1 text-2xl font-semibold text-[var(--text-primary)]">{backlogStats?.total ?? 0}</p>
+            <p className="mt-1 text-2xl font-semibold text-[var(--text-primary)]">{normalizedBacklogStats.total}</p>
             <div className="mt-3 flex flex-wrap gap-2">
-              {Object.entries(backlogStats?.by_state ?? {}).map(([key, value]) => (
+              {Object.entries(normalizedBacklogStats.by_state).map(([key, value]) => (
                 <span key={key} className="px-2 py-1 rounded-full bg-[var(--bg-primary)] text-xs text-[var(--text-secondary)]">{key}: {value}</span>
               ))}
             </div>
@@ -315,14 +323,14 @@ export function MemoryGovernance() {
                 placeholder="memory:default"
               />
             </div>
-            {vectorPlan ? (
+            {normalizedVectorPlan ? (
               <div className="rounded-lg border border-[var(--border-color)] p-3">
                 <p className="text-sm text-[var(--text-primary)]">
-                  dry_run={String(vectorPlan.plan.dry_run)} · scanned={vectorPlan.plan.scanned} · updates={vectorPlan.updated}
-                  {vectorPlan.plan.resume_token ? ` · resume=${vectorPlan.plan.resume_token}` : ''}
+                  dry_run={String(normalizedVectorPlan.plan.dry_run)} · scanned={normalizedVectorPlan.plan.scanned} · updates={normalizedVectorPlan.updated}
+                  {normalizedVectorPlan.plan.resume_token ? ` · resume=${normalizedVectorPlan.plan.resume_token}` : ''}
                 </p>
                 <div className="mt-2 max-h-28 overflow-auto space-y-1">
-                  {vectorPlan.plan.updates.slice(0, 8).map((update) => (
+                  {normalizedVectorPlan.plan.updates.slice(0, 8).map((update) => (
                     <p key={update.memory_id} className="text-xs text-[var(--text-secondary)] truncate">memory #{update.memory_id} · {update.record.content}</p>
                   ))}
                 </div>
@@ -370,8 +378,8 @@ export function MemoryGovernance() {
           </div>
         ) : null}
         <div className="space-y-3">
-          {promotionCandidates?.items?.length ? (
-            promotionCandidates.items.map((item) => {
+          {normalizedPromotionCandidates.items.length ? (
+            normalizedPromotionCandidates.items.map((item) => {
               const approval = latestApprovedPromotion(promotionApprovals[item.subject_id]);
               return (
                 <div key={`${item.subject_id}-${item.created_at}`} className="rounded-lg border border-[var(--border-color)] bg-[var(--bg-primary)] p-3">
@@ -404,7 +412,7 @@ export function MemoryGovernance() {
                       </button>
                     </div>
                   </div>
-                  <p className="mt-3 whitespace-pre-wrap text-sm text-[var(--text-primary)]">{item.proposed_procedural_memory.content}</p>
+                  <p className="mt-3 whitespace-pre-wrap text-sm text-[var(--text-primary)]">{item.proposed_procedural_memory?.content ?? 'n/a'}</p>
                   <p className="mt-2 text-sm text-[var(--text-secondary)]">{item.rationale || '暂无 rationale'}</p>
                   <p className="mt-2 text-xs text-[var(--text-secondary)]">source_memory_ids: {formatIdList(item.source_memory_ids)}</p>
                 </div>
@@ -445,8 +453,8 @@ export function MemoryGovernance() {
             </div>
           </div>
           <div className="space-y-3">
-            {injectionExplain?.items?.length ? (
-              injectionExplain.items.map((item, idx) => (
+            {normalizedInjectionExplain.items.length ? (
+              normalizedInjectionExplain.items.map((item, idx) => (
                 <div key={`${item.timestamp ?? 'item'}-${idx}`} className="rounded-lg border border-[var(--border-color)] bg-[var(--bg-primary)] p-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <p className="text-sm text-[var(--text-primary)]">
@@ -456,7 +464,7 @@ export function MemoryGovernance() {
                     <p className="text-xs text-[var(--text-secondary)]">{item.timestamp ? new Date(item.timestamp).toLocaleString() : 'unknown time'}</p>
                   </div>
                   <div className="mt-2 flex flex-wrap gap-2">
-                    <SummaryPill label="selected" value={item.memory_ids?.length ?? 0} />
+                    <SummaryPill label="selected" value={item.memory_ids.length} />
                     <SummaryPill label="skipped" value={skipTotal(item.skipped_memory_ids, item.skip_counts)} />
                     <SummaryPill label="tokens" value={item.estimated_tokens ?? 0} />
                     <SummaryPill label="injected" value={item.memory_injected ? 1 : 0} />
@@ -464,11 +472,14 @@ export function MemoryGovernance() {
                   <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-[var(--text-secondary)]">
                     <p>memory_ids: {formatIdList(item.memory_ids)}</p>
                     <p>skipped_memory_ids: {formatIdList(item.skipped_memory_ids)}</p>
-                    <p>prompt_versions: {item.prompt_versions?.join(', ') || 'n/a'}</p>
+                    <p>prompt_versions: {item.prompt_versions.join(', ') || 'n/a'}</p>
                     <p>contamination_check: {item.contamination_check || 'n/a'}</p>
+                    <p>memory_domain: {item.memory_domain_id || 'generic'}</p>
+                    <p>memory_source: {[item.memory_source_kind, item.memory_source_name].filter(Boolean).join('/') || 'n/a'}</p>
+                    <p>memory_owner: {[item.memory_owner_scope, item.memory_owner_id].filter(Boolean).join(':') || 'n/a'}</p>
                   </div>
                   <div className="mt-2 flex flex-wrap gap-2">
-                    {Object.entries(item.skip_counts ?? {}).map(([key, value]) => (
+                    {Object.entries(item.skip_counts).map(([key, value]) => (
                       <span key={key} className="px-2 py-1 rounded-full bg-[var(--bg-secondary)] text-xs text-[var(--text-secondary)]">
                         {key}: {value}
                       </span>
@@ -511,19 +522,19 @@ export function MemoryGovernance() {
         </div>
       </section>
 
-      {lastPlan && (
+      {normalizedLastPlan && (
         <section className={card}>
           <h2 className="text-sm font-semibold text-[var(--text-primary)] mb-3">最近一次计划</h2>
           <p className="text-sm text-[var(--text-secondary)] mb-3">
-            dry_run={String(lastPlan.dry_run)} · matched={lastPlan.matched ?? lastPlan.delete_ids.length} · deleted={lastPlan.deleted ?? 0}
+            dry_run={String(normalizedLastPlan.dry_run)} · matched={normalizedLastPlan.matched ?? normalizedLastPlan.delete_ids.length} · deleted={normalizedLastPlan.deleted ?? 0}
           </p>
           <div className="max-h-72 overflow-auto rounded-lg border border-[var(--border-color)]">
-            {lastPlan.delete_ids.length === 0 ? (
+            {normalizedLastPlan.delete_ids.length === 0 ? (
               <p className="p-4 text-sm text-[var(--text-secondary)]">没有命中待删除 memory。</p>
-            ) : lastPlan.delete_ids.map((id) => (
+            ) : normalizedLastPlan.delete_ids.map((id) => (
               <div key={id} className="flex items-center justify-between gap-3 px-3 py-2 border-b border-[var(--border-color)] last:border-b-0">
                 <span className="font-mono text-sm text-[var(--text-primary)]">#{id}</span>
-                <span className="text-xs text-[var(--text-secondary)]">{lastPlan.reasons?.[String(id)] || lastPlan.reasons?.[id] || 'unknown'}</span>
+                <span className="text-xs text-[var(--text-secondary)]">{normalizedLastPlan.reasons[String(id)] || normalizedLastPlan.reasons[id] || 'unknown'}</span>
               </div>
             ))}
           </div>
@@ -550,13 +561,13 @@ export function MemoryGovernance() {
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
           <div>
             <p className="mb-1 text-xs text-[var(--text-secondary)]">最近导出</p>
-            <textarea
-              value={exportJSON}
-              readOnly
-              rows={12}
-              className="w-full rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] p-3 font-mono text-xs text-[var(--text-primary)]"
-              placeholder="点击导出后显示 JSON"
-            />
+              <textarea
+                value={exportJSON}
+                readOnly
+                rows={12}
+                className="w-full rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] p-3 font-mono text-xs text-[var(--text-primary)]"
+                placeholder="点击导出后显示 JSON"
+              />
           </div>
           <div>
             <p className="mb-1 text-xs text-[var(--text-secondary)]">导入文档</p>
@@ -634,6 +645,158 @@ function SummaryPill({ label, value }: { label: string; value: number }) {
       {label}: {value}
     </span>
   );
+}
+
+type NormalizedMemoryInjectionExplainItem = Omit<MemoryInjectionExplainItem, 'memory_injected' | 'memory_ids' | 'prompt_versions' | 'skip_counts' | 'skipped_memory_ids'> & {
+  memory_injected: boolean;
+  memory_ids: number[];
+  prompt_versions: string[];
+  skip_counts: Record<string, number>;
+  skipped_memory_ids: number[];
+};
+
+type NormalizedMemoryInjectionExplainResponse = Omit<MemoryInjectionExplainResponse, 'items'> & {
+  items: NormalizedMemoryInjectionExplainItem[];
+};
+
+type NormalizedEmbeddingBacklogStats = Omit<EmbeddingBacklogStats, 'by_state'> & {
+  by_state: Record<string, number>;
+};
+
+type NormalizedMemoryProductionMetricsSnapshot = Omit<MemoryProductionMetricsSnapshot, 'backlog_depth_by_status' | 'drop_reasons' | 'fallback_reasons' | 'mismatch_operations'> & {
+  backlog_depth_by_status: Record<string, number>;
+  drop_reasons: Record<string, number>;
+  fallback_reasons: Record<string, number>;
+  mismatch_operations: Record<string, number>;
+};
+
+type NormalizedMemoryProductionMetrics = {
+  source: string;
+  since: string;
+  until: string;
+  window_minutes: number;
+  snapshot: NormalizedMemoryProductionMetricsSnapshot;
+  series: MemoryProductionMetricsSeriesPoint[];
+  alerts: MemoryProductionMetricAlert[];
+};
+
+type NormalizedMemoryPromotionCandidate = Omit<MemoryPromotionCandidate, 'proposed_procedural_memory' | 'rationale' | 'source_kind' | 'source_memory_ids'> & {
+  proposed_procedural_memory?: MemoryPromotionCandidate['proposed_procedural_memory'];
+  rationale: string;
+  source_kind: string;
+  source_memory_ids: number[];
+};
+
+type NormalizedMemoryPromotionCandidatesResponse = Omit<MemoryPromotionCandidatesResponse, 'items'> & {
+  items: NormalizedMemoryPromotionCandidate[];
+};
+
+type NormalizedMemoryPruneResponse = Omit<MemoryPruneResponse, 'delete_ids' | 'reasons'> & {
+  delete_ids: number[];
+  reasons: Record<string, string>;
+};
+
+type NormalizedVectorSpaceMigrationPlan = Omit<VectorSpaceMigrationPlan, 'updates'> & {
+  updates: VectorSpaceMigrationUpdate[];
+};
+
+type NormalizedVectorSpaceMigrationResponse = Omit<VectorSpaceMigrationResponse, 'plan'> & {
+  plan: NormalizedVectorSpaceMigrationPlan;
+};
+
+function normalizeEmbeddingBacklogStats(stats: EmbeddingBacklogStats | null): NormalizedEmbeddingBacklogStats {
+  return {
+    total: stats?.total ?? 0,
+    by_state: { ...(stats?.by_state ?? {}) },
+  };
+}
+
+function normalizeMemoryInjectionExplain(response: MemoryInjectionExplainResponse | null): NormalizedMemoryInjectionExplainResponse {
+  const items = (response?.items ?? []).map((item) => ({
+    ...item,
+    memory_injected: item.memory_injected ?? false,
+    memory_ids: [...(item.memory_ids ?? [])],
+    prompt_versions: [...(item.prompt_versions ?? [])],
+    skip_counts: { ...(item.skip_counts ?? {}) },
+    skipped_memory_ids: [...(item.skipped_memory_ids ?? [])],
+  }));
+  return {
+    items,
+    total: response?.total ?? items.length,
+    limit: response?.limit ?? items.length,
+    source: response?.source,
+  };
+}
+
+function normalizeMemoryProductionMetrics(metrics: MemoryProductionMetrics | null): NormalizedMemoryProductionMetrics {
+  const now = new Date().toISOString();
+  const snapshot = metrics?.snapshot;
+  return {
+    source: metrics?.source || '未连接',
+    since: metrics?.since || '',
+    until: metrics?.until || now,
+    window_minutes: metrics?.window_minutes ?? 1440,
+    snapshot: {
+      embedding_dropped_total: snapshot?.embedding_dropped_total ?? 0,
+      hybrid_search_fallback_total: snapshot?.hybrid_search_fallback_total ?? 0,
+      vector_space_mismatch_total: snapshot?.vector_space_mismatch_total ?? 0,
+      embedding_latency_count: snapshot?.embedding_latency_count ?? 0,
+      embedding_latency_avg_seconds: snapshot?.embedding_latency_avg_seconds ?? 0,
+      embedding_latency_p95_seconds: snapshot?.embedding_latency_p95_seconds ?? 0,
+      backlog_depth_total: snapshot?.backlog_depth_total ?? 0,
+      backlog_depth_by_status: { ...(snapshot?.backlog_depth_by_status ?? {}) },
+      drop_reasons: { ...(snapshot?.drop_reasons ?? {}) },
+      fallback_reasons: { ...(snapshot?.fallback_reasons ?? {}) },
+      mismatch_operations: { ...(snapshot?.mismatch_operations ?? {}) },
+    },
+    series: [...(metrics?.series ?? [])],
+    alerts: [...(metrics?.alerts ?? [])],
+  };
+}
+
+function normalizeMemoryPromotionCandidates(response: MemoryPromotionCandidatesResponse | null): NormalizedMemoryPromotionCandidatesResponse {
+  const items = (response?.items ?? []).map((item) => ({
+    ...item,
+    rationale: item.rationale ?? '',
+    source_kind: item.source_kind ?? '',
+    source_memory_ids: [...(item.source_memory_ids ?? [])],
+  }));
+  return {
+    items,
+    total: response?.total ?? items.length,
+    limit: response?.limit ?? items.length,
+  };
+}
+
+function normalizeMemoryPruneResponse(response: MemoryPruneResponse | null): NormalizedMemoryPruneResponse | null {
+  if (!response) return null;
+  return {
+    ...response,
+    delete_ids: [...(response.delete_ids ?? [])],
+    reasons: { ...(response.reasons ?? {}) },
+  };
+}
+
+function normalizeMemoryExportDocument(document: MemoryExportDocument): Omit<MemoryExportDocument, 'memories' | 'version'> & { memories: NonNullable<MemoryExportDocument['memories']>; version: number } {
+  return {
+    ...document,
+    version: document.version ?? 1,
+    memories: [...(document.memories ?? [])],
+  };
+}
+
+function normalizeVectorSpaceMigrationResponse(response: VectorSpaceMigrationResponse | null): NormalizedVectorSpaceMigrationResponse | null {
+  if (!response) return null;
+  return {
+    ...response,
+    plan: {
+      dry_run: response.plan?.dry_run ?? false,
+      scanned: response.plan?.scanned ?? 0,
+      resume_token: response.plan?.resume_token,
+      next_offset: response.plan?.next_offset,
+      updates: [...(response.plan?.updates ?? [])],
+    },
+  };
 }
 
 function skipTotal(ids?: number[], counts?: Record<string, number>) {

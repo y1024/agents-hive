@@ -53,14 +53,22 @@ type WeeklyReportStore interface {
 }
 
 type WeeklyReportSummary struct {
-	OpenClusters     int `json:"open_clusters"`
-	CandidateTotal   int `json:"candidate_total"`
-	FailedEvalRuns   int `json:"failed_eval_runs"`
-	RegressedRecords int `json:"regressed_records"`
+	OpenClusters     int            `json:"open_clusters"`
+	CandidateTotal   int            `json:"candidate_total"`
+	FailedEvalRuns   int            `json:"failed_eval_runs"`
+	RegressedRecords int            `json:"regressed_records"`
+	DomainCounts     map[string]int `json:"domain_counts,omitempty"`
+	SourceKindCounts map[string]int `json:"source_kind_counts,omitempty"`
+	SourceNameCounts map[string]int `json:"source_name_counts,omitempty"`
 }
 
 func GenerateWeeklyReport(input WeeklyReportInput) WeeklyReport {
-	summary := WeeklyReportSummary{CandidateTotal: len(input.Candidates)}
+	summary := WeeklyReportSummary{
+		CandidateTotal:   len(input.Candidates),
+		DomainCounts:     map[string]int{},
+		SourceKindCounts: map[string]int{},
+		SourceNameCounts: map[string]int{},
+	}
 	for _, c := range input.Clusters {
 		if c.OpenCount > 0 {
 			summary.OpenClusters++
@@ -70,6 +78,9 @@ func GenerateWeeklyReport(input WeeklyReportInput) WeeklyReport {
 		if c.Status == agentquality.CandidatePromotedRegressed || normalizeVerifyResult(c.VerifyResult) == "failed" {
 			summary.RegressedRecords++
 		}
+		summary.DomainCounts[sourceBreakdownValue(c.SourceEvent.DomainID)]++
+		summary.SourceKindCounts[sourceBreakdownValue(c.SourceEvent.SourceKind)]++
+		summary.SourceNameCounts[sourceBreakdownValue(c.SourceEvent.SourceName)]++
 	}
 	for _, r := range input.EvalRuns {
 		if r.Status == BatchEvalFailed {
@@ -85,6 +96,9 @@ func GenerateWeeklyReport(input WeeklyReportInput) WeeklyReport {
 	fmt.Fprintf(&b, "- Candidates: %d\n", summary.CandidateTotal)
 	fmt.Fprintf(&b, "- Failed eval runs: %d\n", summary.FailedEvalRuns)
 	fmt.Fprintf(&b, "- Regressed records: %d\n\n", summary.RegressedRecords)
+	fmt.Fprintf(&b, "- Domains: %s\n", formatBreakdown(summary.DomainCounts))
+	fmt.Fprintf(&b, "- Source kinds: %s\n", formatBreakdown(summary.SourceKindCounts))
+	fmt.Fprintf(&b, "- Source names: %s\n\n", formatBreakdown(summary.SourceNameCounts))
 
 	fmt.Fprintf(&b, "## Open Clusters\n\n")
 	clusters := append([]Cluster(nil), input.Clusters...)
@@ -98,12 +112,12 @@ func GenerateWeeklyReport(input WeeklyReportInput) WeeklyReport {
 		if c.OpenCount == 0 {
 			continue
 		}
-		fmt.Fprintf(&b, "- %s: %d open, %d total, failure=%s\n", c.ID, c.OpenCount, c.Size, c.FailureType)
+		fmt.Fprintf(&b, "- %s: %d open, %d total, failure=%s, domain=%s, source=%s/%s\n", c.ID, c.OpenCount, c.Size, c.FailureType, sourceBreakdownValue(c.DomainID), sourceBreakdownValue(c.SourceKind), sourceBreakdownValue(c.SourceName))
 	}
 
 	fmt.Fprintf(&b, "\n## Candidate Changes\n\n")
 	for _, c := range input.Candidates {
-		fmt.Fprintf(&b, "- %s: status=%s, failure=%s, verify=%s\n", c.ID, c.Status, c.FailureType, dashboardVerifyResult(c.VerifyResult))
+		fmt.Fprintf(&b, "- %s: status=%s, failure=%s, verify=%s, domain=%s, source=%s/%s\n", c.ID, c.Status, c.FailureType, dashboardVerifyResult(c.VerifyResult), sourceBreakdownValue(c.SourceEvent.DomainID), sourceBreakdownValue(c.SourceEvent.SourceKind), sourceBreakdownValue(c.SourceEvent.SourceName))
 	}
 
 	fmt.Fprintf(&b, "\n## Eval Runs\n\n")
@@ -114,7 +128,7 @@ func GenerateWeeklyReport(input WeeklyReportInput) WeeklyReport {
 	fmt.Fprintf(&b, "\n## Regressions\n\n")
 	for _, c := range input.Candidates {
 		if c.Status == agentquality.CandidatePromotedRegressed || normalizeVerifyResult(c.VerifyResult) == "failed" {
-			fmt.Fprintf(&b, "- %s: status=%s, failure=%s, verify=%s\n", c.ID, c.Status, c.FailureType, dashboardVerifyResult(c.VerifyResult))
+			fmt.Fprintf(&b, "- %s: status=%s, failure=%s, verify=%s, domain=%s, source=%s/%s\n", c.ID, c.Status, c.FailureType, dashboardVerifyResult(c.VerifyResult), sourceBreakdownValue(c.SourceEvent.DomainID), sourceBreakdownValue(c.SourceEvent.SourceKind), sourceBreakdownValue(c.SourceEvent.SourceName))
 		}
 	}
 
@@ -126,6 +140,22 @@ func GenerateWeeklyReport(input WeeklyReportInput) WeeklyReport {
 	}
 
 	return WeeklyReport{Summary: summary, Markdown: b.String()}
+}
+
+func formatBreakdown(counts map[string]int) string {
+	if len(counts) == 0 {
+		return "none"
+	}
+	keys := make([]string, 0, len(counts))
+	for key := range counts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%d", key, counts[key]))
+	}
+	return strings.Join(parts, ", ")
 }
 
 type MemoryWeeklyReportStore struct {

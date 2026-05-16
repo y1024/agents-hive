@@ -20,9 +20,9 @@ func TestBuildWhere_SessionIDOnly(t *testing.T) {
 }
 
 func TestBuildWhere_ModelOnly(t *testing.T) {
-	where, args := buildWhere(CostFilter{Model: "gpt-4o"})
+	where, args := buildWhere(CostFilter{Model: "gpt-5"})
 	assert.Equal(t, " WHERE 1=1 AND model = $1", where)
-	assert.Equal(t, []any{"gpt-4o"}, args)
+	assert.Equal(t, []any{"gpt-5"}, args)
 }
 
 func TestBuildWhere_AllFilters(t *testing.T) {
@@ -31,7 +31,7 @@ func TestBuildWhere_AllFilters(t *testing.T) {
 	where, args := buildWhere(CostFilter{
 		SessionID: "sess-1",
 		UserID:    "user-1",
-		Model:     "gpt-4o",
+		Model:     "gpt-5",
 		Since:     &since,
 		Until:     &until,
 	})
@@ -39,7 +39,7 @@ func TestBuildWhere_AllFilters(t *testing.T) {
 	assert.Len(t, args, 5)
 	assert.Equal(t, "sess-1", args[0])
 	assert.Equal(t, "user-1", args[1])
-	assert.Equal(t, "gpt-4o", args[2])
+	assert.Equal(t, "gpt-5", args[2])
 	assert.Equal(t, since, args[3])
 	assert.Equal(t, until, args[4])
 }
@@ -53,12 +53,12 @@ func TestBuildWhere_UserIDOnly(t *testing.T) {
 func TestBuildWhere_UserIDAndModel(t *testing.T) {
 	// Model + UserID → Model=$1, UserID=$2 (UserID branch skipped, so Model gets $1)
 	// buildWhere order: SessionID→UserID→Model, so UserID present means UserID=$1, Model=$2
-	where, args := buildWhere(CostFilter{UserID: "user-1", Model: "gpt-4o"})
+	where, args := buildWhere(CostFilter{UserID: "user-1", Model: "gpt-5"})
 	assert.Contains(t, where, "user_id = $1")
 	assert.Contains(t, where, "model = $2")
 	assert.Len(t, args, 2)
 	assert.Equal(t, "user-1", args[0])
-	assert.Equal(t, "gpt-4o", args[1])
+	assert.Equal(t, "gpt-5", args[1])
 }
 
 func TestBuildWhere_TimeRangeOnly(t *testing.T) {

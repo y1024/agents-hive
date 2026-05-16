@@ -1,6 +1,7 @@
 import { useReplayStore } from '../../store/replay';
 import type { JournalEvent, JournalEventType } from '../../types/journal';
 import type { SessionTraceResponse, TraceTimelineItem } from '../../types/api';
+import { traceItemKey } from './traceItemKey';
 
 const typeLabels: Record<JournalEventType, string> = {
   tool_call: '工具调用',
@@ -126,7 +127,7 @@ export function ReplayTimeline({ trace, selectedTraceIndex = null, onSelectTrace
             const isActive = i === selectedTraceIndex;
             return (
               <button
-                key={`${item.trace_id || 'trace'}-${item.span_id || i}-${i}`}
+                key={traceItemKey(item, i)}
                 onClick={() => onSelectTrace?.(i)}
                 style={{
                   display: 'grid',

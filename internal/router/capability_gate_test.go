@@ -235,6 +235,20 @@ func TestCapabilityRegistryFeishuIsMixedActionAware(t *testing.T) {
 	if !strings.Contains(sendActions, "send_message") || strings.Contains(sendActions, "create_task") {
 		t.Fatalf("external-send action set wrong: %q", sendActions)
 	}
+	routineActions := strings.Join(RoutineSideEffectActions("feishu_api"), "|")
+	if routineActions != "send_message" {
+		t.Fatalf("routine action set = %q, want send_message", routineActions)
+	}
+	privilegedActions := strings.Join(PrivilegedActions("feishu_api"), "|")
+	if !strings.Contains(privilegedActions, "send_file") || !strings.Contains(privilegedActions, "create_task") || strings.Contains(privilegedActions, "send_message") {
+		t.Fatalf("privileged action set wrong: %q", privilegedActions)
+	}
+	if !StructuredRoutineSideEffectAction("feishu_api", "send_message") {
+		t.Fatal("send_message should be routine after concrete input validation")
+	}
+	if !StructuredPrivilegedAction("feishu_api", "send_file") || !StructuredPrivilegedAction("feishu_api", "create_task") {
+		t.Fatal("send_file and create_task should remain privileged actions")
+	}
 }
 
 func TestCapabilityRegistryMixedOperationToolsAreActionAware(t *testing.T) {
@@ -301,5 +315,32 @@ func TestRouteDecisionUsesCapabilityGate(t *testing.T) {
 	}
 	if len(decision.BlockedTools) != 1 || decision.BlockedTools[0].Reason != "capability missing" {
 		t.Fatalf("BlockedTools = %+v, want capability missing", decision.BlockedTools)
+	}
+}
+
+func TestCapabilityGateDoesNotMaskMissingSideEffectIntent(t *testing.T) {
+	profile := ToolProfile{
+		Name:       "custom_skill_writer",
+		Kind:       CapabilityKindCustomTool,
+		Domain:     "skill_authoring",
+		Source:     CapabilitySourceCustomDir,
+		Invocation: InvocationDirectTool,
+		Risk:       RiskLocalWrite,
+		Trust:      TrustLocal,
+		SideEffect: true,
+	}
+	intent := IntentFrame{
+		Kind:              IntentCreateSkill,
+		AllowsSideEffects: false,
+	}
+	decision := BuildRouteDecision(intent, []ToolProfile{
+		profile,
+	})
+
+	if decision.Mode != DecisionModeDiscover {
+		t.Fatalf("Mode = %q, want discover", decision.Mode)
+	}
+	if len(decision.BlockedTools) != 1 || decision.BlockedTools[0].Reason != "side effect not allowed by intent" {
+		t.Fatalf("BlockedTools = %+v, want side effect not allowed by intent", decision.BlockedTools)
 	}
 }

@@ -57,7 +57,7 @@ func buildSSETransport(spec MCPServerSpec, tokenStore TokenStore, logger *zap.Lo
 		cfg.AuthProvider = authProvider
 		logger.Info("已为 SSE 传输配置 OAuth PKCE 认证",
 			zap.String("服务端", spec.Name),
-			zap.String("url", spec.URL),
+			zap.String("url", safeURLForLog(spec.URL)),
 		)
 	}
 
@@ -82,7 +82,7 @@ func buildHTTPTransport(spec MCPServerSpec, tokenStore TokenStore, logger *zap.L
 		cfg.AuthProvider = authProvider
 		logger.Info("已为 HTTP 传输配置 OAuth PKCE 认证",
 			zap.String("服务端", spec.Name),
-			zap.String("url", spec.URL),
+			zap.String("url", safeURLForLog(spec.URL)),
 		)
 	}
 

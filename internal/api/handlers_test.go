@@ -1,6 +1,8 @@
 package api
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -12,6 +14,7 @@ import (
 	"github.com/chef-guo/agents-hive/internal/channel"
 	"github.com/chef-guo/agents-hive/internal/channel/feishu"
 	"github.com/chef-guo/agents-hive/internal/config"
+	"github.com/chef-guo/agents-hive/internal/store"
 	"go.uber.org/zap"
 )
 
@@ -36,6 +39,102 @@ func TestHandleHealth(t *testing.T) {
 
 	if resp["status"] != "healthy" {
 		t.Errorf("期望 status=healthy，实际得到 %s", resp["status"])
+	}
+}
+
+func TestHandleSwitchModelRequiresSessionID(t *testing.T) {
+	handler, _, cleanup := newTestServerForSessions(t)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/model", strings.NewReader(`{"name":"model-a"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "需要会话 ID") {
+		t.Fatalf("response should mention missing session id, got: %s", rec.Body.String())
+	}
+}
+
+func TestHandleSessionScopedModelSelection(t *testing.T) {
+	handler, _, st, cleanup := newTestServerForSessionsWithStore(t)
+	defer cleanup()
+
+	requireModel := func(name, model string, isDefault bool) {
+		t.Helper()
+		if err := st.SaveLLMModel(context.Background(), &store.LLMModelRecord{
+			Name:      name,
+			Model:     model,
+			Enabled:   true,
+			IsDefault: isDefault,
+		}); err != nil {
+			t.Fatalf("save model %s: %v", name, err)
+		}
+	}
+	requireModel("model-a", "gpt-5", true)
+	requireModel("model-b", "o3-mini", false)
+
+	create := func(name string) string {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions", strings.NewReader(`{"name":"`+name+`"}`))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create session status = %d; body=%s", rec.Code, rec.Body.String())
+		}
+		var resp CreateSessionResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode create response: %v", err)
+		}
+		return resp.SessionID
+	}
+
+	sessionA := create("A")
+	sessionB := create("B")
+
+	body, _ := json.Marshal(map[string]string{"name": "model-b", "session_id": sessionA})
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/model", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("switch model status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+
+	getModels := func(sessionID string) string {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/models?session_id="+sessionID, nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("list models status = %d; body=%s", rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			Active string `json:"active"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode models response: %v", err)
+		}
+		return resp.Active
+	}
+
+	if got := getModels(sessionA); got != "model-b" {
+		t.Fatalf("session A active model = %q, want model-b", got)
+	}
+	if got := getModels(sessionB); got != "model-a" {
+		t.Fatalf("session B active model = %q, want default model-a", got)
+	}
+	record, err := st.LoadSession(context.Background(), sessionA)
+	if err != nil {
+		t.Fatalf("load session A: %v", err)
+	}
+	if record.SelectedModel != "model-b" {
+		t.Fatalf("persisted selected_model = %q, want model-b", record.SelectedModel)
 	}
 }
 

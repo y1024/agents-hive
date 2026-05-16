@@ -450,6 +450,7 @@ func (s *PostgresMemoryStore) generateEmbedding(ctx context.Context, id int64, c
 		             WHEN 'session' THEN COALESCE(NULLIF(metadata->'target'->>'session_id', ''), session_id)
 		             WHEN 'agent' THEN metadata->'target'->>'agent_name'
 		             WHEN 'skill' THEN metadata->'target'->>'skill_name'
+		             WHEN 'domain' THEN metadata->'target'->>'domain_id'
 		             ELSE ''
 		         END,
 		         ''

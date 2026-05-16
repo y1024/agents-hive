@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/chef-guo/agents-hive/internal/mcphost"
+	"github.com/chef-guo/agents-hive/internal/toolruntime"
 )
 
 // mockTool 模拟工具执行器
@@ -222,7 +223,7 @@ func (g *testNestedToolInputGate) CheckNestedToolAllowed(ctx context.Context, to
 func (g *testNestedToolInputGate) CheckNestedToolInputAllowed(ctx context.Context, toolName string, input json.RawMessage) error {
 	g.called++
 	if toolName == g.denyTool && strings.Contains(string(input), g.denyText) {
-		return fmt.Errorf("route decision denied nested tool %s", toolName)
+		return fmt.Errorf("%s", toolruntime.RecoverableToolCallErrorContent("nested_route_input_outside_allowed_values", "route decision denied nested tool "+toolName))
 	}
 	return nil
 }
@@ -332,7 +333,7 @@ func TestBatchNestedToolInputGateRejectsBeforeExecution(t *testing.T) {
 	if output.Failed != 1 || output.Results[0].Success {
 		t.Fatalf("期望 1 个失败结果: %+v", output)
 	}
-	if !strings.Contains(output.Results[0].Error, "route decision denied nested tool") {
+	if !strings.Contains(output.Results[0].Error, toolruntime.RecoverableToolCallErrorMarker) {
 		t.Fatalf("错误消息未包含 input gate 原因: %q", output.Results[0].Error)
 	}
 }
@@ -380,7 +381,7 @@ func TestBatchParallelRejectsUnsafeTools(t *testing.T) {
 	if err := json.Unmarshal(result.Content, &errMsg); err != nil {
 		t.Fatalf("解析错误消息失败: %v", err)
 	}
-	if !strings.Contains(errMsg, "不允许并发执行非只读工具") {
+	if !strings.Contains(errMsg, toolruntime.RecoverableToolCallErrorMarker) {
 		t.Fatalf("错误消息不符合预期: %q", errMsg)
 	}
 }

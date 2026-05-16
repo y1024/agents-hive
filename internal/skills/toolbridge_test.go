@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"go.uber.org/zap"
@@ -11,6 +12,7 @@ import (
 	"github.com/chef-guo/agents-hive/internal/errs"
 	"github.com/chef-guo/agents-hive/internal/mcphost"
 	"github.com/chef-guo/agents-hive/internal/plugin"
+	"github.com/chef-guo/agents-hive/internal/toolruntime"
 )
 
 func TestToolBridge_CallTool(t *testing.T) {
@@ -258,28 +260,63 @@ func TestToolBridge_CallToolRechecksPermissionAfterPluginMutatesArgs(t *testing.
 	})
 	bridge.SetPluginManager(pluginMgr)
 
-	promptCalled := false
 	perm := NewPermissionManager([]PermissionRule{
 		{ToolName: "memory", Pattern: "search", Action: PermissionAllow},
 		{ToolName: "memory", Pattern: "delete", Action: PermissionDeny},
 	}, func(context.Context, PermissionRequest) (PermissionResponse, error) {
-		promptCalled = true
 		return PermissionResponse{Granted: true}, nil
 	})
 
 	result, err := bridge.CallTool(context.Background(), nil, perm, "memory", json.RawMessage(`{"operation":"search","query":"x"}`))
 
+	if err != nil {
+		t.Fatalf("插件改写为高风险 operation 后，用户批准应继续执行: %v", err)
+	}
+	if result == nil || result.IsError {
+		t.Fatalf("result = %+v, want success after approval", result)
+	}
+	if !called {
+		t.Fatal("用户批准后应执行底层工具")
+	}
+}
+
+func TestToolBridge_CallToolRecoverableWhenPluginRewritesToolName(t *testing.T) {
+	logger := zap.NewNop()
+	host := mcphost.NewHost(logger)
+	called := false
+	host.RegisterTool(
+		mcphost.ToolDefinition{Name: "memory", Description: "memory", InputSchema: json.RawMessage(`{"type":"object"}`)},
+		func(context.Context, json.RawMessage) (*mcphost.ToolResult, error) {
+			called = true
+			return &mcphost.ToolResult{Content: json.RawMessage(`{"ok":true}`)}, nil
+		},
+	)
+
+	bridge := NewToolBridge(host, logger)
+	pluginMgr := plugin.NewManager(logger)
+	pluginMgr.RegisterHooks(plugin.Hooks{
+		ToolExecuteBefore: func(_ context.Context, input *plugin.ToolExecuteInput) error {
+			input.ToolName = "bash"
+			return nil
+		},
+	})
+	bridge.SetPluginManager(pluginMgr)
+
+	result, err := bridge.CallTool(context.Background(), nil, nil, "memory", json.RawMessage(`{"operation":"search"}`))
 	if err == nil {
-		t.Fatalf("插件改写为被拒绝 operation 后应被权限层拒绝，result=%+v", result)
+		t.Fatal("插件改写工具名应返回错误")
 	}
 	if !errs.IsCode(err, errs.CodePermissionDenied) {
-		t.Fatalf("err = %v, want permission denied", err)
+		t.Fatalf("err = %v, want CodePermissionDenied", err)
+	}
+	if !strings.Contains(err.Error(), toolruntime.RecoverableToolCallErrorMarker) {
+		t.Fatalf("插件改写工具名应返回可恢复错误, got: %v", err)
+	}
+	if result != nil {
+		t.Fatalf("result = %+v, want nil", result)
 	}
 	if called {
-		t.Fatal("权限拒绝后不应执行底层工具")
-	}
-	if promptCalled {
-		t.Fatal("deny 规则命中时不应触发 HITL")
+		t.Fatal("插件改写工具名后不应执行底层工具")
 	}
 }
 
@@ -300,7 +337,7 @@ func TestToolBridge_CallToolExecutionGateBlocksBeforeHost(t *testing.T) {
 	)
 
 	bridge := NewToolBridge(host, logger)
-	gateErr := errors.New("route decision denied nested tool")
+	gateErr := errors.New(toolruntime.RecoverableToolCallErrorContent("nested_route_tool_not_allowed", "route decision denied nested tool"))
 	bridge.SetExecutionGate(func(context.Context, string, json.RawMessage) error {
 		return gateErr
 	})
@@ -345,7 +382,7 @@ func TestToolBridge_CallToolRechecksExecutionGateAfterPluginMutatesArgs(t *testi
 	bridge.SetPluginManager(pluginMgr)
 
 	var seenInputs []string
-	gateErr := errors.New("route decision denied mutated input")
+	gateErr := errors.New(toolruntime.RecoverableToolCallErrorContent("nested_route_input_outside_allowed_values", "route decision denied mutated input"))
 	bridge.SetExecutionGate(func(_ context.Context, toolName string, input json.RawMessage) error {
 		seenInputs = append(seenInputs, string(input))
 		var args struct {

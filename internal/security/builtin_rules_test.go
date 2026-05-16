@@ -15,13 +15,11 @@ func TestBuiltinRulesAlwaysPresent(t *testing.T) {
 		command  string
 		expected ExecPolicy
 	}{
-		// PolicyDeny: 绝对禁止
-		{"rm -rf /", PolicyDeny},
-		{"rm -rf /*", PolicyDeny},
-		{"mkfs /dev/sda1", PolicyDeny},
-		{"dd if=/dev/zero of=/dev/sda", PolicyDeny},
-
 		// PolicyAsk: 需要审批
+		{"rm -rf /", PolicyAsk},
+		{"rm -rf /*", PolicyAsk},
+		{"mkfs /dev/sda1", PolicyAsk},
+		{"dd if=/dev/zero of=/dev/sda", PolicyAsk},
 		{"rm -rf ./build", PolicyAsk},
 		{"rm -r ./node_modules", PolicyAsk},
 		{"git push --force origin main", PolicyAsk},
@@ -48,8 +46,8 @@ func TestBuiltinRulesCannotBeOverridden(t *testing.T) {
 	}
 	executor := NewSafeExecutor(userRules, zap.NewNop())
 
-	// rm -rf / 仍然被内置规则拒绝（PolicyDeny 在 rm -rf * 的 PolicyAsk 之前）
-	assert.Equal(t, PolicyDeny, executor.MatchPolicy("rm -rf /"))
+	// rm -rf / 仍然命中内置审批规则（内置 PolicyAsk 在用户 PolicyAllow 之前）
+	assert.Equal(t, PolicyAsk, executor.MatchPolicy("rm -rf /"))
 	// rm -rf ./build 仍然需要审批（内置 PolicyAsk 在用户 PolicyAllow 之前）
 	assert.Equal(t, PolicyAsk, executor.MatchPolicy("rm -rf ./build"))
 }
@@ -66,7 +64,7 @@ func TestBuiltinRulesWithUserRulesAppended(t *testing.T) {
 	assert.Equal(t, PolicyAsk, executor.MatchPolicy("curl https://example.com"))
 
 	// 内置规则仍然生效
-	assert.Equal(t, PolicyDeny, executor.MatchPolicy("rm -rf /"))
+	assert.Equal(t, PolicyAsk, executor.MatchPolicy("rm -rf /"))
 	assert.Equal(t, PolicyAsk, executor.MatchPolicy("git push --force origin main"))
 }
 

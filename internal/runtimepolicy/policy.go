@@ -20,6 +20,12 @@ type Policy struct {
 	MaxSessionCostUSD   float64       `json:"max_session_cost_usd"`
 }
 
+// AuthorizesBusinessDomainTools 固定返回 false，避免把运行期资源策略误当成业务域授权来源。
+func (p Policy) AuthorizesBusinessDomainTools() bool {
+	_ = p
+	return false
+}
+
 // Default 返回默认运行策略。
 func Default() Policy {
 	return Policy{

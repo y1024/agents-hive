@@ -16,7 +16,7 @@ import (
 
 func TestCalcCost(t *testing.T) {
 	t.Run("positive tokens with known pricing", func(t *testing.T) {
-		// gpt-4o: input $2.5e-6, output $10e-6
+		// gpt-5: input $2.5e-6, output $10e-6
 		cost := CalcCost(1000, 500, 2.5e-6, 10e-6)
 		assert.InDelta(t, 0.0075, cost, 1e-10) // 1000*2.5e-6 + 500*10e-6 = 0.0025 + 0.005
 	})
@@ -123,12 +123,12 @@ func TestAsyncRecorder_SubmitAfterStop(t *testing.T) {
 	rec := NewAsyncRecorder(mock, logger)
 
 	// Submit one entry before stop to make sure the recorder works.
-	rec.Submit(UsageEntry{SessionID: "s1", Model: "gpt-4o"})
+	rec.Submit(UsageEntry{SessionID: "s1", Model: "gpt-5"})
 	rec.Stop()
 
 	// Submit after Stop must not panic (guarded by atomic.Bool).
 	assert.NotPanics(t, func() {
-		rec.Submit(UsageEntry{SessionID: "s2", Model: "gpt-4o"})
+		rec.Submit(UsageEntry{SessionID: "s2", Model: "gpt-5"})
 	})
 
 	// Only the first entry should have been recorded.
@@ -149,14 +149,14 @@ func TestAsyncRecorder_ChannelFullDrops(t *testing.T) {
 	// Fill the channel (buffer = 256). The first entry will be picked up by
 	// the worker and block on Record, so we need 256 + 1 entries to saturate.
 	for i := 0; i < asyncRecorderBufSize+1; i++ {
-		rec.Submit(UsageEntry{SessionID: "fill", Model: "gpt-4o"})
+		rec.Submit(UsageEntry{SessionID: "fill", Model: "gpt-5"})
 	}
 
 	// Give the worker a moment to pick up the first entry and block.
 	time.Sleep(50 * time.Millisecond)
 
 	// This submit should be dropped because the channel is full.
-	rec.Submit(UsageEntry{SessionID: "overflow", Model: "gpt-4o"})
+	rec.Submit(UsageEntry{SessionID: "overflow", Model: "gpt-5"})
 
 	// Verify the warning was logged.
 	assert.GreaterOrEqual(t, logs.Len(), 1, "expected at least one warn log for dropped entry")
@@ -174,7 +174,7 @@ func TestRecordUsage_ZeroTokensSkipped(t *testing.T) {
 	rec := NewAsyncRecorder(mock, zap.NewNop())
 	defer rec.Stop()
 
-	rec.RecordUsage("sess-1", "", "gpt-4o", llm.Usage{PromptTokens: 0, CompletionTokens: 0})
+	rec.RecordUsage("sess-1", "", "gpt-5", llm.Usage{PromptTokens: 0, CompletionTokens: 0})
 
 	// Give worker a moment, then verify nothing was recorded.
 	time.Sleep(50 * time.Millisecond)
@@ -238,10 +238,10 @@ func TestRecordUsage_KnownModelCalcsCost(t *testing.T) {
 
 	// Use a model that has pricing in GetModelMeta.
 	// Pick any model registered in model_meta.go; if none match, cost will be 0.
-	model := "gpt-4o"
+	model := "gpt-5"
 	meta := llm.GetModelMeta(model)
 	if meta == nil {
-		t.Skip("gpt-4o not in model registry, skipping cost calculation test")
+		t.Skip("gpt-5 not in model registry, skipping cost calculation test")
 	}
 
 	rec.RecordUsage("sess-3", "", model, llm.Usage{PromptTokens: 1000, CompletionTokens: 500})

@@ -122,7 +122,7 @@ func (e *SafeExecutor) matchPolicyByASTWithTag(command string) (ExecPolicy, stri
 			zap.String("command", command),
 			zap.Strings("commands", info.Commands),
 		)
-		return PolicyDeny, "ast:dangerous", true
+		return PolicyAsk, "ast:dangerous", true
 	}
 	if info.IsExternal {
 		e.logger.Info("AST 检测到项目外路径访问，需要审批",
@@ -152,7 +152,7 @@ func (e *SafeExecutor) Execute(ctx context.Context, req ExecRequest) (*ExecResul
 	// 2. 检查策略
 	switch policy {
 	case PolicyDeny:
-		return nil, errs.New(errs.CodeExecDenied, "命令被安全策略拒绝: "+req.Command)
+		return nil, errs.New(errs.CodeExecApprovalTimeout, "命令需要审批: "+req.Command)
 	case PolicyAsk:
 		// ask 策略由调用方（tools 包）处理 HITL 审批
 		// 返回结构化错误，由调用方走 HITL 审批后以 PolicyAllow 重新调用

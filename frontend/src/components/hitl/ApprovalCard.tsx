@@ -49,10 +49,53 @@ interface Props {
   onSubmit: (resp: InputResponse) => void;
 }
 
+interface ChoiceView {
+  prompt: string;
+  options: string[];
+}
+
+function parsePromptOptions(prompt: string): ChoiceView | null {
+  const lines = prompt.split(/\r?\n/);
+  const markerIndex = lines.findIndex((line) => /^\s*(选项|options?)\s*[:：]\s*$/i.test(line.trim()));
+  if (markerIndex < 0) return null;
+
+  const optionLines = lines.slice(markerIndex + 1);
+  const options: string[] = [];
+  for (const rawLine of optionLines) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const match = line.match(/^(?:[-*]\s*)?(?:\d+[).、]|[A-Za-z][).、])\s*(.+)$/);
+    if (!match) {
+      return null;
+    }
+    options.push(match[1].trim());
+  }
+  if (options.length === 0) return null;
+
+  const promptText = lines.slice(0, markerIndex).join('\n').trim();
+  return {
+    prompt: promptText || prompt,
+    options,
+  };
+}
+
+function buildChoiceView(request: InputRequest): ChoiceView {
+  if ((request.type === 'choice' || request.type === 'clarification') && request.options?.length) {
+    return { prompt: request.prompt, options: request.options };
+  }
+  if (request.type === 'clarification') {
+    const parsed = parsePromptOptions(request.prompt);
+    if (parsed) return parsed;
+  }
+  return { prompt: request.prompt, options: [] };
+}
+
 export function ApprovalCard({ request, onSubmit }: Props) {
   const { t } = useTranslation();
   const [value, setValue] = useState(request.default || '');
   const [selectedOption, setSelectedOption] = useState<string>('');
+  const choiceView = buildChoiceView(request);
+  const hasChoices = choiceView.options.length > 0;
 
   // 提交响应
   const submit = (action: string, val?: string) => {
@@ -113,7 +156,7 @@ export function ApprovalCard({ request, onSubmit }: Props) {
       {/* 内容区 */}
       <div className="px-4 pb-4" style={{ borderTop: '1px solid var(--border-color)' }}>
         {/* 提示内容 */}
-        <p className="text-sm text-[var(--text-primary)] mt-3 mb-3 whitespace-pre-wrap">{request.prompt}</p>
+        <p className="text-sm text-[var(--text-primary)] mt-3 mb-3 whitespace-pre-wrap">{choiceView.prompt}</p>
 
         {/* wenyan 发布专用 UI */}
         {isWenyanPublish && (
@@ -153,9 +196,9 @@ export function ApprovalCard({ request, onSubmit }: Props) {
         )}
 
         {/* 选择型 */}
-        {request.type === 'choice' && request.options && (
+        {hasChoices && (
           <div className="mb-3 space-y-1.5">
-            {request.options.map((opt) => (
+            {choiceView.options.map((opt) => (
               <button
                 key={opt}
                 onClick={() => setSelectedOption(opt)}
@@ -172,7 +215,7 @@ export function ApprovalCard({ request, onSubmit }: Props) {
         )}
 
         {/* 文本输入（澄清型） */}
-        {request.type === 'clarification' && (
+        {request.type === 'clarification' && !hasChoices && (
           <textarea
             value={value}
             onChange={(e) => setValue(e.target.value)}
@@ -201,7 +244,7 @@ export function ApprovalCard({ request, onSubmit }: Props) {
                 </button>
               </>
             )}
-            {request.type === 'choice' && (
+            {hasChoices && (
               <button
                 onClick={() => submit('proceed', selectedOption)}
                 disabled={!selectedOption}
@@ -210,7 +253,7 @@ export function ApprovalCard({ request, onSubmit }: Props) {
                 {t('hitl.confirm')}
               </button>
             )}
-            {request.type === 'clarification' && (
+            {request.type === 'clarification' && !hasChoices && (
               <button
                 onClick={() => submit('proceed')}
                 disabled={!value.trim()}

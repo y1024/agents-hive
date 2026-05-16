@@ -19,6 +19,9 @@ type GroupingMatch struct {
 	Tool           string `json:"tool,omitempty"`
 	Skill          string `json:"skill,omitempty"`
 	PromptKey      string `json:"prompt_key,omitempty"`
+	DomainID       string `json:"domain_id,omitempty"`
+	SourceKind     string `json:"source_kind,omitempty"`
+	SourceName     string `json:"source_name,omitempty"`
 	ErrorSubstring string `json:"error_substring,omitempty"`
 }
 
@@ -28,6 +31,7 @@ type GroupingRule struct {
 	Priority        int           `json:"priority"`
 	Enabled         bool          `json:"enabled"`
 	Match           GroupingMatch `json:"match"`
+	KeyVersion      string        `json:"key_version,omitempty"`
 	KeyFields       []string      `json:"key_fields"`
 	DigestNormalize []string      `json:"digest_normalize"`
 	Notes           string        `json:"notes,omitempty"`
@@ -37,20 +41,26 @@ type GroupingRule struct {
 }
 
 type Cluster struct {
-	ID            string                   `json:"id"`
-	Key           ClusterKey               `json:"key"`
-	RuleID        string                   `json:"rule_id"`
-	FailureType   agentquality.FailureType `json:"failure_type"`
-	Tool          string                   `json:"tool,omitempty"`
-	Skill         string                   `json:"skill,omitempty"`
-	PromptKey     string                   `json:"prompt_key,omitempty"`
-	ErrorDigest   string                   `json:"error_digest"`
-	SampleMessage string                   `json:"sample_message"`
-	FirstSeen     time.Time                `json:"first_seen"`
-	LastSeen      time.Time                `json:"last_seen"`
-	Size          int                      `json:"size"`
-	OpenCount     int                      `json:"open_count"`
-	CandidateIDs  []string                 `json:"candidate_ids"`
+	ID               string                   `json:"id"`
+	Key              ClusterKey               `json:"key"`
+	RuleID           string                   `json:"rule_id"`
+	FailureType      agentquality.FailureType `json:"failure_type"`
+	Tool             string                   `json:"tool,omitempty"`
+	Skill            string                   `json:"skill,omitempty"`
+	PromptKey        string                   `json:"prompt_key,omitempty"`
+	DomainID         string                   `json:"domain_id,omitempty"`
+	SourceKind       string                   `json:"source_kind,omitempty"`
+	SourceName       string                   `json:"source_name,omitempty"`
+	ErrorDigest      string                   `json:"error_digest"`
+	SampleMessage    string                   `json:"sample_message"`
+	FirstSeen        time.Time                `json:"first_seen"`
+	LastSeen         time.Time                `json:"last_seen"`
+	Size             int                      `json:"size"`
+	OpenCount        int                      `json:"open_count"`
+	CandidateIDs     []string                 `json:"candidate_ids"`
+	DomainCounts     map[string]int           `json:"domain_counts,omitempty"`
+	SourceKindCounts map[string]int           `json:"source_kind_counts,omitempty"`
+	SourceNameCounts map[string]int           `json:"source_name_counts,omitempty"`
 }
 
 var (
@@ -95,6 +105,9 @@ func MatchGroupingRule(rules []GroupingRule, rec agentquality.CandidateRecord) G
 func ComputeClusterKey(rule GroupingRule, rec agentquality.CandidateRecord) ClusterKey {
 	ev := rec.SourceEvent
 	parts := make([]string, 0, len(rule.KeyFields))
+	if normalizedKeyVersion(rule.KeyVersion) != "v1" {
+		parts = append(parts, normalizedKeyVersion(rule.KeyVersion))
+	}
 	for _, f := range rule.KeyFields {
 		switch f {
 		case "failure_type":
@@ -107,6 +120,12 @@ func ComputeClusterKey(rule GroupingRule, rec agentquality.CandidateRecord) Clus
 			parts = append(parts, firstNonEmpty(ev.ToolDecision.Actual, stringAttr(ev, "skill")))
 		case "prompt_key":
 			parts = append(parts, ev.Prompt.Key)
+		case "domain_id":
+			parts = append(parts, ev.DomainID)
+		case "source_kind":
+			parts = append(parts, ev.SourceKind)
+		case "source_name":
+			parts = append(parts, ev.SourceName)
 		case "case_id":
 			parts = append(parts, ev.CaseID)
 		case "error_digest":
@@ -116,6 +135,14 @@ func ComputeClusterKey(rule GroupingRule, rec agentquality.CandidateRecord) Clus
 		}
 	}
 	return ClusterKey(strings.Join(parts, "|"))
+}
+
+func normalizedKeyVersion(v string) string {
+	v = strings.TrimSpace(strings.ToLower(v))
+	if v == "" {
+		return "v1"
+	}
+	return v
 }
 
 func AggregateClusters(rules []GroupingRule, records []agentquality.CandidateRecord) []Cluster {
@@ -132,22 +159,31 @@ func AggregateClusters(rules []GroupingRule, records []agentquality.CandidateRec
 			ev := rec.SourceEvent
 			errText := errorMessage(ev)
 			c = &Cluster{
-				ID:            clusterIDFromKey(key),
-				Key:           key,
-				RuleID:        rule.ID,
-				FailureType:   firstFailureType(ev.FailureType, rec.FailureType),
-				Tool:          ev.ToolDecision.Actual,
-				Skill:         stringAttr(ev, "skill"),
-				PromptKey:     ev.Prompt.Key,
-				ErrorDigest:   errorDigest(errText, rule.DigestNormalize),
-				SampleMessage: truncate(errText, 200),
-				FirstSeen:     rec.CreatedAt,
-				LastSeen:      rec.CreatedAt,
+				ID:               clusterIDFromKey(key),
+				Key:              key,
+				RuleID:           rule.ID,
+				FailureType:      firstFailureType(ev.FailureType, rec.FailureType),
+				Tool:             ev.ToolDecision.Actual,
+				Skill:            stringAttr(ev, "skill"),
+				PromptKey:        ev.Prompt.Key,
+				DomainID:         ev.DomainID,
+				SourceKind:       ev.SourceKind,
+				SourceName:       ev.SourceName,
+				ErrorDigest:      errorDigest(errText, rule.DigestNormalize),
+				SampleMessage:    truncate(errText, 200),
+				FirstSeen:        rec.CreatedAt,
+				LastSeen:         rec.CreatedAt,
+				DomainCounts:     map[string]int{},
+				SourceKindCounts: map[string]int{},
+				SourceNameCounts: map[string]int{},
 			}
 			bucket[key] = c
 		}
 		c.Size++
 		c.CandidateIDs = append(c.CandidateIDs, rec.ID)
+		c.DomainCounts[sourceBreakdownValue(rec.SourceEvent.DomainID)]++
+		c.SourceKindCounts[sourceBreakdownValue(rec.SourceEvent.SourceKind)]++
+		c.SourceNameCounts[sourceBreakdownValue(rec.SourceEvent.SourceName)]++
 		if !rec.CreatedAt.IsZero() && (c.FirstSeen.IsZero() || rec.CreatedAt.Before(c.FirstSeen)) {
 			c.FirstSeen = rec.CreatedAt
 		}
@@ -185,10 +221,27 @@ func matchesRule(match GroupingMatch, rec agentquality.CandidateRecord) bool {
 	if match.PromptKey != "" && ev.Prompt.Key != match.PromptKey {
 		return false
 	}
+	if match.DomainID != "" && ev.DomainID != match.DomainID {
+		return false
+	}
+	if match.SourceKind != "" && ev.SourceKind != match.SourceKind {
+		return false
+	}
+	if match.SourceName != "" && ev.SourceName != match.SourceName {
+		return false
+	}
 	if match.ErrorSubstring != "" && !strings.Contains(strings.ToLower(errorMessage(ev)), strings.ToLower(match.ErrorSubstring)) {
 		return false
 	}
 	return true
+}
+
+func sourceBreakdownValue(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "unknown"
+	}
+	return v
 }
 
 func errorDigest(msg string, normalizers []string) string {

@@ -16,6 +16,9 @@ func TestReplayJobStore_CreateListGetAndCancel(t *testing.T) {
 		BatchID:    "batch-1",
 		Kind:       ReplayJobKindCluster,
 		TargetIDs:  []string{"cl_1", "cl_2"},
+		DomainID:   "customer_service",
+		SourceKind: "workflow",
+		SourceName: "case_triage",
 		MaxAttempt: 3,
 	})
 	require.NoError(t, err)
@@ -23,6 +26,9 @@ func TestReplayJobStore_CreateListGetAndCancel(t *testing.T) {
 	assert.Equal(t, ReplayJobQueued, job.Status)
 	assert.Equal(t, 0, job.Attempt)
 	assert.Equal(t, 3, job.MaxAttempt)
+	assert.Equal(t, "customer_service", job.DomainID)
+	assert.Equal(t, "workflow", job.SourceKind)
+	assert.Equal(t, "case_triage", job.SourceName)
 	assert.Equal(t, now, job.CreatedAt)
 	assert.Equal(t, now, job.UpdatedAt)
 
@@ -68,6 +74,40 @@ func TestReplayJobStore_ListFiltersAndPaginatesNewestFirst(t *testing.T) {
 	require.Len(t, list, 1)
 	assert.Equal(t, second.ID, list[0].ID)
 	assert.NotEqual(t, third.ID, list[0].ID)
+}
+
+func TestReplayJobStore_ListFiltersByAttribution(t *testing.T) {
+	now := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	store := NewMemoryReplayJobStore(func() time.Time { return now })
+
+	_, err := store.Create(ReplayJobCreate{
+		BatchID:    "batch-1",
+		Kind:       ReplayJobKindCandidate,
+		TargetIDs:  []string{"c1"},
+		DomainID:   "customer_service",
+		SourceKind: "workflow",
+		SourceName: "case_triage",
+	})
+	require.NoError(t, err)
+	_, err = store.Create(ReplayJobCreate{
+		BatchID:    "batch-1",
+		Kind:       ReplayJobKindCandidate,
+		TargetIDs:  []string{"c2"},
+		DomainID:   "generic",
+		SourceKind: "master",
+		SourceName: "react",
+	})
+	require.NoError(t, err)
+
+	list := store.List(ReplayJobListFilter{
+		DomainID:   "customer_service",
+		SourceKind: "workflow",
+		SourceName: "case_triage",
+		Limit:      10,
+	})
+
+	require.Len(t, list, 1)
+	assert.Equal(t, []string{"c1"}, list[0].TargetIDs)
 }
 
 func TestReplayJobTransition_RejectsInvalidTerminalTransition(t *testing.T) {

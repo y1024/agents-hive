@@ -31,16 +31,16 @@ func (s *PGOptimizationSuggestionStore) UpsertSuggestion(ctx context.Context, re
 
 	var out OptimizationReviewSuggestion
 	row := s.pool.QueryRow(ctx, `
-INSERT INTO agentquality_optimization_suggestions
-	(id, status, target, kind, title, rationale, current_value, proposed_value, diff_format, source_candidate_id, source_event,
-	 source_eval_diff_id, review_required, created_by, approved_by, approval_note, apply_status, applied_by, apply_error, created_at, updated_at, approved_at, applied_at, expires_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
-ON CONFLICT (id)
-DO UPDATE SET updated_at = agentquality_optimization_suggestions.updated_at
-RETURNING id, status, target, kind, title, rationale, current_value, proposed_value, diff_format, source_candidate_id, source_event,
-	source_eval_diff_id, review_required, created_by, approved_by, approval_note, apply_status, applied_by, apply_error, created_at, updated_at, approved_at, applied_at, expires_at`,
+	INSERT INTO agentquality_optimization_suggestions
+		(id, status, target, kind, title, rationale, current_value, proposed_value, diff_format, source_candidate_id, source_event,
+		 source_eval_diff_id, runner_info, review_required, created_by, approved_by, approval_note, apply_status, applied_by, apply_error, created_at, updated_at, approved_at, applied_at, expires_at)
+	VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
+	ON CONFLICT (id)
+	DO UPDATE SET updated_at = agentquality_optimization_suggestions.updated_at
+	RETURNING id, status, target, kind, title, rationale, current_value, proposed_value, diff_format, source_candidate_id, source_event,
+		source_eval_diff_id, runner_info, review_required, created_by, approved_by, approval_note, apply_status, applied_by, apply_error, created_at, updated_at, approved_at, applied_at, expires_at`,
 		rec.ID, rec.Status, rec.Target, rec.Kind, rec.Title, rec.Rationale, rec.CurrentValue, rec.ProposedValue, rec.DiffFormat,
-		rec.SourceCandidateID, mustJSON(rec.SourceEvent), rec.SourceEvalDiffID, rec.ReviewRequired, rec.CreatedBy, rec.ApprovedBy, rec.ApprovalNote,
+		rec.SourceCandidateID, mustJSON(rec.SourceEvent), rec.SourceEvalDiffID, mustJSON(rec.RunnerInfo), rec.ReviewRequired, rec.CreatedBy, rec.ApprovedBy, rec.ApprovalNote,
 		rec.ApplyStatus, rec.AppliedBy, rec.ApplyError, rec.CreatedAt, rec.UpdatedAt, rec.ApprovedAt, rec.AppliedAt, rec.ExpiresAt,
 	)
 	if err := scanOptimizationSuggestion(row, &out); err != nil {
@@ -115,6 +115,9 @@ func (s *PGOptimizationSuggestionStore) RejectSuggestion(ctx context.Context, id
 
 func (s *PGOptimizationSuggestionStore) MarkSuggestionApplied(ctx context.Context, id string, appliedBy string, now time.Time) (*OptimizationReviewSuggestion, error) {
 	return s.transitionSuggestion(ctx, id, func(row OptimizationReviewSuggestion) (OptimizationReviewSuggestion, error) {
+		if err := row.ValidateApprovalEvidence(); err != nil {
+			return row, err
+		}
 		return row.MarkApplied(appliedBy, now), nil
 	})
 }
@@ -163,8 +166,8 @@ SET status=$2,
 	applied_at=$9,
 	updated_at=$10
 WHERE id=$1 AND status=$11
-RETURNING id, status, target, kind, title, rationale, current_value, proposed_value, diff_format, source_candidate_id, source_event,
-	source_eval_diff_id, review_required, created_by, approved_by, approval_note, apply_status, applied_by, apply_error, created_at, updated_at, approved_at, applied_at, expires_at`,
+	RETURNING id, status, target, kind, title, rationale, current_value, proposed_value, diff_format, source_candidate_id, source_event,
+		source_eval_diff_id, runner_info, review_required, created_by, approved_by, approval_note, apply_status, applied_by, apply_error, created_at, updated_at, approved_at, applied_at, expires_at`,
 		id, next.Status, next.ApprovedBy, next.ApprovalNote, next.ApprovedAt, next.ApplyStatus, next.AppliedBy, next.ApplyError, next.AppliedAt, next.UpdatedAt, current.Status,
 	)
 	if err := scanOptimizationSuggestion(row, &out); err != nil {
@@ -199,15 +202,15 @@ func suggestionWhere(filter SuggestionFilter) (string, []any) {
 }
 
 const optimizationSuggestionSelectSQL = `SELECT id, status, target, kind, title, rationale, current_value, proposed_value, diff_format, source_candidate_id, source_event,
-	source_eval_diff_id, review_required, created_by, approved_by, approval_note, apply_status, applied_by, apply_error, created_at, updated_at, approved_at, applied_at, expires_at
-FROM agentquality_optimization_suggestions`
+		source_eval_diff_id, runner_info, review_required, created_by, approved_by, approval_note, apply_status, applied_by, apply_error, created_at, updated_at, approved_at, applied_at, expires_at
+	FROM agentquality_optimization_suggestions`
 
 type optimizationSuggestionScanner interface {
 	Scan(dest ...any) error
 }
 
 func scanOptimizationSuggestion(row optimizationSuggestionScanner, rec *OptimizationReviewSuggestion) error {
-	var eventJSON []byte
+	var eventJSON, runnerInfoJSON []byte
 	if err := row.Scan(
 		&rec.ID,
 		&rec.Status,
@@ -221,6 +224,7 @@ func scanOptimizationSuggestion(row optimizationSuggestionScanner, rec *Optimiza
 		&rec.SourceCandidateID,
 		&eventJSON,
 		&rec.SourceEvalDiffID,
+		&runnerInfoJSON,
 		&rec.ReviewRequired,
 		&rec.CreatedBy,
 		&rec.ApprovedBy,
@@ -238,6 +242,11 @@ func scanOptimizationSuggestion(row optimizationSuggestionScanner, rec *Optimiza
 	}
 	if len(eventJSON) > 0 {
 		if err := json.Unmarshal(eventJSON, &rec.SourceEvent); err != nil {
+			return err
+		}
+	}
+	if len(runnerInfoJSON) > 0 {
+		if err := json.Unmarshal(runnerInfoJSON, &rec.RunnerInfo); err != nil {
 			return err
 		}
 	}

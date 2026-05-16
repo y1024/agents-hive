@@ -38,6 +38,9 @@ type SessionState struct {
 	// 统计信息
 	Stats SessionStats `json:"stats"`
 
+	// 会话级主对话模型配置名。空值表示使用全局默认模型。
+	SelectedModel string `json:"selected_model,omitempty"`
+
 	// Spec-driven Phase 2 持久层：user ingress 路径累积的 change 索引
 	// （对应 hive_spec_session_state 行）。
 	// 写入者仅限 session_loop.go:processTask 入口 hook，持锁外写。
@@ -73,6 +76,8 @@ type SessionState struct {
 	allowedTools           map[string]bool              `json:"-"`
 	allowedToolsSet        bool                         `json:"-"`
 	allowedToolInputs      map[string]map[string]string `json:"-"`
+	routeDecision          router.RouteDecision         `json:"-"`
+	routeDecisionSet       bool                         `json:"-"`
 	reflectionBlocks       []router.ReflectionBlock     `json:"-"`
 	// pendingExternalSendIntent 记录跨回合未完成的外部发送意图。
 	// 例如第一轮已要求“给郭松发天气”，第二轮“现在能不能发”必须继承发送工具可见性。
@@ -376,6 +381,28 @@ func (s *SessionState) SetAllowedToolInputs(inputs map[string]map[string]string)
 	s.allowedToolInputs = cloneAllowedToolInputs(inputs)
 }
 
+func (s *SessionState) SetRouteDecision(decision router.RouteDecision) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.routeDecision = cloneRouteDecision(decision)
+	s.routeDecisionSet = true
+}
+
+func (s *SessionState) RouteDecisionSnapshot() (router.RouteDecision, bool) {
+	if s == nil {
+		return router.RouteDecision{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.routeDecisionSet {
+		return router.RouteDecision{}, false
+	}
+	return cloneRouteDecision(s.routeDecision), true
+}
+
 func (s *SessionState) AllowedToolInput(toolName, key string) (string, bool) {
 	if s == nil || toolName == "" || key == "" {
 		return "", false
@@ -501,6 +528,17 @@ func cloneAllowedToolInputs(in map[string]map[string]string) map[string]map[stri
 	if len(out) == 0 {
 		return nil
 	}
+	return out
+}
+
+func cloneRouteDecision(in router.RouteDecision) router.RouteDecision {
+	out := in
+	out.AllowedTools = append([]string(nil), in.AllowedTools...)
+	out.VisibleOnly = append([]string(nil), in.VisibleOnly...)
+	out.BlockedTools = append([]router.BlockedTool(nil), in.BlockedTools...)
+	out.AllowedCapabilities = append([]router.CapabilityEntry(nil), in.AllowedCapabilities...)
+	out.BlockedCapabilities = append([]router.CapabilityEntry(nil), in.BlockedCapabilities...)
+	out.AllowedToolInputs = cloneAllowedToolInputs(in.AllowedToolInputs)
 	return out
 }
 

@@ -29,6 +29,7 @@ import (
 	"github.com/chef-guo/agents-hive/internal/sessiontodo"
 	"github.com/chef-guo/agents-hive/internal/skills"
 	"github.com/chef-guo/agents-hive/internal/toolctx"
+	"github.com/chef-guo/agents-hive/internal/toolruntime"
 	"github.com/chef-guo/agents-hive/internal/tools"
 	"github.com/chef-guo/agents-hive/internal/trajectory"
 )
@@ -83,7 +84,20 @@ func (m *Master) prepareDirectExecParams(ctx context.Context, session *SessionSt
 		if lastUserMsg != "" {
 			userID := auth.UserIDFrom(ctx)
 			memCtx := m.memoryRuntimeContext(ctx, session, "react")
-			memResult, err := m.memoryInjector.InjectContextDetailed(memCtx, lastUserMsg, session.ID, userID)
+			memResult, err := m.memoryInjector.InjectContextWithTarget(memCtx, memory.InjectionRequest{
+				Query:     lastUserMsg,
+				SessionID: session.ID,
+				UserID:    userID,
+				Target: memory.MemoryTarget{
+					Scope:      memory.TargetScopeUser,
+					UserID:     userID,
+					SessionID:  session.ID,
+					AgentName:  "master",
+					DomainID:   "generic",
+					SourceKind: "master",
+					SourceName: "react",
+				},
+			})
 			if err != nil {
 				m.logger.Warn("记忆注入失败", zap.Error(err))
 			} else {
@@ -131,22 +145,7 @@ func (m *Master) prepareDirectExecParams(ctx context.Context, session *SessionSt
 
 	// 模型覆盖
 	if modelOverride != "" && modelOverride != sessionLLM.Model() {
-		m.llmMu.RLock()
-		baseCfg := m.config
-		m.llmMu.RUnlock()
-		provDef := llm.LookupProvider(baseCfg.Provider)
-		provDef.APIFormat = baseCfg.APIFormat
-		overrideClient := m.llmPool.Get(llm.ClientConfig{
-			APIKey:          baseCfg.APIKey,
-			BaseURL:         baseCfg.BaseURL,
-			Model:           modelOverride,
-			DisableJSONMode: baseCfg.DisableJSONMode,
-			Provider:        provDef,
-			ReasoningEffort: baseCfg.ReasoningEffort,
-			StorePrivacy:    baseCfg.StorePrivacy,
-			PromptCacheKey:  baseCfg.PromptCacheKey,
-			ServiceTier:     baseCfg.ServiceTier,
-		})
+		overrideClient := m.getModelOverrideLLM(modelOverride)
 		if overrideClient != nil {
 			sessionLLM = overrideClient
 			m.logger.Info("使用 skill 模型覆盖",
@@ -180,11 +179,44 @@ func (m *Master) prepareDirectExecParams(ctx context.Context, session *SessionSt
 	}, nil
 }
 
+func (m *Master) getModelOverrideLLM(modelOverride string) *llm.Client {
+	modelOverride = strings.TrimSpace(modelOverride)
+	if modelOverride == "" {
+		return nil
+	}
+	if m.router != nil {
+		if !m.router.HasModel(modelOverride) {
+			return nil
+		}
+		return m.router.GetLLMClientForModel(airouter.TaskChat, modelOverride)
+	}
+
+	m.llmMu.RLock()
+	baseCfg := m.config
+	m.llmMu.RUnlock()
+	provDef := llm.LookupProvider(baseCfg.Provider)
+	provDef.APIFormat = baseCfg.APIFormat
+	return m.llmPool.Get(llm.ClientConfig{
+		APIKey:          baseCfg.APIKey,
+		BaseURL:         baseCfg.BaseURL,
+		Model:           modelOverride,
+		DisableJSONMode: baseCfg.DisableJSONMode,
+		Provider:        provDef,
+		ReasoningEffort: baseCfg.ReasoningEffort,
+		StorePrivacy:    baseCfg.StorePrivacy,
+		PromptCacheKey:  baseCfg.PromptCacheKey,
+		ServiceTier:     baseCfg.ServiceTier,
+	})
+}
+
 func (m *Master) memoryRuntimeContext(ctx context.Context, session *SessionState, taskType string) context.Context {
 	rc := memory.RuntimeContext{
-		UserID:    auth.UserIDFrom(ctx),
-		TaskType:  taskType,
-		AgentName: "master",
+		UserID:     auth.UserIDFrom(ctx),
+		TaskType:   taskType,
+		AgentName:  "master",
+		DomainID:   "generic",
+		SourceKind: "master",
+		SourceName: taskType,
 	}
 	if session != nil {
 		rc.SessionID = session.ID
@@ -416,6 +448,11 @@ func (m *Master) runReActLoop(
 				SkippedMemoryTotal:    memoryInjection.SkippedTotal(),
 				FeedbackMemoryCount:   memoryInjection.FeedbackCount,
 				RegularMemoryCount:    memoryInjection.RegularCount,
+				MemoryDomainID:        memoryInjection.DomainID,
+				MemorySourceKind:      memoryInjection.SourceKind,
+				MemorySourceName:      memoryInjection.SourceName,
+				MemoryOwnerScope:      string(memoryInjection.OwnerScope),
+				MemoryOwnerID:         memoryInjection.OwnerID,
 				AttachmentCount:       len(pendingAttachments),
 				PromptVersions:        promptVersions,
 				EstimatedTokens:       memoryInjection.EstimatedTokens,
@@ -1163,7 +1200,7 @@ func (m *Master) runReActLoop(
 							CreatedAt:  toolCreatedAt,
 							Metadata:   map[string]string{"agent_id": "master"},
 						})
-						m.broadcastToolMessage(session.ID, toolCall.ID, toolCall.Name, errContent, toolCreatedAt, true)
+						m.broadcastToolMessage(session.ID, toolCall.ID, toolCall.Name, errContent, toolCreatedAt, toolResult{IsError: true, Terminal: true})
 						continue
 					}
 
@@ -1184,7 +1221,7 @@ func (m *Master) runReActLoop(
 							CreatedAt:  toolCreatedAt,
 							Metadata:   map[string]string{"agent_id": "master"},
 						})
-						m.broadcastToolMessage(session.ID, toolCall.ID, toolCall.Name, cachedErr, toolCreatedAt, true)
+						m.broadcastToolMessage(session.ID, toolCall.ID, toolCall.Name, cachedErr, toolCreatedAt, toolResult{IsError: true, Terminal: true})
 						terminalFailures = append(terminalFailures, toolCall.Name)
 						continue
 					}
@@ -1205,10 +1242,10 @@ func (m *Master) runReActLoop(
 						IsError:    tr.IsError,
 						ToolName:   toolCall.Name,
 						CreatedAt:  toolCreatedAt,
-						Metadata:   map[string]string{"agent_id": "master"},
+						Metadata:   toolResultMessageMetadata(tr),
 					})
 					// 广播工具执行结果给前端
-					m.broadcastToolMessage(session.ID, toolCall.ID, toolCall.Name, tr.Content, toolCreatedAt, tr.IsError)
+					m.broadcastToolMessage(session.ID, toolCall.ID, toolCall.Name, tr.Content, toolCreatedAt, tr)
 
 					// 审批缓存：仅在工具通过权限检查并成功执行时记录
 					// 权限拒绝和终端错误不缓存，避免绕过安全检查
@@ -1350,9 +1387,25 @@ func agentTurnAttributes(turnID string, turnIndex, llmCallCount, toolCallCount, 
 
 // toolResult 工具执行结果
 type toolResult struct {
-	Content  string
-	IsError  bool
-	Terminal bool // 终端错误：配置/权限/白名单等不可重试错误，LLM 不应重试相同调用
+	Content     string
+	IsError     bool
+	Terminal    bool // 终端错误：配置/权限/白名单等不可重试错误，LLM 不应重试相同调用
+	Recoverable bool
+	ErrorKind   string
+}
+
+func toolResultMessageMetadata(tr toolResult) map[string]string {
+	meta := map[string]string{"agent_id": "master"}
+	if tr.Recoverable {
+		meta["recoverable"] = "true"
+	}
+	if tr.Terminal {
+		meta["terminal"] = "true"
+	}
+	if tr.ErrorKind != "" {
+		meta["error_kind"] = tr.ErrorKind
+	}
+	return meta
 }
 
 // terminalErrorPatterns 已知的不可重试错误模式（配置类、权限类、白名单类）
@@ -1369,15 +1422,13 @@ var terminalErrorPatterns = []string{
 	"access denied",
 	"invalid credentials",
 	"account suspended",
-	"工具策略拒绝",
-	"routedecision 拒绝",
-	"route decision denied",
-	"不在当前 profile 的允许列表中",
-	"不存在。可用工具",
 }
 
 // isTerminalError 检查工具执行结果是否为不可重试的终端错误
 func isTerminalError(content string) bool {
+	if isRecoverableToolCallError(content) {
+		return false
+	}
 	lower := strings.ToLower(content)
 	for _, pattern := range terminalErrorPatterns {
 		if strings.Contains(lower, pattern) {
@@ -1527,92 +1578,150 @@ func textToolResult(content string, isError bool) *mcphost.ToolResult {
 	return &mcphost.ToolResult{Content: encoded, IsError: isError}
 }
 
+func (m *Master) availableToolDefinitions() []mcphost.ToolDefinition {
+	if m == nil {
+		return nil
+	}
+	if m.toolBridge != nil {
+		return m.toolBridge.AvailableTools(nil)
+	}
+	if m.mcpHost != nil {
+		return m.mcpHost.ListTools()
+	}
+	return nil
+}
+
+const recoverableToolCallErrorMarker = toolruntime.RecoverableToolCallErrorMarker
+
+func recoverableToolCallErrorContent(kind, detail string) string {
+	return toolruntime.RecoverableToolCallErrorContent(kind, detail)
+}
+
+func isRecoverableToolCallError(content string) bool {
+	return toolruntime.IsRecoverableToolCallError(content)
+}
+
+func recoverableToolCallErrorKind(content string) string {
+	return toolruntime.RecoverableToolCallErrorKind(content)
+}
+
+func (m *Master) recoverableToolCallErrorResult(ctx context.Context, sessionID, toolCallID, toolName string, args json.RawMessage, turnID, content, errText string) toolResult {
+	errKind := recoverableToolCallErrorKind(content)
+	m.logger.Info("工具调用未执行，交回模型自动修复",
+		zap.String("tool", toolName),
+		zap.String("reason", errText),
+	)
+	m.emitToolCallEvent(sessionID, ToolCallEvent{
+		ToolCallID:  toolCallID,
+		ToolName:    toolName,
+		TurnID:      turnID,
+		Status:      "error",
+		Error:       errText,
+		Recoverable: true,
+		Terminal:    false,
+		ErrorKind:   errKind,
+		SessionID:   sessionID,
+	})
+	m.logToolCall(ctx, sessionID, llm.ToolCall{ID: toolCallID, Name: toolName, Arguments: args}, string(args), content, true, 0)
+	return toolResult{Content: content, IsError: true, Terminal: false, Recoverable: true, ErrorKind: errKind}
+}
+
 func (m *Master) enforceToolExecutionGate(ctx context.Context, session *SessionState, sessionID, toolCallID, toolName string, args json.RawMessage, sessionTraceID, sessionSpanID string) (toolResult, bool) {
 	if m.masterFilter != nil && !m.masterFilter.IsAllowed(toolName) {
-		content := fmt.Sprintf("[工具策略拒绝: %q 不在当前 profile 的允许列表中]", toolName)
-		m.logger.Info("工具被策略过滤拒绝", zap.String("tool", toolName))
-		m.emitToolCallEvent(sessionID, ToolCallEvent{
-			ToolCallID: toolCallID,
-			ToolName:   toolName,
-			TurnID:     sessionTraceID,
-			Status:     "error",
-			Error:      fmt.Sprintf("tool %q is not allowed by tool policy", toolName),
-			SessionID:  sessionID,
-		})
-		m.logToolCall(ctx, sessionID, llm.ToolCall{ID: toolCallID, Name: toolName, Arguments: args}, string(args), content, true, 0)
-		return toolResult{Content: content, IsError: true, Terminal: true}, false
+		reason := fmt.Sprintf("tool %q is not allowed by tool policy", toolName)
+		allowedTools := []string{}
+		if m.masterFilter != nil {
+			for _, tool := range m.masterFilter.FilterTools(m.availableToolDefinitions()) {
+				allowedTools = append(allowedTools, tool.Name)
+			}
+		}
+		content := recoverableToolCallErrorContent("tool_policy_not_allowed",
+			fmt.Sprintf("工具 %q 不在当前 profile 允许列表中，当前调用未执行。当前 profile 可用工具: %s。请改用可用工具，或先调用 tool_search/question 获取正确工具与参数。", toolName, strings.Join(allowedTools, "|")))
+		return m.recoverableToolCallErrorResult(ctx, sessionID, toolCallID, toolName, args, sessionTraceID, content, reason), false
 	}
 
 	if session != nil && session.HasAllowedToolsDecision() && !session.IsAllowedTool(toolName) {
 		allowedTools := session.AllowedToolsSnapshot()
 		reason := fmt.Sprintf("route decision denied tool %q; allowed tools are %q", toolName, strings.Join(allowedTools, "|"))
-		content := "[RouteDecision 拒绝: " + reason + "]"
-		m.logger.Info("工具被 RouteDecision 拒绝",
+		content := recoverableToolCallErrorContent("route_tool_not_allowed",
+			fmt.Sprintf("工具 %q 不在本轮 RouteDecision 允许列表中，当前调用未执行。本轮允许工具: %s。请重新选择允许工具，或先调用 tool_search/question 澄清后再继续。", toolName, strings.Join(allowedTools, "|")))
+		m.logger.Info("工具不在本轮 RouteDecision 范围内，交回模型自动修复",
 			zap.String("tool", toolName),
 			zap.Strings("allowed_tools", allowedTools),
 		)
 		m.emitToolCallEvent(sessionID, ToolCallEvent{
-			ToolCallID: toolCallID,
-			ToolName:   toolName,
-			TurnID:     sessionTraceID,
-			Status:     "error",
-			Error:      reason,
-			SessionID:  sessionID,
+			ToolCallID:  toolCallID,
+			ToolName:    toolName,
+			TurnID:      sessionTraceID,
+			Status:      "error",
+			Error:       reason,
+			Recoverable: true,
+			Terminal:    false,
+			ErrorKind:   "route_tool_not_allowed",
+			SessionID:   sessionID,
 		})
 		m.emitQualityEvent(sessionTraceID, sessionSpanID, sessionID, agentquality.Event{
 			Name:        agentquality.EventToolDecision,
 			Route:       routeFromSession(session),
-			FailureType: agentquality.FailurePermission,
-			FinalStatus: agentquality.StatusBlocked,
+			FailureType: agentquality.FailureTool,
+			FinalStatus: agentquality.StatusFail,
 			ToolDecision: agentquality.ToolDecision{
 				Actual:   toolName,
-				Decision: agentquality.DecisionRejected,
+				Decision: agentquality.DecisionUnexpected,
 				ArgsHash: hashToolArgs(args),
 			},
 			Attributes: map[string]any{
+				"recoverable":   true,
+				"repair_action": "reselect_tool",
 				"reason":        reason,
 				"allowed_tools": allowedTools,
 			},
 		})
 		m.logToolCall(ctx, sessionID, llm.ToolCall{ID: toolCallID, Name: toolName, Arguments: args}, string(args), content, true, 0)
-		return toolResult{Content: content, IsError: true, Terminal: true}, false
+		return toolResult{Content: content, IsError: true, Terminal: false, Recoverable: true, ErrorKind: "route_tool_not_allowed"}, false
 	}
 
 	if session != nil {
 		if allowedInputs := session.AllowedToolInputsSnapshot()[toolName]; len(allowedInputs) > 0 {
 			if reason, actuals, denied := routeInputDenyReason(toolName, args, allowedInputs); denied {
-				content := "[RouteDecision 拒绝: " + reason + "]"
-				m.logger.Info("工具输入被 RouteDecision 拒绝",
+				content := recoverableToolCallErrorContent("route_input_outside_allowed_values",
+					fmt.Sprintf("%s。当前调用未执行。请按 allowed_inputs 重构参数；如果用户目标需要其他动作，请重新规划到正确工具/意图，不要重复相同工具和参数。", reason))
+				m.logger.Info("工具输入超出 RouteDecision 参数约束，交回模型自动修复",
 					zap.String("tool", toolName),
 					zap.Any("actual_inputs", actuals),
 					zap.Any("allowed_inputs", allowedInputs),
 				)
 				m.emitToolCallEvent(sessionID, ToolCallEvent{
-					ToolCallID: toolCallID,
-					ToolName:   toolName,
-					TurnID:     sessionTraceID,
-					Status:     "error",
-					Error:      reason,
-					SessionID:  sessionID,
+					ToolCallID:  toolCallID,
+					ToolName:    toolName,
+					TurnID:      sessionTraceID,
+					Status:      "error",
+					Error:       reason,
+					Recoverable: true,
+					Terminal:    false,
+					ErrorKind:   "route_input_outside_allowed_values",
+					SessionID:   sessionID,
 				})
 				m.emitQualityEvent(sessionTraceID, sessionSpanID, sessionID, agentquality.Event{
 					Name:        agentquality.EventToolDecision,
 					Route:       routeFromSession(session),
-					FailureType: agentquality.FailurePermission,
-					FinalStatus: agentquality.StatusBlocked,
+					FailureType: agentquality.FailureTool,
+					FinalStatus: agentquality.StatusFail,
 					ToolDecision: agentquality.ToolDecision{
 						Actual:   toolName,
-						Decision: agentquality.DecisionRejected,
+						Decision: agentquality.DecisionUnexpected,
 						ArgsHash: hashToolArgs(args),
 					},
 					Attributes: map[string]any{
+						"recoverable":    true,
+						"repair_action":  "rebuild_arguments",
 						"reason":         reason,
 						"allowed_inputs": allowedInputs,
 						"actual_inputs":  actuals,
 					},
 				})
 				m.logToolCall(ctx, sessionID, llm.ToolCall{ID: toolCallID, Name: toolName, Arguments: args}, string(args), content, true, 0)
-				return toolResult{Content: content, IsError: true, Terminal: true}, false
+				return toolResult{Content: content, IsError: true, Terminal: false, Recoverable: true, ErrorKind: "route_input_outside_allowed_values"}, false
 			}
 		}
 	}
@@ -1620,6 +1729,26 @@ func (m *Master) enforceToolExecutionGate(ctx context.Context, session *SessionS
 	if m.permMgr != nil && m.hitlBroker != nil && m.hitlBroker.Enabled() && !toolctx.ShouldSkipPermission(ctx) {
 		ctxWithSession := toolctx.WithSessionID(ctx, sessionID)
 		if err := m.permMgr.CheckPermission(ctxWithSession, toolName, args); err != nil {
+			if isRecoverableToolCallError(err.Error()) {
+				content := err.Error()
+				errKind := recoverableToolCallErrorKind(content)
+				m.logger.Info("工具权限检查返回可恢复错误，交回模型自动修复",
+					zap.String("tool", toolName),
+					zap.Error(err))
+				m.emitToolCallEvent(sessionID, ToolCallEvent{
+					ToolCallID:  toolCallID,
+					ToolName:    toolName,
+					TurnID:      sessionTraceID,
+					Status:      "error",
+					Error:       err.Error(),
+					Recoverable: true,
+					Terminal:    false,
+					ErrorKind:   errKind,
+					SessionID:   sessionID,
+				})
+				m.logToolCall(ctx, sessionID, llm.ToolCall{ID: toolCallID, Name: toolName, Arguments: args}, string(args), content, true, 0)
+				return toolResult{Content: content, IsError: true, Terminal: false, Recoverable: true, ErrorKind: errKind}, false
+			}
 			content := fmt.Sprintf("[权限拒绝: %v]", err)
 			m.logger.Info("工具执行被拒绝",
 				zap.String("tool", toolName),
@@ -1630,6 +1759,7 @@ func (m *Master) enforceToolExecutionGate(ctx context.Context, session *SessionS
 				TurnID:     sessionTraceID,
 				Status:     "error",
 				Error:      err.Error(),
+				Terminal:   true,
 				SessionID:  sessionID,
 			})
 			m.logToolCall(ctx, sessionID, llm.ToolCall{ID: toolCallID, Name: toolName, Arguments: args}, "", content, true, 0)
@@ -1799,7 +1929,7 @@ func (m *Master) executeTool(ctx context.Context, session *SessionState, userID 
 			return &ToolResult{Result: result}, execErr
 		}
 		if m.mcpHost != nil {
-			result, execErr := m.mcpHost.ExecuteTool(runCtx, runCall.Name, runCall.Arguments)
+			result, execErr := toolruntime.InvokeHostTool(runCtx, m.mcpHost, runCall.Name, runCall.Arguments)
 			return &ToolResult{Result: result}, execErr
 		}
 		return nil, fmt.Errorf("no tool execution backend available")
@@ -1837,6 +1967,10 @@ func (m *Master) executeTool(ctx context.Context, session *SessionState, userID 
 			zap.String("tool", executedToolCall.Name),
 			zap.Error(err))
 		failureType, requiresApproval, suggestedAction := commandFailureMetadata(result)
+		errMsg := fmt.Sprintf("[工具执行失败: %v]", err)
+		recoverable := isRecoverableToolCallError(errMsg)
+		errKind := recoverableToolCallErrorKind(errMsg)
+		terminal := isTerminalError(errMsg)
 		// 广播工具调用失败事件
 		m.emitToolCallEvent(sessionID, ToolCallEvent{
 			ToolCallID:           toolCall.ID,
@@ -1845,6 +1979,9 @@ func (m *Master) executeTool(ctx context.Context, session *SessionState, userID 
 			Status:               "error",
 			Duration:             duration.Milliseconds(),
 			Error:                err.Error(),
+			Recoverable:          recoverable,
+			Terminal:             terminal,
+			ErrorKind:            errKind,
 			FailureType:          failureType,
 			RequiresUserApproval: requiresApproval,
 			SuggestedAction:      suggestedAction,
@@ -1869,14 +2006,16 @@ func (m *Master) executeTool(ctx context.Context, session *SessionState, userID 
 			Labels: map[string]any{"tool_name": executedToolCall.Name, "session_id": sessionID},
 		})
 		m.logToolCall(ctx, sessionID, executedToolCall, string(executedArgs), err.Error(), true, duration)
-		errMsg := fmt.Sprintf("[工具执行失败: %v]", err)
-		return toolResult{Content: errMsg, IsError: true, Terminal: isTerminalError(errMsg)}
+		return toolResult{Content: errMsg, IsError: true, Terminal: terminal, Recoverable: recoverable, ErrorKind: errKind}
 	}
 
 	// 检查工具返回的 IsError 标记（工具执行成功但业务逻辑报错）
 	if result != nil && result.IsError {
 		decoded := mcphost.DecodeToolContent(result.Content)
 		failureType, requiresApproval, suggestedAction := commandFailureMetadata(result)
+		recoverable := isRecoverableToolCallError(decoded)
+		errKind := recoverableToolCallErrorKind(decoded)
+		terminal := isTerminalError(decoded)
 		m.emitToolCallEvent(sessionID, ToolCallEvent{
 			ToolCallID:           toolCall.ID,
 			ToolName:             executedToolCall.Name,
@@ -1884,6 +2023,9 @@ func (m *Master) executeTool(ctx context.Context, session *SessionState, userID 
 			Status:               "error",
 			Duration:             duration.Milliseconds(),
 			Error:                decoded,
+			Recoverable:          recoverable,
+			Terminal:             terminal,
+			ErrorKind:            errKind,
 			FailureType:          failureType,
 			RequiresUserApproval: requiresApproval,
 			SuggestedAction:      suggestedAction,
@@ -1903,7 +2045,7 @@ func (m *Master) executeTool(ctx context.Context, session *SessionState, userID 
 			Ts:           start,
 		})
 		m.logToolCall(ctx, sessionID, executedToolCall, string(executedArgs), decoded, true, duration)
-		return toolResult{Content: decoded, IsError: true, Terminal: isTerminalError(decoded)}
+		return toolResult{Content: decoded, IsError: true, Terminal: terminal, Recoverable: recoverable, ErrorKind: errKind}
 	}
 
 	// nil result 防御：先检查再记录，避免 broadcast success + span ok 与 IsError:true 矛盾
@@ -2897,6 +3039,24 @@ func buildMessageMeta(msg llm.MessageWithTools) map[string]any {
 			}
 			meta["output_tokens"] = v
 		}
+		if v, ok := msg.Metadata["recoverable"]; ok && v != "" {
+			if meta == nil {
+				meta = map[string]any{}
+			}
+			meta["recoverable"] = v == "true"
+		}
+		if v, ok := msg.Metadata["terminal"]; ok && v != "" {
+			if meta == nil {
+				meta = map[string]any{}
+			}
+			meta["terminal"] = v == "true"
+		}
+		if v, ok := msg.Metadata["error_kind"]; ok && v != "" {
+			if meta == nil {
+				meta = map[string]any{}
+			}
+			meta["error_kind"] = v
+		}
 	}
 	if msg.Content.IsMultimodal() {
 		if meta == nil {
@@ -2920,7 +3080,7 @@ func (m *Master) emitToolCallEvent(sessionID string, ev ToolCallEvent) {
 }
 
 // broadcastToolMessage 广播 tool 消息给前端。
-func (m *Master) broadcastToolMessage(sessionID, toolCallID, toolName, content, createdAt string, isError bool) {
+func (m *Master) broadcastToolMessage(sessionID, toolCallID, toolName, content, createdAt string, tr toolResult) {
 	payload := map[string]interface{}{
 		"role":         "tool",
 		"content":      content,
@@ -2930,8 +3090,17 @@ func (m *Master) broadcastToolMessage(sessionID, toolCallID, toolName, content, 
 		"tool_name":    toolName,
 		"timestamp":    createdAt,
 	}
-	if isError {
+	if tr.IsError {
 		payload["is_error"] = true
+	}
+	if tr.Recoverable {
+		payload["recoverable"] = true
+	}
+	if tr.Terminal {
+		payload["terminal"] = true
+	}
+	if tr.ErrorKind != "" {
+		payload["error_kind"] = tr.ErrorKind
 	}
 	// X-1: 填充 top-level SessionID 防止跨 session 泄漏。
 	m.eventBus.BroadcastSessionMessage(sessionID, BroadcastMessage{
@@ -3064,9 +3233,9 @@ func (m *Master) executeToolsConcurrent(
 				IsError:    true,
 				ToolName:   toolCall.Name,
 				CreatedAt:  toolCreatedAt,
-				Metadata:   map[string]string{"agent_id": "master"},
+				Metadata:   toolResultMessageMetadata(toolResult{IsError: true, Terminal: true}),
 			})
-			m.broadcastToolMessage(session.ID, toolCall.ID, toolCall.Name, errContent, toolCreatedAt, true)
+			m.broadcastToolMessage(session.ID, toolCall.ID, toolCall.Name, errContent, toolCreatedAt, toolResult{IsError: true, Terminal: true})
 			continue
 		}
 
@@ -3080,9 +3249,9 @@ func (m *Master) executeToolsConcurrent(
 				IsError:    true,
 				ToolName:   toolCall.Name,
 				CreatedAt:  toolCreatedAt,
-				Metadata:   map[string]string{"agent_id": "master"},
+				Metadata:   toolResultMessageMetadata(toolResult{IsError: true, Terminal: true}),
 			})
-			m.broadcastToolMessage(session.ID, toolCall.ID, toolCall.Name, cachedErr, toolCreatedAt, true)
+			m.broadcastToolMessage(session.ID, toolCall.ID, toolCall.Name, cachedErr, toolCreatedAt, toolResult{IsError: true, Terminal: true})
 			*terminalFailures = append(*terminalFailures, toolCall.Name)
 			continue
 		}
@@ -3183,6 +3352,13 @@ func (m *Master) executeToolsConcurrent(
 		contentStr := r.DecodeContent()
 		isError := r.IsError
 
+		tr := toolResult{
+			Content:     contentStr,
+			IsError:     isError,
+			Terminal:    isError && isTerminalError(contentStr),
+			Recoverable: isError && isRecoverableToolCallError(contentStr),
+			ErrorKind:   recoverableToolCallErrorKind(contentStr),
+		}
 		toolCreatedAt := time.Now().Format(time.RFC3339)
 		m.appendSessionMessage(session, llm.MessageWithTools{
 			Role:       "tool",
@@ -3191,9 +3367,9 @@ func (m *Master) executeToolsConcurrent(
 			IsError:    isError,
 			ToolName:   toolCall.Name,
 			CreatedAt:  toolCreatedAt,
-			Metadata:   map[string]string{"agent_id": "master"},
+			Metadata:   toolResultMessageMetadata(tr),
 		})
-		m.broadcastToolMessage(session.ID, toolCall.ID, toolCall.Name, contentStr, toolCreatedAt, isError)
+		m.broadcastToolMessage(session.ID, toolCall.ID, toolCall.Name, contentStr, toolCreatedAt, tr)
 
 		callFP := canonicalFingerprint(toolCall.Name, toolCall.Arguments)
 		if isError {

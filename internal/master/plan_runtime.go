@@ -16,6 +16,7 @@ import (
 	"github.com/chef-guo/agents-hive/internal/router"
 	"github.com/chef-guo/agents-hive/internal/sessiontodo"
 	"github.com/chef-guo/agents-hive/internal/toolctx"
+	"github.com/chef-guo/agents-hive/internal/toolruntime"
 	"github.com/chef-guo/agents-hive/internal/tools"
 )
 
@@ -157,12 +158,14 @@ func (m *Master) checkNestedToolInputAllowed(ctx context.Context, toolName strin
 		return fmt.Errorf("plan mode gate denied: %s", decision.Reason)
 	}
 	if session != nil && session.HasAllowedToolsDecision() && !session.IsAllowedTool(toolName) {
-		return fmt.Errorf("route decision denied nested tool %q; allowed tools are %q", toolName, strings.Join(session.AllowedToolsSnapshot(), "|"))
+		return fmt.Errorf("%s", toolruntime.RecoverableToolCallErrorContent("nested_route_tool_not_allowed",
+			fmt.Sprintf("嵌套工具 %q 不在本轮 RouteDecision 允许列表中，当前子调用未执行。本轮允许工具: %s。请重新选择允许工具。", toolName, strings.Join(session.AllowedToolsSnapshot(), "|"))))
 	}
 	if session != nil && len(input) > 0 {
 		if allowedInputs := session.AllowedToolInputsSnapshot()[toolName]; len(allowedInputs) > 0 {
 			if reason, _, denied := routeInputDenyReason(toolName, input, allowedInputs); denied {
-				return fmt.Errorf("route decision denied nested tool: %s", reason)
+				return fmt.Errorf("%s", toolruntime.RecoverableToolCallErrorContent("nested_route_input_outside_allowed_values",
+					fmt.Sprintf("%s。当前嵌套调用未执行。请按 allowed_inputs 重构参数，不要重复相同工具和参数。", reason)))
 			}
 		}
 	}

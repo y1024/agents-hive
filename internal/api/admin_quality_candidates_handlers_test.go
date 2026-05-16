@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/chef-guo/agents-hive/internal/agentquality"
+	"github.com/chef-guo/agents-hive/internal/auth"
 	"github.com/chef-guo/agents-hive/internal/config"
 )
 
@@ -41,6 +42,27 @@ func (s *fakeQualityCandidateStore) ListCandidates(_ context.Context, filter age
 			continue
 		}
 		if filter.Route != "" && rec.Route != filter.Route {
+			continue
+		}
+		if filter.DomainID != "" && rec.SourceEvent.DomainID != filter.DomainID {
+			continue
+		}
+		if filter.SourceKind != "" && rec.SourceEvent.SourceKind != filter.SourceKind {
+			continue
+		}
+		if filter.SourceName != "" && rec.SourceEvent.SourceName != filter.SourceName {
+			continue
+		}
+		if filter.OwnerScope != "" && rec.SourceEvent.OwnerScope != filter.OwnerScope {
+			continue
+		}
+		if filter.OwnerID != "" && rec.SourceEvent.OwnerID != filter.OwnerID {
+			continue
+		}
+		if filter.UserID != "" && rec.SourceEvent.UserID != filter.UserID {
+			continue
+		}
+		if filter.FailureType != "" && firstNonEmptyFailureType(rec.SourceEvent.FailureType, rec.FailureType) != filter.FailureType {
 			continue
 		}
 		out = append(out, rec)
@@ -215,6 +237,98 @@ func TestAdminQualityCandidates_ListIncludesOptimizationSuggestions(t *testing.T
 	require.Equal(t, agentquality.SuggestionPromptDiff, got.Candidates[0].Suggestions[0].Kind)
 }
 
+func TestAdminQualityCandidates_ListRedactsSecretsFromAggregatedResponse(t *testing.T) {
+	store := newFakeQualityCandidateStore()
+	rec := agentquality.CandidateFromFailure("session-1", "call api_key=raw-input-secret", "session-1:step-4", agentquality.Event{
+		Route:       "web",
+		FailureType: agentquality.FailureTool,
+		FinalStatus: agentquality.StatusFail,
+		UserID:      "admin-1",
+		Attributes: map[string]any{
+			"api_key":       "raw-attr-secret",
+			"error":         "request failed: Authorization: Bearer raw-bearer-secret",
+			"nested_config": map[string]any{"client-secret": "raw-nested-secret"},
+		},
+	})
+	rec.Case.Input = "password=raw-case-secret"
+	store.records[rec.ID] = rec
+	srv := newQualityCandidateTestServer(store)
+
+	req := adminQualityRequest(http.MethodGet, "/api/v1/admin/quality/candidates", "", "admin-1")
+	out := httptest.NewRecorder()
+	srv.handleAdminQualityListCandidates(out, req)
+
+	require.Equal(t, http.StatusOK, out.Code, out.Body.String())
+	body := out.Body.String()
+	for _, leaked := range []string{"raw-input-secret", "raw-attr-secret", "raw-bearer-secret", "raw-nested-secret", "raw-case-secret"} {
+		require.NotContains(t, body, leaked)
+	}
+	require.Contains(t, body, "[REDACTED]")
+}
+
+func TestAdminQualityCandidates_ListDefaultsToCurrentUserBoundary(t *testing.T) {
+	store := newFakeQualityCandidateStore()
+	own := agentquality.CandidateFromFailure("session-own", "own input", "session-own:step-1", agentquality.Event{
+		Route:       "web",
+		FailureType: agentquality.FailureTool,
+		FinalStatus: agentquality.StatusFail,
+		UserID:      "admin-1",
+	})
+	other := agentquality.CandidateFromFailure("session-other", "other user password=leaked", "session-other:step-1", agentquality.Event{
+		Route:       "web",
+		FailureType: agentquality.FailureTool,
+		FinalStatus: agentquality.StatusFail,
+		UserID:      "admin-2",
+	})
+	other.ID = other.ID + "-other"
+	store.records[own.ID] = own
+	store.records[other.ID] = other
+	srv := newQualityCandidateTestServer(store)
+
+	req := adminQualityRequest(http.MethodGet, "/api/v1/admin/quality/candidates", "", "admin-1")
+	out := httptest.NewRecorder()
+	srv.handleAdminQualityListCandidates(out, req)
+
+	require.Equal(t, http.StatusOK, out.Code, out.Body.String())
+	var got struct {
+		Candidates []agentquality.CandidateRecord `json:"candidates"`
+		Total      int                            `json:"total"`
+	}
+	require.NoError(t, json.NewDecoder(out.Body).Decode(&got))
+	require.Equal(t, 1, got.Total)
+	require.Len(t, got.Candidates, 1)
+	require.Equal(t, own.ID, got.Candidates[0].ID)
+	require.NotContains(t, out.Body.String(), other.ID)
+}
+
+func TestAdminQualityCandidates_ListRejectsUserIDQueryByUsingAuthenticatedUser(t *testing.T) {
+	store := newFakeQualityCandidateStore()
+	own := agentquality.CandidateFromFailure("session-own", "own input", "session-own:step-1", agentquality.Event{
+		Route:       "web",
+		FailureType: agentquality.FailureTool,
+		FinalStatus: agentquality.StatusFail,
+		UserID:      "admin-1",
+	})
+	other := agentquality.CandidateFromFailure("session-other", "other user secret=leaked", "session-other:step-1", agentquality.Event{
+		Route:       "web",
+		FailureType: agentquality.FailureTool,
+		FinalStatus: agentquality.StatusFail,
+		UserID:      "admin-2",
+	})
+	other.ID = other.ID + "-other"
+	store.records[own.ID] = own
+	store.records[other.ID] = other
+	srv := newQualityCandidateTestServer(store)
+
+	req := adminQualityRequest(http.MethodGet, "/api/v1/admin/quality/candidates?user_id=admin-2", "", "admin-1")
+	out := httptest.NewRecorder()
+	srv.handleAdminQualityListCandidates(out, req)
+
+	require.Equal(t, http.StatusOK, out.Code, out.Body.String())
+	require.Contains(t, out.Body.String(), own.ID)
+	require.NotContains(t, out.Body.String(), other.ID)
+}
+
 func TestAdminQualityCandidates_CreateCandidateDerivesReplayRef(t *testing.T) {
 	store := newFakeQualityCandidateStore()
 	srv := newQualityCandidateTestServer(store)
@@ -356,6 +470,10 @@ func TestAdminQualityCandidates_ApprovedThenPromotedReturnsGoldenCase(t *testing
 	require.Equal(t, agentquality.CandidatePromoted, got.Status)
 	require.Equal(t, "aq08_tool_choice_create_permission", got.GoldenCase.ID)
 	require.True(t, got.GoldenCase.Required)
+	require.Equal(t, string(agentquality.GoldenCaseStateActive), got.GoldenCase.State)
+	require.Equal(t, string(agentquality.EvidenceRealRunner), got.GoldenCase.EvidenceLevelMin)
+	require.Equal(t, rec.ID, got.GoldenCase.CreatedFrom)
+	require.NotEmpty(t, got.GoldenCase.Assertions)
 }
 
 func TestAdminQualityCandidates_UpdatePromotedReturnsGoldenCase(t *testing.T) {
@@ -392,6 +510,7 @@ func TestAdminQualityCandidates_UpdatePromotedReturnsGoldenCase(t *testing.T) {
 	require.Equal(t, "aq08_tool_choice_create_permission", got.GoldenCase.ID)
 	require.True(t, got.GoldenCase.Required)
 	require.Equal(t, agentquality.StatusPass, got.GoldenCase.ExpectedStatus)
+	require.Equal(t, string(agentquality.GoldenCaseStateActive), got.GoldenCase.State)
 }
 
 func TestAdminQualityCandidates_ExportPromotedCase(t *testing.T) {
@@ -420,6 +539,40 @@ func TestAdminQualityCandidates_ExportPromotedCase(t *testing.T) {
 	require.NoError(t, json.NewDecoder(out.Body).Decode(&got))
 	require.Equal(t, "aq08_tool_choice_create_permission", got.ID)
 	require.True(t, got.Required)
+	require.Equal(t, string(agentquality.GoldenCaseStateActive), got.State)
+	require.Equal(t, string(agentquality.EvidenceRealRunner), got.EvidenceLevelMin)
+	require.NotEmpty(t, got.Assertions)
+}
+
+func TestAdminQualityCandidates_ExportPromotedCaseUsesLifecycleRedaction(t *testing.T) {
+	store := newFakeQualityCandidateStore()
+	rec := agentquality.CandidateFromFailure("session-1", "call token=sk-abc12345678901234567890", "session-1:step-4", agentquality.Event{
+		Route:       "web",
+		DomainID:    "customer_service",
+		FailureType: agentquality.FailureTool,
+		FinalStatus: agentquality.StatusFail,
+		ToolDecision: agentquality.ToolDecision{
+			Expected: []string{"grep"},
+			Actual:   "read_file",
+		},
+	})
+	rec.Status = agentquality.CandidatePromoted
+	rec.PromotedCaseID = "aq08_tool_choice_create_permission"
+	store.records[rec.ID] = rec
+	srv := newQualityCandidateTestServer(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/quality/candidates/"+rec.ID+"/golden-case", nil)
+	req.SetPathValue("id", rec.ID)
+	out := httptest.NewRecorder()
+	srv.handleAdminQualityExportCandidate(out, req)
+
+	require.Equal(t, http.StatusOK, out.Code, out.Body.String())
+	var got agentquality.Case
+	require.NoError(t, json.NewDecoder(out.Body).Decode(&got))
+	require.Equal(t, "customer_service", got.DomainID)
+	require.Equal(t, string(agentquality.SourceQualityEvent), got.SourceKind)
+	require.NotContains(t, got.Input, "sk-abc12345678901234567890")
+	require.Contains(t, got.Input, "REDACTED")
 }
 
 func TestAdminQualityWorkbenchClusters_GroupsCandidates(t *testing.T) {
@@ -465,10 +618,64 @@ func TestAdminQualityWorkbenchClusters_GroupsCandidates(t *testing.T) {
 	require.Equal(t, 2, got.Clusters[0].OpenCount)
 }
 
+func TestAdminQualityWorkbenchClustersFiltersByDomainSourceAndFailure(t *testing.T) {
+	store := newFakeQualityCandidateStore()
+	sales := agentquality.CandidateFromFailure("session-1", "定位失败", "session-1:step-1", agentquality.Event{
+		DomainID:     "sales",
+		SourceKind:   "master",
+		SourceName:   "react",
+		Route:        "web",
+		FailureType:  agentquality.FailureTool,
+		FinalStatus:  agentquality.StatusFail,
+		ToolDecision: agentquality.ToolDecision{Actual: "grep"},
+		Attributes:   map[string]any{"error": "failed on /tmp/a/session-123"},
+	})
+	support := agentquality.CandidateFromFailure("session-2", "权限失败", "session-2:step-1", agentquality.Event{
+		DomainID:     "support",
+		SourceKind:   "subagent",
+		SourceName:   "worker",
+		Route:        "web",
+		FailureType:  agentquality.FailurePermission,
+		FinalStatus:  agentquality.StatusFail,
+		ToolDecision: agentquality.ToolDecision{Actual: "grep"},
+		Attributes:   map[string]any{"error": "permission denied"},
+	})
+	store.records[sales.ID] = sales
+	store.records[support.ID] = support
+	srv := newQualityCandidateTestServer(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/quality-workbench/clusters?domain_id=sales&source_kind=master&source_name=react&failure_type=tool", nil)
+	rec := httptest.NewRecorder()
+	srv.handleAdminQualityWorkbenchClusters(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var got struct {
+		Clusters []struct {
+			Size     int    `json:"size"`
+			DomainID string `json:"domain_id"`
+		} `json:"clusters"`
+		Total int `json:"total"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
+	require.Equal(t, 1, got.Total)
+	require.Len(t, got.Clusters, 1)
+	require.Equal(t, 1, got.Clusters[0].Size)
+	require.Equal(t, "sales", got.Clusters[0].DomainID)
+}
+
 func newQualityCandidateTestServer(store qualityCandidateStore) *Server {
 	return &Server{
-		logger:                zap.NewNop(),
-		config:                config.Default(),
-		qualityCandidateStore: store,
+		logger:                 zap.NewNop(),
+		config:                 config.Default(),
+		qualityCandidateStore:  store,
+		qualityShadowEvalStore: agentquality.NewInMemoryShadowEvalResultStore(),
 	}
+}
+
+func adminQualityRequest(method, target string, body string, userID string) *http.Request {
+	req := httptest.NewRequest(method, target, strings.NewReader(body))
+	if userID == "" {
+		return req
+	}
+	return req.WithContext(auth.WithUser(req.Context(), &auth.User{ID: userID, Role: "admin"}))
 }

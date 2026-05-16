@@ -9,18 +9,23 @@ import (
 	"github.com/chef-guo/agents-hive/internal/errs"
 	"github.com/chef-guo/agents-hive/internal/mcphost"
 	"github.com/chef-guo/agents-hive/internal/router"
+	"github.com/chef-guo/agents-hive/internal/toolruntime"
 )
 
 type mcpToolSummary struct {
-	Name              string `json:"name"`
-	Description       string `json:"description,omitempty"`
-	Server            string `json:"server,omitempty"`
-	Core              bool   `json:"core,omitempty"`
-	IsConcurrencySafe bool   `json:"is_concurrency_safe,omitempty"`
-	Trusted           bool   `json:"trusted,omitempty"`
-	Risk              string `json:"risk,omitempty"`
-	ReadOnly          bool   `json:"read_only,omitempty"`
-	RequiresApproval  bool   `json:"requires_approval,omitempty"`
+	Name               string `json:"name"`
+	Description        string `json:"description,omitempty"`
+	Server             string `json:"server,omitempty"`
+	Core               bool   `json:"core,omitempty"`
+	IsConcurrencySafe  bool   `json:"is_concurrency_safe,omitempty"`
+	Trusted            bool   `json:"trusted,omitempty"`
+	Risk               string `json:"risk,omitempty"`
+	ReadOnly           bool   `json:"read_only,omitempty"`
+	RequiresApproval   bool   `json:"requires_approval,omitempty"`
+	MayRequireApproval bool   `json:"may_require_approval"`
+	RouteStatus        string `json:"route_status,omitempty"`
+	CallableNow        bool   `json:"callable_now"`
+	BlockReason        string `json:"block_reason,omitempty"`
 }
 
 type mcpToolsByServer struct {
@@ -123,21 +128,26 @@ func buildMCPToolsListResponse(host *mcphost.Host) mcpToolsListResponse {
 	summaries := make([]mcpToolSummary, 0, len(tools))
 	servers := make(map[string]*mcpToolsByServer)
 	for _, tool := range tools {
-		profile := router.InferToolProfile(tool, router.ProfileHint{})
-		policy := router.EvaluateToolPolicy(profile, router.ToolPolicyContext{
+		admission := toolruntime.Admit(toolruntime.DescriptorFromDefinition(tool), router.ToolPolicyContext{
 			Intent:   router.IntentFrame{Kind: router.IntentRead},
 			ForRoute: true,
 		})
+		profile := admission.Descriptor.Profile
+		policy := admission.Policy
 		summary := mcpToolSummary{
-			Name:              tool.Name,
-			Description:       tool.Description,
-			Server:            mcpServerNameFromTool(tool.Name),
-			Core:              tool.Core,
-			IsConcurrencySafe: tool.IsConcurrencySafe,
-			Trusted:           profile.Trust == router.TrustTrusted,
-			Risk:              string(profile.Risk),
-			ReadOnly:          policy.Action == router.ToolPolicyAllow && policy.RouteStatus == router.ToolRouteCallableReadOnly,
-			RequiresApproval:  policy.RequiresApproval || policy.Action == router.ToolPolicyDeny,
+			Name:               tool.Name,
+			Description:        tool.Description,
+			Server:             mcpServerNameFromTool(tool.Name),
+			Core:               tool.Core,
+			IsConcurrencySafe:  tool.IsConcurrencySafe,
+			Trusted:            profile.Trust == router.TrustTrusted,
+			Risk:               string(profile.Risk),
+			ReadOnly:           policy.Action == router.ToolPolicyAllow && policy.RouteStatus == router.ToolRouteCallableReadOnly,
+			RequiresApproval:   policy.RequiresApproval,
+			MayRequireApproval: policy.MayRequireApproval,
+			RouteStatus:        string(policy.RouteStatus),
+			CallableNow:        policy.CallableNow,
+			BlockReason:        mcpToolBlockReason(policy),
 		}
 		summaries = append(summaries, summary)
 		if summary.Server == "" {
@@ -189,6 +199,18 @@ func buildMCPToolsListResponse(host *mcphost.Host) mcpToolsListResponse {
 		LocalCount: countLocalTools(summaries),
 		Servers:    serverList,
 		Tools:      summaries,
+	}
+}
+
+func mcpToolBlockReason(policy router.ToolPolicyDecision) string {
+	if policy.CallableNow {
+		return ""
+	}
+	switch policy.RouteStatus {
+	case router.ToolRouteBlockedUnknown, router.ToolRouteBlockedDangerous, router.ToolRouteDiscoveryOnly:
+		return policy.Reason
+	default:
+		return ""
 	}
 }
 

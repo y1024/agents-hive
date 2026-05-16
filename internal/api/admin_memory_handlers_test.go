@@ -208,6 +208,31 @@ func TestAdminMemoryInjectionExplainFallbackEmpty(t *testing.T) {
 	require.Empty(t, got.Items)
 }
 
+func TestAdminMemoryInjectionExplainNormalizesEmptyEventCollections(t *testing.T) {
+	srv := newAdminMemoryTestServer(&fakeAdminMemoryStore{})
+	srv.memoryInjectionExplainReader = fakeMemoryInjectionExplainReader{events: []agentquality.Event{{
+		Name: agentquality.EventContextBuild,
+		Ts:   time.Date(2026, 5, 9, 10, 0, 0, 0, time.UTC),
+	}}}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/memory/injection/explain?limit=5", nil)
+	out := httptest.NewRecorder()
+	srv.handleAdminMemoryInjectionExplain(out, req)
+
+	require.Equal(t, http.StatusOK, out.Code, out.Body.String())
+	var payload map[string]any
+	require.NoError(t, json.NewDecoder(out.Body).Decode(&payload))
+	items, ok := payload["items"].([]any)
+	require.True(t, ok)
+	require.Len(t, items, 1)
+	item, ok := items[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, []any{}, item["memory_ids"])
+	require.Equal(t, []any{}, item["skipped_memory_ids"])
+	require.Equal(t, []any{}, item["prompt_versions"])
+	require.Equal(t, map[string]any{}, item["skip_counts"])
+}
+
 func TestAdminMemoryInjectionExplainReadsQualityEvents(t *testing.T) {
 	srv := newAdminMemoryTestServer(&fakeAdminMemoryStore{})
 	srv.memoryInjectionExplainReader = fakeMemoryInjectionExplainReader{events: []agentquality.Event{{
@@ -224,6 +249,11 @@ func TestAdminMemoryInjectionExplainReadsQualityEvents(t *testing.T) {
 			EstimatedTokens:     42,
 			FeedbackMemoryCount: 1,
 			RegularMemoryCount:  1,
+			MemoryDomainID:      "customer_service",
+			MemorySourceKind:    "workflow",
+			MemorySourceName:    "case_triage",
+			MemoryOwnerScope:    "domain",
+			MemoryOwnerID:       "customer_service",
 			PromptVersions:      []string{"p:v1"},
 		},
 	}},
@@ -242,6 +272,71 @@ func TestAdminMemoryInjectionExplainReadsQualityEvents(t *testing.T) {
 	require.Equal(t, 1, got.Items[0].SkipCounts["expired"])
 	require.Equal(t, 1, got.Items[0].SkipCounts["total"])
 	require.Equal(t, 42, got.Items[0].EstimatedTokens)
+	require.Equal(t, "customer_service", got.Items[0].MemoryDomainID)
+	require.Equal(t, "workflow", got.Items[0].MemorySourceKind)
+	require.Equal(t, "case_triage", got.Items[0].MemorySourceName)
+	require.Equal(t, "domain", got.Items[0].MemoryOwnerScope)
+	require.Equal(t, "customer_service", got.Items[0].MemoryOwnerID)
+}
+
+func TestAdminMemoryInjectionExplainRejectsCrossOwner(t *testing.T) {
+	srv := newAdminMemoryTestServer(&fakeAdminMemoryStore{})
+	srv.memoryInjectionExplainReader = fakeMemoryInjectionExplainReader{events: []agentquality.Event{
+		{
+			Name:   agentquality.EventContextBuild,
+			UserID: "other-user",
+			Ts:     time.Date(2026, 5, 9, 10, 0, 0, 0, time.UTC),
+			ContextBuild: agentquality.ContextBuild{
+				MemoryInjected:   true,
+				MemoryIDs:        []int64{1},
+				MemoryDomainID:   "customer_service",
+				MemoryOwnerScope: "user",
+				MemoryOwnerID:    "other-user",
+			},
+		},
+		{
+			Name:   agentquality.EventContextBuild,
+			UserID: "user-1",
+			Ts:     time.Date(2026, 5, 9, 10, 1, 0, 0, time.UTC),
+			ContextBuild: agentquality.ContextBuild{
+				MemoryInjected:   true,
+				MemoryIDs:        []int64{2},
+				MemoryDomainID:   "skill_authoring",
+				MemoryOwnerScope: "domain",
+				MemoryOwnerID:    "skill_authoring",
+			},
+		},
+		{
+			Name:   agentquality.EventContextBuild,
+			UserID: "user-1",
+			Ts:     time.Date(2026, 5, 9, 10, 2, 0, 0, time.UTC),
+			ContextBuild: agentquality.ContextBuild{
+				MemoryInjected:   true,
+				MemoryIDs:        []int64{3},
+				MemoryDomainID:   "customer_service",
+				MemoryOwnerScope: "domain",
+				MemoryOwnerID:    "customer_service",
+			},
+		},
+	}}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/memory/injection/explain?limit=5", nil)
+	req = req.WithContext(memory.WithRuntimeContext(req.Context(), memory.RuntimeContext{
+		UserID:   "user-1",
+		DomainID: "customer_service",
+	}))
+	out := httptest.NewRecorder()
+	srv.handleAdminMemoryInjectionExplain(out, req)
+
+	require.Equal(t, http.StatusOK, out.Code, out.Body.String())
+	var got memoryInjectionExplainResponse
+	require.NoError(t, json.NewDecoder(out.Body).Decode(&got))
+	require.Equal(t, "hive_logs", got.Source)
+	require.Len(t, got.Items, 1)
+	require.Equal(t, []int64{3}, got.Items[0].MemoryIDs)
+	require.Equal(t, "customer_service", got.Items[0].MemoryDomainID)
+	require.Equal(t, "domain", got.Items[0].MemoryOwnerScope)
+	require.Equal(t, "customer_service", got.Items[0].MemoryOwnerID)
 }
 
 func TestAdminMemoryPromotionCandidatesAndApprovalRecord(t *testing.T) {
@@ -436,6 +531,29 @@ func TestAdminMemoryProductionMetricsReadsReader(t *testing.T) {
 	require.Equal(t, float64(7), got.Snapshot.EmbeddingDroppedTotal)
 	require.Len(t, got.Series, 1)
 	require.Len(t, got.Alerts, 1)
+}
+
+func TestAdminMemoryProductionMetricsNormalizesReaderCollections(t *testing.T) {
+	srv := newAdminMemoryTestServer(&fakeAdminMemoryStore{})
+	srv.memoryProductionMetricsReader = fakeMemoryProductionMetricsReader{
+		metrics: memoryobs.ProductionMetrics{Source: "hive_metrics"},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/memory/metrics?window_minutes=120&bucket_minutes=60", nil)
+	out := httptest.NewRecorder()
+	srv.handleAdminMemoryProductionMetrics(out, req)
+
+	require.Equal(t, http.StatusOK, out.Code, out.Body.String())
+	var payload map[string]any
+	require.NoError(t, json.NewDecoder(out.Body).Decode(&payload))
+	require.Equal(t, []any{}, payload["series"])
+	require.Equal(t, []any{}, payload["alerts"])
+	snapshot, ok := payload["snapshot"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, map[string]any{}, snapshot["drop_reasons"])
+	require.Equal(t, map[string]any{}, snapshot["fallback_reasons"])
+	require.Equal(t, map[string]any{}, snapshot["mismatch_operations"])
+	require.Equal(t, map[string]any{}, snapshot["backlog_depth_by_status"])
 }
 
 func TestAdminMemoryImportRejectsCrossUserInjection(t *testing.T) {

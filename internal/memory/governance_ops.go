@@ -89,17 +89,24 @@ func GovernanceStatsForStore(ctx context.Context, store MemoryStore, opts Govern
 }
 
 func PruneGovernanceForStore(ctx context.Context, store MemoryStore, plan GovernancePrunePlan, dryRun bool) (GovernancePruneResult, error) {
+	if plan.DeleteIDs == nil {
+		plan.DeleteIDs = []int64{}
+	}
+	if plan.Reasons == nil {
+		plan.Reasons = map[int64]string{}
+	}
 	result := GovernancePruneResult{
 		DryRun:    dryRun,
 		Matched:   len(plan.DeleteIDs),
-		DeleteIDs: append([]int64(nil), plan.DeleteIDs...),
+		DeleteIDs: append([]int64{}, plan.DeleteIDs...),
 		Reasons:   plan.Reasons,
 	}
 	if dryRun {
 		return result, nil
 	}
 	if governanceStore, ok := store.(GovernanceStore); ok {
-		return governanceStore.PruneGovernance(ctx, plan)
+		pruned, err := governanceStore.PruneGovernance(ctx, plan)
+		return normalizeGovernancePruneResult(pruned), err
 	}
 	for _, id := range plan.DeleteIDs {
 		if err := store.Delete(ctx, id); err != nil {
@@ -108,6 +115,16 @@ func PruneGovernanceForStore(ctx context.Context, store MemoryStore, plan Govern
 		result.Deleted++
 	}
 	return result, nil
+}
+
+func normalizeGovernancePruneResult(result GovernancePruneResult) GovernancePruneResult {
+	if result.DeleteIDs == nil {
+		result.DeleteIDs = []int64{}
+	}
+	if result.Reasons == nil {
+		result.Reasons = map[int64]string{}
+	}
+	return result
 }
 
 func AnalyzeGovernance(records []MemoryRecord, now time.Time, minConfidence float64) GovernanceStats {

@@ -10,7 +10,7 @@ import (
 
 func TestMatchPolicy(t *testing.T) {
 	rules := []ExecRule{
-		{Pattern: `^rm\s+-rf\s+`, Policy: PolicyDeny, Description: "禁止递归删除"},
+		{Pattern: `^rm\s+-rf\s+`, Policy: PolicyAsk, Description: "递归删除需审批"},
 		{Pattern: "^git\\s+push\\s+--force", Policy: PolicyAsk, Description: "强制推送需审批"},
 		{Pattern: "^ls\\b", Policy: PolicyAllow, Description: "允许列目录"},
 	}
@@ -23,7 +23,8 @@ func TestMatchPolicy(t *testing.T) {
 		command  string
 		expected ExecPolicy
 	}{
-		{"拒绝 rm -rf", "rm -rf /", PolicyDeny},
+		{"审批 rm -rf 根目录", "rm -rf /", PolicyAsk},
+		{"审批 rm -rf 普通路径", "rm -rf ./build", PolicyAsk},
 		{"审批 force push", "git push --force origin main", PolicyAsk},
 		{"允许 ls", "ls -la", PolicyAllow},
 		{"默认拒绝", "echo hello", PolicyDeny},
@@ -37,15 +38,26 @@ func TestMatchPolicy(t *testing.T) {
 	}
 }
 
-func TestExecuteDeny(t *testing.T) {
+func TestExecuteAskRootDelete(t *testing.T) {
 	rules := []ExecRule{
-		{Pattern: `^rm\s+-rf\s+`, Policy: PolicyDeny},
+		{Pattern: `^rm\s+-rf\s+`, Policy: PolicyAsk},
 	}
 	executor := NewSafeExecutor(rules, zap.NewNop())
 
 	_, err := executor.Execute(context.Background(), ExecRequest{Command: "rm -rf /"})
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "安全策略拒绝")
+	assert.Contains(t, err.Error(), "需要审批")
+}
+
+func TestExecuteAsk(t *testing.T) {
+	rules := []ExecRule{
+		{Pattern: `^rm\s+-rf\s+`, Policy: PolicyAsk},
+	}
+	executor := NewSafeExecutor(rules, zap.NewNop())
+
+	_, err := executor.Execute(context.Background(), ExecRequest{Command: "rm -rf ./build"})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "需要审批")
 }
 
 func TestExecuteAllow(t *testing.T) {
@@ -62,11 +74,11 @@ func TestExecuteAllow(t *testing.T) {
 }
 
 func TestDefaultPolicyDeny(t *testing.T) {
-	// 显式 PolicyDeny 作为 default：没有任何规则时，未匹配命令应拒绝。
+	// 显式 PolicyDeny 作为 default：没有任何规则时，未匹配命令应进入审批。
 	// NewSafeExecutor 默认 Allow（permission-minimalism），此处测 strict 变体。
 	executor := NewSafeExecutorWithDefault(nil, PolicyDeny, zap.NewNop())
 
 	_, err := executor.Execute(context.Background(), ExecRequest{Command: "echo hello"})
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "安全策略拒绝")
+	assert.Contains(t, err.Error(), "需要审批")
 }

@@ -19,6 +19,7 @@ import (
 	"golang.org/x/text/transform"
 
 	"github.com/chef-guo/agents-hive/internal/config"
+	"github.com/chef-guo/agents-hive/internal/errs"
 	"github.com/chef-guo/agents-hive/internal/lsp"
 	"github.com/chef-guo/agents-hive/internal/mcphost"
 	"github.com/chef-guo/agents-hive/internal/memory"
@@ -26,6 +27,7 @@ import (
 	"github.com/chef-guo/agents-hive/internal/sandbox"
 	"github.com/chef-guo/agents-hive/internal/search"
 	"github.com/chef-guo/agents-hive/internal/taskboard"
+	"github.com/chef-guo/agents-hive/internal/toolruntime"
 )
 
 var (
@@ -829,17 +831,17 @@ func registerBash(host *mcphost.Host, logger *zap.Logger, pool *ShellPool) {
 				policy := globalSafeExec.MatchPolicy(params.Command)
 				switch policy {
 				case "deny":
-					return errorResult("命令被安全策略拒绝: " + params.Command), nil
+					fallthrough
 				case "ask":
 					if globalApprovalBridge == nil {
-						return errorResult("命令需要审批但审批系统未初始化: " + params.Command), nil
+						return errorResult(recoverableApprovalMissingContent("bash", "执行 shell 命令", "当前命令未执行；请开启 HITL/审批桥后重新发起审批。command="+params.Command)), nil
 					}
 					approved, err := globalApprovalBridge.RequestApproval(ctx, "bash",
 						"执行命令需要审批",
 						map[string]string{"command": params.Command},
 					)
 					if err != nil {
-						return errorResult("审批请求失败: " + err.Error()), nil
+						return errorResult(recoverableApprovalFailedContent("bash", "执行 shell 命令", "当前命令未执行；command="+params.Command+"；error="+err.Error())), nil
 					}
 					if !approved {
 						return errorResult("命令审批被拒绝: " + params.Command), nil
@@ -1207,6 +1209,24 @@ func textResult(text string) *mcphost.ToolResult {
 
 func errorResult(msg string) *mcphost.ToolResult {
 	return &mcphost.ToolResult{Content: jsonText(msg), IsError: true}
+}
+
+func recoverableApprovalMissingContent(toolName, action, detail string) string {
+	return toolruntime.RecoverableToolCallErrorContent("approval_channel_missing",
+		fmt.Sprintf("%s 需要人工确认，但审批通道未初始化。tool=%s。%s", action, toolName, detail))
+}
+
+func recoverableApprovalMissingError(toolName, action, detail string) error {
+	return errs.New(errs.CodePermissionDenied, recoverableApprovalMissingContent(toolName, action, detail))
+}
+
+func recoverableApprovalFailedContent(toolName, action, detail string) string {
+	return toolruntime.RecoverableToolCallErrorContent("approval_request_failed",
+		fmt.Sprintf("%s 的审批请求失败。tool=%s。%s", action, toolName, detail))
+}
+
+func recoverableApprovalFailedError(toolName, action, detail string, cause error) error {
+	return errs.Wrap(errs.CodeExecApprovalTimeout, recoverableApprovalFailedContent(toolName, action, detail), cause)
 }
 
 func jsonText(text string) json.RawMessage {

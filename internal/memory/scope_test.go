@@ -72,8 +72,8 @@ func TestDefaultScopePolicyAgentAndSkillScopes(t *testing.T) {
 func TestDefaultScopePolicySQLFilterIncludesOldDataSemantics(t *testing.T) {
 	filter := DefaultScopePolicy{}.SQLFilter(RuntimeContext{UserID: "user-1"})
 
-	if len(filter.Args) != 5 {
-		t.Fatalf("args = %+v, want 5 args", filter.Args)
+	if len(filter.Args) != 6 {
+		t.Fatalf("args = %+v, want 6 args", filter.Args)
 	}
 	if !strings.Contains(filter.Clause, "COALESCE(NULLIF(metadata->'target'->>'target_scope', ''), 'user') = 'user'") {
 		t.Fatalf("SQLFilter missing old data target_scope default: %s", filter.Clause)
@@ -86,6 +86,9 @@ func TestDefaultScopePolicySQLFilterIncludesOldDataSemantics(t *testing.T) {
 	}
 	if !strings.Contains(filter.Clause, "metadata->'target'->>'skill_name' = ?") {
 		t.Fatalf("SQLFilter missing skill scope filter: %s", filter.Clause)
+	}
+	if !strings.Contains(filter.Clause, "metadata->'target'->>'domain_id' = ?") {
+		t.Fatalf("SQLFilter missing domain scope filter: %s", filter.Clause)
 	}
 }
 

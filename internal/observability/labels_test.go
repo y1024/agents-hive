@@ -30,6 +30,16 @@ func TestSanitizeMetricLabels_DropsUnknownLabels(t *testing.T) {
 	assert.Equal(t, map[string]any{"tool_name": "shell"}, got)
 }
 
+func TestSanitizeMetricLabels_AllowsStopReasonAfterEmitterNormalization(t *testing.T) {
+	got := SanitizeMetricLabels("quality.delegation", map[string]any{
+		"status":      "fail",
+		"stop_reason": "cancelled",
+		"session_id":  "session-1",
+	})
+
+	assert.Equal(t, map[string]any{"status": "fail", "stop_reason": "cancelled"}, got)
+}
+
 func TestSanitizeMetricLabels_AllowsMetricSpecificLabels(t *testing.T) {
 	got := SanitizeMetricLabels("hive.eventbus.dropped", map[string]any{
 		"msg_type": "task",

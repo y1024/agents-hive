@@ -12,6 +12,7 @@ import (
 	"github.com/chef-guo/agents-hive/internal/errs"
 	"github.com/chef-guo/agents-hive/internal/skills"
 	"github.com/chef-guo/agents-hive/internal/subagent"
+	"github.com/chef-guo/agents-hive/internal/toolctx"
 )
 
 func setupHITLMaster(t *testing.T, hitlCfg config.HITLConfig) (*Master, context.CancelFunc) {
@@ -203,6 +204,66 @@ func TestHITL_WaitForInput_Timeout(t *testing.T) {
 	}
 	if !errs.IsCode(err, errs.CodeInputTimeout) {
 		t.Errorf("expected CodeInputTimeout, got %v", err)
+	}
+}
+
+func TestAskQuestionWithOptionsUsesChoiceRequest(t *testing.T) {
+	m, cancel := setupHITLMaster(t, config.HITLConfig{
+		Enabled:      true,
+		InputTimeout: time.Second,
+	})
+	defer cancel()
+	defer m.Stop()
+
+	captured := make(chan *InputRequest, 1)
+	captureBroadcast(t, m, captured)
+
+	ctx := toolctx.WithSessionID(context.Background(), "session-choice")
+	answerCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		answer, err := m.AskQuestion(ctx, "请选择安装方式", []string{"全局安装", "项目内安装"}, time.Second)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		answerCh <- answer
+	}()
+
+	var req *InputRequest
+	select {
+	case req = <-captured:
+	case <-time.After(time.Second):
+		t.Fatal("input_request not broadcast")
+	}
+	if req.Type != InputChoice {
+		t.Fatalf("request type = %s, want %s", req.Type, InputChoice)
+	}
+	if req.SessionID != "session-choice" || req.TaskID != "session-choice" {
+		t.Fatalf("session/task mismatch: session=%q task=%q", req.SessionID, req.TaskID)
+	}
+	if got := req.Options; len(got) != 2 || got[0] != "全局安装" || got[1] != "项目内安装" {
+		t.Fatalf("options = %+v", got)
+	}
+
+	if err := m.SubmitInput(InputResponse{
+		RequestID: req.ID,
+		TaskID:    req.TaskID,
+		Action:    "proceed",
+		Value:     "项目内安装",
+	}); err != nil {
+		t.Fatalf("SubmitInput: %v", err)
+	}
+
+	select {
+	case answer := <-answerCh:
+		if answer != "项目内安装" {
+			t.Fatalf("answer = %q", answer)
+		}
+	case err := <-errCh:
+		t.Fatalf("AskQuestion returned error: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("AskQuestion did not return")
 	}
 }
 

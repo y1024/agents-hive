@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 	created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 	updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 	last_accessed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	selected_model   TEXT NOT NULL DEFAULT '',
 	message_count    INTEGER NOT NULL DEFAULT 0,
 	total_tokens     INTEGER NOT NULL DEFAULT 0,
 	profile_name     TEXT NOT NULL DEFAULT '',
@@ -457,10 +458,11 @@ CREATE TABLE IF NOT EXISTS agentquality_optimization_suggestions (
 	current_value       TEXT NOT NULL DEFAULT '',
 	proposed_value      TEXT NOT NULL DEFAULT '',
 	diff_format         TEXT NOT NULL DEFAULT 'text',
-	source_candidate_id TEXT NOT NULL DEFAULT '',
-	source_eval_diff_id TEXT NOT NULL DEFAULT '',
-	source_event        JSONB NOT NULL DEFAULT '{}',
-	review_required     BOOLEAN NOT NULL DEFAULT TRUE,
+		source_candidate_id TEXT NOT NULL DEFAULT '',
+		source_eval_diff_id TEXT NOT NULL DEFAULT '',
+		source_event        JSONB NOT NULL DEFAULT '{}',
+		runner_info         JSONB NOT NULL DEFAULT '{}',
+		review_required     BOOLEAN NOT NULL DEFAULT TRUE,
 	created_by          TEXT NOT NULL DEFAULT '',
 	approved_by         TEXT NOT NULL DEFAULT '',
 	approval_note       TEXT NOT NULL DEFAULT '',
@@ -480,6 +482,39 @@ CREATE INDEX IF NOT EXISTS idx_agentquality_opt_suggestions_source_candidate
 	WHERE source_candidate_id != '';
 CREATE INDEX IF NOT EXISTS idx_agentquality_opt_suggestions_target
 	ON agentquality_optimization_suggestions(target, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS agentquality_shadow_eval_results (
+	id               BIGSERIAL PRIMARY KEY,
+	case_id          TEXT NOT NULL DEFAULT '',
+	domain_id        TEXT NOT NULL DEFAULT '',
+	source_kind      TEXT NOT NULL DEFAULT '',
+	passed           BOOLEAN NOT NULL DEFAULT FALSE,
+	judge_verdict    JSONB NOT NULL DEFAULT '{}',
+	runner_info      JSONB NOT NULL DEFAULT '{}',
+	trace_ref        TEXT NOT NULL DEFAULT '',
+	replay_ref       TEXT NOT NULL DEFAULT '',
+	eval_duration_ms BIGINT NOT NULL DEFAULT 0,
+	evaluated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE agentquality_shadow_eval_results ADD COLUMN IF NOT EXISTS case_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE agentquality_shadow_eval_results ADD COLUMN IF NOT EXISTS domain_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE agentquality_shadow_eval_results ADD COLUMN IF NOT EXISTS source_kind TEXT NOT NULL DEFAULT '';
+ALTER TABLE agentquality_shadow_eval_results ADD COLUMN IF NOT EXISTS passed BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE agentquality_shadow_eval_results ADD COLUMN IF NOT EXISTS judge_verdict JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE agentquality_shadow_eval_results ADD COLUMN IF NOT EXISTS runner_info JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE agentquality_shadow_eval_results ADD COLUMN IF NOT EXISTS trace_ref TEXT NOT NULL DEFAULT '';
+ALTER TABLE agentquality_shadow_eval_results ADD COLUMN IF NOT EXISTS replay_ref TEXT NOT NULL DEFAULT '';
+ALTER TABLE agentquality_shadow_eval_results ADD COLUMN IF NOT EXISTS eval_duration_ms BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE agentquality_shadow_eval_results ADD COLUMN IF NOT EXISTS evaluated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE agentquality_shadow_eval_results ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+CREATE INDEX IF NOT EXISTS idx_agentquality_shadow_eval_results_domain
+	ON agentquality_shadow_eval_results(domain_id, evaluated_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_agentquality_shadow_eval_results_trace
+	ON agentquality_shadow_eval_results(trace_ref, evaluated_at DESC)
+	WHERE trace_ref != '';
+CREATE INDEX IF NOT EXISTS idx_agentquality_shadow_eval_results_runner
+	ON agentquality_shadow_eval_results((runner_info->>'evidence_level'), evaluated_at DESC);
 
 CREATE TABLE IF NOT EXISTS optimization_eval_diffs (
 	id                       TEXT PRIMARY KEY,
@@ -632,6 +667,9 @@ CREATE TABLE IF NOT EXISTS qualityworkbench_replay_jobs (
 	batch_id    TEXT NOT NULL,
 	kind        TEXT NOT NULL,
 	target_ids  JSONB NOT NULL DEFAULT '[]',
+	domain_id   TEXT NOT NULL DEFAULT '',
+	source_kind TEXT NOT NULL DEFAULT '',
+	source_name TEXT NOT NULL DEFAULT '',
 	status      TEXT NOT NULL DEFAULT 'queued',
 	max_attempt INTEGER NOT NULL DEFAULT 1,
 	attempt     INTEGER NOT NULL DEFAULT 0,
@@ -640,26 +678,55 @@ CREATE TABLE IF NOT EXISTS qualityworkbench_replay_jobs (
 	created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 	updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+-- 老库已存在表时 CREATE TABLE IF NOT EXISTS 不会补新列；索引创建前必须先幂等补齐。
+ALTER TABLE qualityworkbench_replay_jobs ADD COLUMN IF NOT EXISTS result JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE qualityworkbench_replay_jobs ADD COLUMN IF NOT EXISTS error TEXT NOT NULL DEFAULT '';
+ALTER TABLE qualityworkbench_replay_jobs ADD COLUMN IF NOT EXISTS domain_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE qualityworkbench_replay_jobs ADD COLUMN IF NOT EXISTS source_kind TEXT NOT NULL DEFAULT '';
+ALTER TABLE qualityworkbench_replay_jobs ADD COLUMN IF NOT EXISTS source_name TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_qualityworkbench_replay_jobs_batch
 	ON qualityworkbench_replay_jobs(batch_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_qualityworkbench_replay_jobs_status
 	ON qualityworkbench_replay_jobs(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_qualityworkbench_replay_jobs_attribution
+	ON qualityworkbench_replay_jobs(domain_id, source_kind, source_name, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS qualityworkbench_batch_eval_runs (
 	id         TEXT PRIMARY KEY DEFAULT ('eval_' || md5(random()::text || clock_timestamp()::text)),
 	batch_id   TEXT NOT NULL,
 	kind       TEXT NOT NULL,
-	status     TEXT NOT NULL,
+		domain_id   TEXT NOT NULL DEFAULT '',
+		source_kind TEXT NOT NULL DEFAULT '',
+		source_name TEXT NOT NULL DEFAULT '',
+		runner_info JSONB NOT NULL DEFAULT '{}',
+		status     TEXT NOT NULL,
 	summary    JSONB NOT NULL DEFAULT '{}',
 	diff       JSONB NOT NULL DEFAULT '{}',
 	case_results JSONB NOT NULL DEFAULT '[]',
+	gate_metrics JSONB NOT NULL DEFAULT '{}',
+	judge_verdict JSONB NOT NULL DEFAULT '{}',
+	shadow_metrics JSONB NOT NULL DEFAULT '[]',
+	shadow_results JSONB NOT NULL DEFAULT '[]',
+	domain_regressions JSONB NOT NULL DEFAULT '[]',
 	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_qualityworkbench_batch_eval_runs_batch
+-- 老库已存在表时 CREATE TABLE IF NOT EXISTS 不会补新列；索引创建前必须先幂等补齐。
+	ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS domain_id TEXT NOT NULL DEFAULT '';
+	ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS source_kind TEXT NOT NULL DEFAULT '';
+	ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS source_name TEXT NOT NULL DEFAULT '';
+	ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS runner_info JSONB NOT NULL DEFAULT '{}';
+	ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS gate_metrics JSONB NOT NULL DEFAULT '{}';
+	ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS judge_verdict JSONB NOT NULL DEFAULT '{}';
+	ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS shadow_metrics JSONB NOT NULL DEFAULT '[]';
+	ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS shadow_results JSONB NOT NULL DEFAULT '[]';
+	ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS domain_regressions JSONB NOT NULL DEFAULT '[]';
+	CREATE INDEX IF NOT EXISTS idx_qualityworkbench_batch_eval_runs_batch
 	ON qualityworkbench_batch_eval_runs(batch_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_qualityworkbench_batch_eval_runs_status
 	ON qualityworkbench_batch_eval_runs(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_qualityworkbench_batch_eval_runs_attribution
+	ON qualityworkbench_batch_eval_runs(domain_id, source_kind, source_name, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS qualityworkbench_weekly_reports (
 	id         TEXT PRIMARY KEY,
@@ -950,6 +1017,7 @@ INSERT INTO configs (key, value) VALUES
   ('mcp.timeout',                 '30s'),
   -- Security
   ('security.enabled',            'true'),
+  ('security.permission_mode',    'minimal'),
   ('security.exec_rules',         '[{"pattern":"^ls\\s","policy":"allow","description":"允许 ls 命令"},{"pattern":"^cat\\s","policy":"allow","description":"允许 cat 命令"},{"pattern":"^echo\\s","policy":"allow","description":"允许 echo 命令"},{"pattern":"^grep\\s","policy":"allow","description":"允许 grep 命令"},{"pattern":"^find\\s","policy":"allow","description":"允许 find 命令"},{"pattern":"^go\\s+(build|test|vet|run)","policy":"allow","description":"允许 go 编译/测试"},{"pattern":"^git\\s+(status|log|diff|show|branch)","policy":"allow","description":"允许 git 只读操作"},{"pattern":"^git\\s","policy":"ask","description":"其他 git 命令需确认"},{"pattern":"^npm\\s+install","policy":"ask","description":"npm install 需确认"},{"pattern":"^curl\\s","policy":"ask","description":"curl 请求需确认"},{"pattern":"rm\\s+-rf","policy":"deny","description":"禁止 rm -rf"},{"pattern":"^sudo\\s","policy":"deny","description":"禁止 sudo"}]'),
   ('security.watch_env_vars',     '["PATH","HOME","OPENAI_API_KEY"]'),
   -- ACP Server
@@ -1134,6 +1202,7 @@ $$ LANGUAGE plpgsql;
 const pgAddUserColumns = `
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS is_starred BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS selected_model TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id) WHERE user_id != '';
 CREATE INDEX IF NOT EXISTS idx_sessions_starred ON sessions(user_id, is_starred) WHERE is_starred = TRUE;
 
@@ -1192,17 +1261,67 @@ CREATE INDEX IF NOT EXISTS idx_agentquality_candidates_cluster
 
 ALTER TABLE agentquality_optimization_suggestions ADD COLUMN IF NOT EXISTS apply_status TEXT NOT NULL DEFAULT 'unapplied';
 ALTER TABLE agentquality_optimization_suggestions ADD COLUMN IF NOT EXISTS applied_by TEXT NOT NULL DEFAULT '';
-ALTER TABLE agentquality_optimization_suggestions ADD COLUMN IF NOT EXISTS apply_error TEXT NOT NULL DEFAULT '';
-ALTER TABLE agentquality_optimization_suggestions ADD COLUMN IF NOT EXISTS applied_at TIMESTAMPTZ;
-ALTER TABLE agentquality_optimization_suggestions ADD COLUMN IF NOT EXISTS source_eval_diff_id TEXT NOT NULL DEFAULT '';
-CREATE INDEX IF NOT EXISTS idx_agentquality_opt_suggestions_source_eval_diff
+	ALTER TABLE agentquality_optimization_suggestions ADD COLUMN IF NOT EXISTS apply_error TEXT NOT NULL DEFAULT '';
+	ALTER TABLE agentquality_optimization_suggestions ADD COLUMN IF NOT EXISTS applied_at TIMESTAMPTZ;
+	ALTER TABLE agentquality_optimization_suggestions ADD COLUMN IF NOT EXISTS source_eval_diff_id TEXT NOT NULL DEFAULT '';
+	ALTER TABLE agentquality_optimization_suggestions ADD COLUMN IF NOT EXISTS runner_info JSONB NOT NULL DEFAULT '{}';
+	CREATE INDEX IF NOT EXISTS idx_agentquality_opt_suggestions_source_eval_diff
 	ON agentquality_optimization_suggestions(source_eval_diff_id, created_at DESC)
 	WHERE source_eval_diff_id != '';
+
+CREATE TABLE IF NOT EXISTS agentquality_shadow_eval_results (
+	id               BIGSERIAL PRIMARY KEY,
+	case_id          TEXT NOT NULL DEFAULT '',
+	domain_id        TEXT NOT NULL DEFAULT '',
+	source_kind      TEXT NOT NULL DEFAULT '',
+	passed           BOOLEAN NOT NULL DEFAULT FALSE,
+	judge_verdict    JSONB NOT NULL DEFAULT '{}',
+	runner_info      JSONB NOT NULL DEFAULT '{}',
+	trace_ref        TEXT NOT NULL DEFAULT '',
+	replay_ref       TEXT NOT NULL DEFAULT '',
+	eval_duration_ms BIGINT NOT NULL DEFAULT 0,
+	evaluated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE agentquality_shadow_eval_results ADD COLUMN IF NOT EXISTS case_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE agentquality_shadow_eval_results ADD COLUMN IF NOT EXISTS domain_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE agentquality_shadow_eval_results ADD COLUMN IF NOT EXISTS source_kind TEXT NOT NULL DEFAULT '';
+ALTER TABLE agentquality_shadow_eval_results ADD COLUMN IF NOT EXISTS passed BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE agentquality_shadow_eval_results ADD COLUMN IF NOT EXISTS judge_verdict JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE agentquality_shadow_eval_results ADD COLUMN IF NOT EXISTS runner_info JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE agentquality_shadow_eval_results ADD COLUMN IF NOT EXISTS trace_ref TEXT NOT NULL DEFAULT '';
+ALTER TABLE agentquality_shadow_eval_results ADD COLUMN IF NOT EXISTS replay_ref TEXT NOT NULL DEFAULT '';
+ALTER TABLE agentquality_shadow_eval_results ADD COLUMN IF NOT EXISTS eval_duration_ms BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE agentquality_shadow_eval_results ADD COLUMN IF NOT EXISTS evaluated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE agentquality_shadow_eval_results ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+CREATE INDEX IF NOT EXISTS idx_agentquality_shadow_eval_results_domain
+	ON agentquality_shadow_eval_results(domain_id, evaluated_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_agentquality_shadow_eval_results_trace
+	ON agentquality_shadow_eval_results(trace_ref, evaluated_at DESC)
+	WHERE trace_ref != '';
+CREATE INDEX IF NOT EXISTS idx_agentquality_shadow_eval_results_runner
+	ON agentquality_shadow_eval_results((runner_info->>'evidence_level'), evaluated_at DESC);
 
 ALTER TABLE embedding_backlog ADD COLUMN IF NOT EXISTS vector_space TEXT NOT NULL DEFAULT 'memory:default';
 
 ALTER TABLE qualityworkbench_replay_jobs ADD COLUMN IF NOT EXISTS result JSONB NOT NULL DEFAULT '{}';
 ALTER TABLE qualityworkbench_replay_jobs ADD COLUMN IF NOT EXISTS error TEXT NOT NULL DEFAULT '';
+ALTER TABLE qualityworkbench_replay_jobs ADD COLUMN IF NOT EXISTS domain_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE qualityworkbench_replay_jobs ADD COLUMN IF NOT EXISTS source_kind TEXT NOT NULL DEFAULT '';
+ALTER TABLE qualityworkbench_replay_jobs ADD COLUMN IF NOT EXISTS source_name TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_qualityworkbench_replay_jobs_attribution
+	ON qualityworkbench_replay_jobs(domain_id, source_kind, source_name, created_at DESC);
+	ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS domain_id TEXT NOT NULL DEFAULT '';
+	ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS source_kind TEXT NOT NULL DEFAULT '';
+	ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS source_name TEXT NOT NULL DEFAULT '';
+	ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS runner_info JSONB NOT NULL DEFAULT '{}';
+	ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS gate_metrics JSONB NOT NULL DEFAULT '{}';
+	ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS judge_verdict JSONB NOT NULL DEFAULT '{}';
+	ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS shadow_metrics JSONB NOT NULL DEFAULT '[]';
+	ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS shadow_results JSONB NOT NULL DEFAULT '[]';
+	ALTER TABLE qualityworkbench_batch_eval_runs ADD COLUMN IF NOT EXISTS domain_regressions JSONB NOT NULL DEFAULT '[]';
+	CREATE INDEX IF NOT EXISTS idx_qualityworkbench_batch_eval_runs_attribution
+	ON qualityworkbench_batch_eval_runs(domain_id, source_kind, source_name, created_at DESC);
 `
 
 const pgBackfillMemoryColumnsBatch = `

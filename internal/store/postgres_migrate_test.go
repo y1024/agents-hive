@@ -28,6 +28,9 @@ func TestPostgresDefaultPermissionRulesUseMinimalIMPolicy(t *testing.T) {
 	if !strings.Contains(pgSeedDefaultConfigs, pgDefaultPermissionRulesJSON) {
 		t.Fatal("pgSeedDefaultConfigs must seed the current default permission rules")
 	}
+	if !strings.Contains(pgSeedDefaultConfigs, `('security.permission_mode',    'minimal')`) {
+		t.Fatal("pgSeedDefaultConfigs must seed security.permission_mode=minimal")
+	}
 	if !strings.Contains(pgFixDefaultPermissionRules, pgLegacyPermissionRulesJSON) || !strings.Contains(pgFixDefaultPermissionRules, pgDefaultPermissionRulesJSON) {
 		t.Fatal("pgFixDefaultPermissionRules must migrate exactly from legacy default rules to current defaults")
 	}

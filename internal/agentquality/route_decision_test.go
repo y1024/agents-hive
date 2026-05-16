@@ -50,7 +50,7 @@ func TestRouteDecisionEventJSONStable(t *testing.T) {
 }
 
 func TestRouteDecisionEventFromRouter(t *testing.T) {
-	decision := router.BuildRouteDecision(router.IntentFrame{Kind: router.IntentCreateSkill, Subject: "skill_authoring"}, []router.ToolProfile{
+	decision := router.BuildRouteDecision(router.IntentFrame{Kind: router.IntentCreateSkill, Subject: "写一个打招呼 skill"}, []router.ToolProfile{
 		skillCreatorProfile(),
 		mcpBuilderProfile(),
 	})
@@ -59,6 +59,9 @@ func TestRouteDecisionEventFromRouter(t *testing.T) {
 
 	if ev.IntentKind != "create_skill" {
 		t.Fatalf("IntentKind = %q, want create_skill", ev.IntentKind)
+	}
+	if ev.Domain != "skill_authoring" {
+		t.Fatalf("Domain = %q, want skill_authoring", ev.Domain)
 	}
 	if len(ev.AllowedTools) != 1 || ev.AllowedTools[0] != "skill" {
 		t.Fatalf("AllowedTools = %+v", ev.AllowedTools)
@@ -71,6 +74,52 @@ func TestRouteDecisionEventFromRouter(t *testing.T) {
 	}
 	if ev.BlockedReasons["mcp-builder"] != "domain_mismatch" {
 		t.Fatalf("BlockedReasons = %+v", ev.BlockedReasons)
+	}
+	if len(ev.AllowedEntries) != 1 || ev.AllowedEntries[0].Name != "skill-creator" || ev.AllowedEntries[0].Domain != "skill_authoring" {
+		t.Fatalf("AllowedEntries = %+v, want skill-creator capability snapshot", ev.AllowedEntries)
+	}
+	if len(ev.BlockedEntries) != 1 || ev.BlockedEntries[0].Name != "mcp-builder" || ev.BlockedEntries[0].Domain != "mcp_server_building" {
+		t.Fatalf("BlockedEntries = %+v, want mcp-builder capability snapshot", ev.BlockedEntries)
+	}
+}
+
+func TestRouteDecisionDomainDoesNotUseSubjectFreeText(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		intent router.IntentFrame
+		want   string
+	}{
+		{
+			name:   "explicit domain wins",
+			intent: router.IntentFrame{Kind: router.IntentAnswer, DomainID: " customer_service ", Subject: "随便写 customer_service"},
+			want:   "customer_service",
+		},
+		{
+			name:   "create skill maps by kind",
+			intent: router.IntentFrame{Kind: router.IntentCreateSkill, Subject: "请创建一个日报技能"},
+			want:   "skill_authoring",
+		},
+		{
+			name:   "modify skill maps by kind",
+			intent: router.IntentFrame{Kind: router.IntentModifySkill, Subject: "修改 skill_authoring 这个自然语言主题"},
+			want:   "skill_authoring",
+		},
+		{
+			name:   "manage tool maps by kind",
+			intent: router.IntentFrame{Kind: router.IntentManageTool, Subject: "创建 MCP server 接入 GitHub API"},
+			want:   "mcp_server_building",
+		},
+		{
+			name:   "other intents fall back to generic",
+			intent: router.IntentFrame{Kind: router.IntentRead, Subject: "customer_service 不能从 subject 授权"},
+			want:   "generic",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := routeDecisionDomain(tc.intent); got != tc.want {
+				t.Fatalf("routeDecisionDomain() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

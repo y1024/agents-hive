@@ -4,12 +4,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/chef-guo/agents-hive/internal/agentquality"
+	"github.com/chef-guo/agents-hive/internal/auth"
 	"github.com/chef-guo/agents-hive/internal/errs"
 	"github.com/chef-guo/agents-hive/internal/qualityworkbench"
+	"github.com/chef-guo/agents-hive/internal/security"
 )
 
 func (s *Server) handleAdminQualityWorkbenchClusters(w http.ResponseWriter, r *http.Request) {
@@ -19,7 +22,7 @@ func (s *Server) handleAdminQualityWorkbenchClusters(w http.ResponseWriter, r *h
 		return
 	}
 	_ = items
-	writeJSON(w, http.StatusOK, map[string]any{
+	writeAdminQualityJSON(w, http.StatusOK, map[string]any{
 		"clusters": clusters,
 		"items":    clusters,
 		"total":    len(clusters),
@@ -47,7 +50,7 @@ func (s *Server) handleAdminQualityWorkbenchPreviewGroupingRules(w http.Response
 		return
 	}
 	preview := qualityworkbench.PreviewGroupingRules(s.effectiveGroupingRules(), items)
-	writeJSON(w, http.StatusOK, preview)
+	writeAdminQualityJSON(w, http.StatusOK, preview)
 }
 
 func (s *Server) handleAdminQualityWorkbenchListGroupingRules(w http.ResponseWriter, r *http.Request) {
@@ -106,6 +109,9 @@ func (s *Server) handleAdminQualityWorkbenchCreateReplays(w http.ResponseWriter,
 	var body struct {
 		Kind       qualityworkbench.ReplayJobKind `json:"kind"`
 		TargetIDs  []string                       `json:"target_ids"`
+		DomainID   string                         `json:"domain_id"`
+		SourceKind string                         `json:"source_kind"`
+		SourceName string                         `json:"source_name"`
 		MaxAttempt int                            `json:"max_attempt"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -120,13 +126,16 @@ func (s *Server) handleAdminQualityWorkbenchCreateReplays(w http.ResponseWriter,
 		BatchID:    batchID,
 		Kind:       body.Kind,
 		TargetIDs:  body.TargetIDs,
+		DomainID:   firstNonEmptyString(body.DomainID, r.URL.Query().Get("domain_id")),
+		SourceKind: firstNonEmptyString(body.SourceKind, r.URL.Query().Get("source_kind")),
+		SourceName: firstNonEmptyString(body.SourceName, r.URL.Query().Get("source_name")),
 		MaxAttempt: body.MaxAttempt,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error(), Code: errs.CodeInvalidInput})
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{
+	writeAdminQualityJSON(w, http.StatusCreated, map[string]any{
 		"batch_id": batchID,
 		"jobs":     []qualityworkbench.ReplayJob{job},
 	})
@@ -135,13 +144,16 @@ func (s *Server) handleAdminQualityWorkbenchCreateReplays(w http.ResponseWriter,
 func (s *Server) handleAdminQualityWorkbenchListReplays(w http.ResponseWriter, r *http.Request) {
 	page, size := parsePagination(r)
 	items := s.workbenchReplay().List(qualityworkbench.ReplayJobListFilter{
-		BatchID: r.URL.Query().Get("batch_id"),
-		Kind:    qualityworkbench.ReplayJobKind(r.URL.Query().Get("kind")),
-		Status:  qualityworkbench.ReplayJobStatus(r.URL.Query().Get("status")),
-		Limit:   size,
-		Offset:  (page - 1) * size,
+		BatchID:    strings.TrimSpace(r.URL.Query().Get("batch_id")),
+		Kind:       qualityworkbench.ReplayJobKind(strings.TrimSpace(r.URL.Query().Get("kind"))),
+		Status:     qualityworkbench.ReplayJobStatus(strings.TrimSpace(r.URL.Query().Get("status"))),
+		DomainID:   strings.TrimSpace(r.URL.Query().Get("domain_id")),
+		SourceKind: strings.TrimSpace(r.URL.Query().Get("source_kind")),
+		SourceName: strings.TrimSpace(r.URL.Query().Get("source_name")),
+		Limit:      size,
+		Offset:     (page - 1) * size,
 	})
-	writeJSON(w, http.StatusOK, map[string]any{
+	writeAdminQualityJSON(w, http.StatusOK, map[string]any{
 		"items": items,
 		"total": len(items),
 		"page":  page,
@@ -156,7 +168,7 @@ func (s *Server) handleAdminQualityWorkbenchGetReplay(w http.ResponseWriter, r *
 		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "replay job 不存在", Code: errs.CodeNotFound})
 		return
 	}
-	writeJSON(w, http.StatusOK, job)
+	writeAdminQualityJSON(w, http.StatusOK, job)
 }
 
 func (s *Server) handleAdminQualityWorkbenchCancelReplay(w http.ResponseWriter, r *http.Request) {
@@ -166,7 +178,7 @@ func (s *Server) handleAdminQualityWorkbenchCancelReplay(w http.ResponseWriter, 
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error(), Code: errs.CodeInvalidInput})
 		return
 	}
-	writeJSON(w, http.StatusOK, job)
+	writeAdminQualityJSON(w, http.StatusOK, job)
 }
 
 func (s *Server) handleAdminQualityWorkbenchRunReplay(w http.ResponseWriter, r *http.Request) {
@@ -185,6 +197,7 @@ func (s *Server) handleAdminQualityWorkbenchRunReplay(w http.ResponseWriter, r *
 	result, runErr := qualityworkbench.ReplayRunner{
 		Store:      s.qualityCandidateStore,
 		EvalRunner: s.qualityEvalRunner,
+		UserID:     auth.UserIDFrom(r.Context()),
 	}.Run(r.Context(), job)
 	status := qualityworkbench.ReplayJobSucceeded
 	errText := ""
@@ -197,7 +210,7 @@ func (s *Server) handleAdminQualityWorkbenchRunReplay(w http.ResponseWriter, r *
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: err.Error(), Code: errs.CodeInternal})
 		return
 	}
-	writeJSON(w, http.StatusOK, finished)
+	writeAdminQualityJSON(w, http.StatusOK, finished)
 }
 
 func (s *Server) handleAdminQualityWorkbenchCreateBatchEval(w http.ResponseWriter, r *http.Request) {
@@ -205,6 +218,9 @@ func (s *Server) handleAdminQualityWorkbenchCreateBatchEval(w http.ResponseWrite
 		Mode          string `json:"mode"`
 		BaselineRunID string `json:"baseline_run_id"`
 		CasesDir      string `json:"cases_dir"`
+		DomainID      string `json:"domain_id"`
+		SourceKind    string `json:"source_kind"`
+		SourceName    string `json:"source_name"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	kind, err := qualityworkbench.ParseBatchEvalKind(body.Mode)
@@ -217,30 +233,63 @@ func (s *Server) handleAdminQualityWorkbenchCreateBatchEval(w http.ResponseWrite
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: err.Error(), Code: errs.CodeInternal})
 		return
 	}
+	domainID := firstNonEmptyString(body.DomainID, r.URL.Query().Get("domain_id"))
+	sourceKind := firstNonEmptyString(body.SourceKind, r.URL.Query().Get("source_kind"))
+	sourceName := firstNonEmptyString(body.SourceName, r.URL.Query().Get("source_name"))
+	shadowResults, shadowErr := s.loadShadowEvalResults(r, kind, domainID)
+	if shadowErr != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: shadowErr.Error(), Code: errs.CodeInternal})
+		return
+	}
 	run, err := s.workbenchBatchEval().Start(qualityworkbench.BatchEvalStart{
-		BatchID:    "eval_batch_" + time.Now().UTC().Format("20060102T150405.000000000"),
-		Kind:       kind,
-		CasesDir:   body.CasesDir,
-		EvalRunner: s.qualityEvalRunner,
-		Candidates: items,
+		BatchID:        "eval_batch_" + time.Now().UTC().Format("20060102T150405.000000000"),
+		Kind:           kind,
+		CasesDir:       body.CasesDir,
+		DomainID:       domainID,
+		SourceKind:     sourceKind,
+		SourceName:     sourceName,
+		Context:        r.Context(),
+		EvalRunner:     s.qualityEvalRunner,
+		JudgeEvaluator: agentquality.HeuristicJudgeEvaluator{},
+		ShadowResults:  shadowResults,
+		Candidates:     items,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error(), Code: errs.CodeInvalidInput})
 		return
 	}
-	writeJSON(w, http.StatusCreated, run)
+	writeAdminQualityJSON(w, http.StatusCreated, run)
+}
+
+func (s *Server) loadShadowEvalResults(r *http.Request, kind qualityworkbench.BatchEvalKind, domainID string) ([]agentquality.ShadowEvalResult, error) {
+	if kind != qualityworkbench.BatchEvalKindShadow {
+		return nil, nil
+	}
+	if s.qualityShadowEvalStore == nil {
+		return nil, fmt.Errorf("shadow eval result store not configured")
+	}
+	limit := 100
+	if raw := strings.TrimSpace(r.URL.Query().Get("shadow_limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 1000 {
+			limit = parsed
+		}
+	}
+	return s.qualityShadowEvalStore.ListRecent(r.Context(), domainID, limit)
 }
 
 func (s *Server) handleAdminQualityWorkbenchListBatchEvals(w http.ResponseWriter, r *http.Request) {
 	page, size := parsePagination(r)
 	items := s.workbenchBatchEval().List(qualityworkbench.BatchEvalRunListFilter{
-		BatchID: r.URL.Query().Get("batch_id"),
-		Kind:    qualityworkbench.BatchEvalKind(r.URL.Query().Get("kind")),
-		Status:  qualityworkbench.BatchEvalStatus(r.URL.Query().Get("status")),
-		Limit:   size,
-		Offset:  (page - 1) * size,
+		BatchID:    strings.TrimSpace(r.URL.Query().Get("batch_id")),
+		Kind:       qualityworkbench.BatchEvalKind(strings.TrimSpace(r.URL.Query().Get("kind"))),
+		Status:     qualityworkbench.BatchEvalStatus(strings.TrimSpace(r.URL.Query().Get("status"))),
+		DomainID:   strings.TrimSpace(r.URL.Query().Get("domain_id")),
+		SourceKind: strings.TrimSpace(r.URL.Query().Get("source_kind")),
+		SourceName: strings.TrimSpace(r.URL.Query().Get("source_name")),
+		Limit:      size,
+		Offset:     (page - 1) * size,
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": len(items), "page": page, "size": size})
+	writeAdminQualityJSON(w, http.StatusOK, map[string]any{"items": items, "total": len(items), "page": page, "size": size})
 }
 
 func (s *Server) handleAdminQualityWorkbenchGetBatchEval(w http.ResponseWriter, r *http.Request) {
@@ -250,7 +299,7 @@ func (s *Server) handleAdminQualityWorkbenchGetBatchEval(w http.ResponseWriter, 
 		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "batch eval 不存在", Code: errs.CodeNotFound})
 		return
 	}
-	writeJSON(w, http.StatusOK, run)
+	writeAdminQualityJSON(w, http.StatusOK, run)
 }
 
 func (s *Server) handleAdminQualityWorkbenchDashboardSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -259,12 +308,12 @@ func (s *Server) handleAdminQualityWorkbenchDashboardSnapshot(w http.ResponseWri
 		return
 	}
 	snapshot := qualityworkbench.BuildDashboardSnapshot(qualityworkbench.DashboardInput{
-		Now:        time.Now(),
-		Window:     7 * 24 * time.Hour,
+		Since:      parseWorkbenchTimeQuery(r, "since"),
+		Until:      parseWorkbenchTimeQuery(r, "until"),
 		Clusters:   clusters,
 		Candidates: items,
 	})
-	writeJSON(w, http.StatusOK, snapshot)
+	writeAdminQualityJSON(w, http.StatusOK, snapshot)
 }
 
 func (s *Server) handleAdminQualityWorkbenchDashboardSeries(w http.ResponseWriter, r *http.Request) {
@@ -273,12 +322,12 @@ func (s *Server) handleAdminQualityWorkbenchDashboardSeries(w http.ResponseWrite
 		return
 	}
 	series := qualityworkbench.BuildDashboardSeries(qualityworkbench.DashboardInput{
-		Now:        time.Now(),
-		Window:     7 * 24 * time.Hour,
+		Since:      parseWorkbenchTimeQuery(r, "since"),
+		Until:      parseWorkbenchTimeQuery(r, "until"),
 		Clusters:   clusters,
 		Candidates: items,
 	}, 24*time.Hour)
-	writeJSON(w, http.StatusOK, map[string]any{"items": series})
+	writeAdminQualityJSON(w, http.StatusOK, map[string]any{"items": series})
 }
 
 func (s *Server) handleAdminQualityWorkbenchGenerateReport(w http.ResponseWriter, r *http.Request) {
@@ -315,7 +364,7 @@ func (s *Server) handleAdminQualityWorkbenchGenerateReport(w http.ResponseWriter
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: err.Error(), Code: errs.CodeInternal})
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{
+	writeAdminQualityJSON(w, http.StatusCreated, map[string]any{
 		"id":         record.ID,
 		"week_start": record.WeekStart.Format("2006-01-02"),
 		"title":      record.Title,
@@ -337,7 +386,7 @@ func (s *Server) handleAdminQualityWorkbenchListReports(w http.ResponseWriter, r
 			"markdown": report.Markdown,
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": len(items), "page": page, "size": size})
+	writeAdminQualityJSON(w, http.StatusOK, map[string]any{"items": items, "total": len(items), "page": page, "size": size})
 }
 
 func (s *Server) handleAdminQualityWorkbenchGetReport(w http.ResponseWriter, r *http.Request) {
@@ -347,7 +396,7 @@ func (s *Server) handleAdminQualityWorkbenchGetReport(w http.ResponseWriter, r *
 		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "report 不存在", Code: errs.CodeNotFound})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	writeAdminQualityJSON(w, http.StatusOK, map[string]any{
 		"id":       report.ID,
 		"title":    report.Title,
 		"summary":  report.Summary,
@@ -368,7 +417,17 @@ func (s *Server) handleAdminQualityWorkbenchDownloadReport(w http.ResponseWriter
 	}
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.md"`, filename))
-	_, _ = w.Write([]byte(report.Markdown))
+	redacted, err := security.RedactSecrets(report.Markdown)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "质量报告脱敏失败", Code: errs.CodeInternal})
+		return
+	}
+	markdown, ok := redacted.(string)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "质量报告脱敏失败", Code: errs.CodeInternal})
+		return
+	}
+	_, _ = w.Write([]byte(markdown))
 }
 
 func (s *Server) workbenchReplay() qualityworkbench.ReplayJobStore {
@@ -421,16 +480,69 @@ func (s *Server) listWorkbenchCandidates(r *http.Request, page, size int) ([]age
 	if s.qualityCandidateStore == nil {
 		return nil, 0, fmt.Errorf("质量候选用例存储未启用")
 	}
-	filter := agentquality.CandidateFilter{
-		Status: agentquality.CandidateStatus(r.URL.Query().Get("status")),
-		Route:  r.URL.Query().Get("route"),
-		Limit:  size,
-		Offset: (page - 1) * size,
-	}
+	filter := workbenchCandidateFilterFromRequest(r, page, size)
 	if filter.Status != "" {
 		if err := agentquality.ValidateCandidateStatus(filter.Status); err != nil {
 			return nil, 0, err
 		}
 	}
-	return s.qualityCandidateStore.ListCandidates(r.Context(), filter)
+	items, total, err := s.qualityCandidateStore.ListCandidates(r.Context(), filter)
+	if err != nil {
+		return nil, total, err
+	}
+	return items, total, nil
+}
+
+func workbenchCandidateFilterFromRequest(r *http.Request, page, size int) agentquality.CandidateFilter {
+	if page <= 0 {
+		page = 1
+	}
+	return agentquality.CandidateFilter{
+		Status:      agentquality.CandidateStatus(strings.TrimSpace(r.URL.Query().Get("status"))),
+		Route:       strings.TrimSpace(r.URL.Query().Get("route")),
+		DomainID:    strings.TrimSpace(r.URL.Query().Get("domain_id")),
+		SourceKind:  strings.TrimSpace(r.URL.Query().Get("source_kind")),
+		SourceName:  strings.TrimSpace(r.URL.Query().Get("source_name")),
+		OwnerScope:  agentquality.OwnerScope(strings.TrimSpace(r.URL.Query().Get("owner_scope"))),
+		OwnerID:     strings.TrimSpace(r.URL.Query().Get("owner_id")),
+		UserID:      auth.UserIDFrom(r.Context()),
+		FailureType: agentquality.FailureType(strings.TrimSpace(r.URL.Query().Get("failure_type"))),
+		Limit:       size,
+		Offset:      (page - 1) * size,
+	}
+}
+
+func parseWorkbenchTimeQuery(r *http.Request, key string) time.Time {
+	raw := strings.TrimSpace(r.URL.Query().Get(key))
+	if raw == "" {
+		return time.Time{}
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		return parsed
+	}
+	if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+		return parsed
+	}
+	if parsed, err := time.Parse("2006-01-02", raw); err == nil {
+		return parsed
+	}
+	return time.Time{}
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func firstNonEmptyFailureType(values ...agentquality.FailureType) agentquality.FailureType {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return agentquality.FailureNone
 }

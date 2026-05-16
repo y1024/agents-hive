@@ -18,7 +18,7 @@ import {
   Wrench, ChevronRight, ChevronDown,
   Copy, Check, ThumbsUp, ThumbsDown, RefreshCw,
   ExternalLink, Brain, FileText,
-  ArrowUp, ArrowDown, X, AlertTriangle,
+  ArrowUp, ArrowDown, X, AlertTriangle, Activity, ShieldAlert, PlayCircle,
 } from 'lucide-react';
 import type { Message } from '../../types/api';
 import type { Artifact } from '../../store/canvas';
@@ -71,11 +71,14 @@ interface Props {
   onRegenerate?: () => void;
   toolResults?: Map<string, string>;
   toolErrors?: Map<string, boolean>; // tool_call_id → is_error
+  toolRecoverable?: Map<string, boolean>; // tool_call_id → recoverable
+  toolErrorKinds?: Map<string, string>; // tool_call_id → error_kind
   toolNames?: Map<string, string>; // tool_call_id → tool_name
+  sessionId?: string;
 }
 
 export const MessageBubble = memo(function MessageBubble({
-  message, showRole = true, isLast = false, onRegenerate, toolResults, toolErrors, toolNames,
+  message, showRole = true, isLast = false, onRegenerate, toolResults, toolErrors, toolRecoverable, toolErrorKinds, toolNames, sessionId,
 }: Props) {
   const { t } = useTranslation();
   const isUser = message.role === 'user';
@@ -335,26 +338,14 @@ export const MessageBubble = memo(function MessageBubble({
 
             {toolCallsForRender.length > 0 && (
               <div className="mt-2.5">
-                {toolCallsForRender.length > 1 && (
-                  <div className="flex items-center gap-1.5 mb-1.5">
-                    <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-[var(--text-secondary)] bg-[var(--bg-secondary)] px-2 py-0.5 rounded-full border border-[var(--border-color)]">
-                      <svg className="w-2.5 h-2.5" viewBox="0 0 10 10" fill="none"><path d="M2 1v8M5 1v8M8 1v8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
-                      并行 ×{toolCallsForRender.length}
-                    </span>
-                  </div>
-                )}
-                <div className="flex flex-col gap-2">
-                  {toolCallsForRender.map((tc) => (
-                    <ToolCallRow
-                      key={tc.id}
-                      id={tc.id}
-                      name={tc.name}
-                      args={tc.arguments}
-                      result={toolResults?.get(tc.id)}
-                      hasError={!!toolErrors?.get(tc.id)}
-                    />
-                  ))}
-                </div>
+                <ToolCallsSection
+                  calls={toolCallsForRender}
+                  toolResults={toolResults}
+                  toolErrors={toolErrors}
+                  toolRecoverable={toolRecoverable}
+                  toolErrorKinds={toolErrorKinds}
+                  sessionId={sessionId}
+                />
               </div>
             )}
 
@@ -470,20 +461,128 @@ function getToolAccentByStatus(status?: 'running' | 'success' | 'error'): string
   return status === 'error' ? 'var(--danger)' : 'var(--accent-600)';
 }
 
+type RenderToolCall = NonNullable<Message['tool_calls']>[number];
+
+function getCompactToolSummary(calls: RenderToolCall[], toolResults?: Map<string, string>): string {
+  const finished = calls.filter((tc) => toolResults?.has(tc.id));
+  const pending = calls.length - finished.length;
+  const names = Array.from(new Set(calls.map((tc) => tc.name).filter(Boolean))).slice(0, 3);
+  const nameText = names.join(', ');
+  const suffix = calls.length > names.length ? ` +${calls.length - names.length}` : '';
+
+  if (pending > 0) {
+    return `${nameText}${suffix} · ${finished.length}/${calls.length} completed`;
+  }
+  return `${calls.length} tool${calls.length === 1 ? '' : 's'} completed · ${nameText}${suffix}`;
+}
+
+function ToolCallsSection({
+  calls,
+  toolResults,
+  toolErrors,
+  toolRecoverable,
+  toolErrorKinds,
+  sessionId,
+}: {
+  calls: RenderToolCall[];
+  toolResults?: Map<string, string>;
+  toolErrors?: Map<string, boolean>;
+  toolRecoverable?: Map<string, boolean>;
+  toolErrorKinds?: Map<string, string>;
+  sessionId?: string;
+}) {
+  const { t } = useTranslation();
+  const liveStatuses = useChatStore((s) => s.toolCallStatuses);
+  const diagnosticCalls = calls.filter((tc) => {
+    const live = liveStatuses?.[tc.id];
+    const hasError = !!toolErrors?.get(tc.id);
+    const isRecoverable = !!toolRecoverable?.get(tc.id) || live?.recoverable === true;
+    return hasError || isRecoverable || live?.status === 'running' || live?.status === 'error' || live?.requires_user_approval === true;
+  });
+  const compactCalls = calls.filter((tc) => !diagnosticCalls.some((item) => item.id === tc.id));
+  const compactSummary = getCompactToolSummary(compactCalls, toolResults);
+
+  return (
+    <div className="flex flex-col gap-2">
+      {compactCalls.length > 0 && (
+        <div className="rounded-xl border border-[var(--border-color)] bg-[var(--bg-card)] px-3 py-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <Check className="w-3.5 h-3.5 shrink-0 text-[var(--success)]" aria-hidden="true" />
+            <span className="text-[12px] font-medium text-[var(--text-primary)] truncate">
+              {compactSummary}
+            </span>
+            {calls.length > 1 && (
+              <span className="ml-auto shrink-0 rounded-full border border-[var(--border-color)] bg-[var(--bg-secondary)] px-2 py-0.5 text-[10px] font-semibold text-[var(--text-secondary)]">
+                并行 x{calls.length}
+              </span>
+            )}
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+            {sessionId && (
+              <DiagnosticLink href={`/sessions/${encodeURIComponent(sessionId)}/replay`} icon={<PlayCircle className="w-3 h-3" />}>
+                {t('nav.replay', 'Replay')}
+              </DiagnosticLink>
+            )}
+            {sessionId && (
+              <DiagnosticLink href={`/sessions/${encodeURIComponent(sessionId)}/replay?trace=1`} icon={<Activity className="w-3 h-3" />}>
+                Trace
+              </DiagnosticLink>
+            )}
+            <DiagnosticLink href="/admin/quality-workbench" icon={<ShieldAlert className="w-3 h-3" />}>
+              Admin
+            </DiagnosticLink>
+          </div>
+        </div>
+      )}
+
+      {diagnosticCalls.map((tc) => (
+        <ToolCallRow
+          key={tc.id}
+          id={tc.id}
+          name={tc.name}
+          args={tc.arguments}
+          result={toolResults?.get(tc.id)}
+          hasError={!!toolErrors?.get(tc.id)}
+          recoverable={!!toolRecoverable?.get(tc.id)}
+          errorKind={toolErrorKinds?.get(tc.id)}
+        />
+      ))}
+    </div>
+  );
+}
+
+function DiagnosticLink({ href, icon, children }: {
+  href: string;
+  icon: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <a
+      href={href}
+      className="inline-flex items-center gap-1 rounded-full border border-[var(--border-color)] px-2 py-1 text-[11px] font-medium text-[var(--text-secondary)] transition-colors hover:border-[var(--accent-border)] hover:text-[var(--accent-600)] dark:hover:text-[var(--accent-300)]"
+    >
+      {icon}
+      {children}
+    </a>
+  );
+}
+
 /* ===== ToolCallRow：每个 tool_call_id 的行容器 =====
  * 接入 ai-elements <Tool> 外框（ToolAdapter）。原并列 chip+block 的 sibling 渲染
  * 被收进同一个 Collapsible：header 显示名字 + status badge，content 按 running/其他
  * 分别挂 chip 或 block。hasError 通过 ToolAdapter 映射到 output-error 并默认展开。
  */
-function ToolCallRow({ id, name, args, result, hasError }: {
+function ToolCallRow({ id, name, args, result, hasError, recoverable, errorKind }: {
   id: string;
   name: string;
   args: string;
   result?: string;
   hasError: boolean;
+  recoverable?: boolean;
+  errorKind?: string;
 }) {
   return (
-    <ToolAdapter id={id} name={name} args={args} result={result} hasError={hasError} />
+    <ToolAdapter id={id} name={name} args={args} result={result} hasError={hasError} recoverable={recoverable} errorKind={errorKind} />
   );
 }
 

@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"go.uber.org/zap"
 
@@ -222,6 +223,13 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{Error: "存储未初始化", Code: errs.CodeInternal})
 		return
 	}
+	sessionID := strings.TrimSpace(r.URL.Query().Get("session_id"))
+	if sessionID != "" && s.master != nil {
+		if _, err := s.master.GetSessionByID(r.Context(), sessionID); err != nil {
+			writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "会话不存在或无权访问", Code: errs.CodeNotFound})
+			return
+		}
+	}
 
 	models, err := s.store.ListLLMModels(r.Context())
 	if err != nil {
@@ -230,20 +238,34 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var active string
+	active := ""
+	if s.master != nil {
+		active = s.master.ActiveModelNameForSession(r.Context(), sessionID)
+	}
+	defaultModel := ""
+	enabledNames := make(map[string]bool, len(models))
+	for _, m := range models {
+		if !m.Enabled {
+			continue
+		}
+		enabledNames[m.Name] = true
+		if m.IsDefault && defaultModel == "" {
+			defaultModel = m.Name
+		}
+	}
+	if active == "" || !enabledNames[active] {
+		active = defaultModel
+	}
 	result := make([]ModelInfoResponse, 0, len(models))
 	for _, m := range models {
 		if !m.Enabled {
 			continue
 		}
-		if m.IsDefault {
-			active = m.Name
-		}
 		result = append(result, ModelInfoResponse{
 			Name:     m.Name,
 			Model:    m.Model,
 			Provider: m.ProviderName,
-			IsActive: m.IsDefault,
+			IsActive: m.Name == active,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -252,7 +274,7 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleSwitchModel 处理 PUT /api/v1/model — 切换全局模型（操作数据库）
+// handleSwitchModel 处理 PUT /api/v1/model — 切换指定会话的主对话模型。
 func (s *Server) handleSwitchModel(w http.ResponseWriter, r *http.Request) {
 	if s.store == nil {
 		writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{Error: "存储未初始化", Code: errs.CodeInternal})
@@ -260,20 +282,26 @@ func (s *Server) handleSwitchModel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Name string `json:"name"`
+		Name      string `json:"name"`
+		SessionID string `json:"session_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "无效的请求体", Code: errs.CodeBadRequest})
 		return
 	}
+	req.Name = strings.TrimSpace(req.Name)
+	req.SessionID = strings.TrimSpace(req.SessionID)
 	if req.Name == "" {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "需要模型名称", Code: errs.CodeBadRequest})
+		return
+	}
+	if req.SessionID == "" {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "需要会话 ID", Code: errs.CodeBadRequest})
 		return
 	}
 
 	ctx := r.Context()
 
-	// 从数据库查找目标模型
 	target, err := s.store.GetLLMModel(ctx, req.Name)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, ErrorResponse{
@@ -282,42 +310,23 @@ func (s *Server) handleSwitchModel(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-
-	// 取消所有模型的 is_default，再将目标模型设为 default
-	allModels, err := s.store.ListLLMModels(ctx)
-	if err != nil {
-		s.logger.Error("查询模型列表失败", zap.Error(err))
-		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "查询模型列表失败", Code: errs.CodeStoreReadFailed})
-		return
-	}
-	for _, m := range allModels {
-		if m.IsDefault && m.Name != req.Name {
-			m.IsDefault = false
-			if err := s.store.SaveLLMModel(ctx, m); err != nil {
-				s.logger.Error("取消默认模型失败", zap.String("name", m.Name), zap.Error(err))
-			}
-		}
-	}
-	target.IsDefault = true
-	if err := s.store.SaveLLMModel(ctx, target); err != nil {
-		s.logger.Error("设置默认模型失败", zap.Error(err))
-		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "设置默认模型失败", Code: errs.CodeStoreWriteFailed})
+	if !target.Enabled {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "模型未启用: " + req.Name, Code: errs.CodeInvalidInput})
 		return
 	}
 
-	// 查询提供商的 api_format
-	var apiFormat string
-	if target.ProviderName != "" {
-		if prov, err := s.store.GetLLMProvider(ctx, target.ProviderName); err == nil {
-			apiFormat = prov.APIFormat
-		}
+	if s.master == nil {
+		writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{Error: "Master 未初始化", Code: errs.CodeInternal})
+		return
+	}
+	if err := s.master.SelectSessionModel(ctx, req.SessionID, target.Name); err != nil {
+		s.logger.Error("设置会话模型失败", zap.String("session_id", req.SessionID), zap.String("name", target.Name), zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: err.Error(), Code: errs.GetCode(err)})
+		return
 	}
 
-	// 同步更新 Router 中的 LLM 客户端（运行时配置完全由 DB + Router 管理）
-	s.master.SwitchModel(target.Name, target.Model, target.BaseURL, target.ProviderName, apiFormat)
-
-	s.logger.Info("全局模型已切换", zap.String("model", target.Model), zap.String("name", target.Name))
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "model": target.Model, "name": target.Name})
+	s.logger.Info("会话模型已切换", zap.String("session_id", req.SessionID), zap.String("model", target.Model), zap.String("name", target.Name))
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "model": target.Model, "name": target.Name, "session_id": req.SessionID})
 }
 
 // invokeToolWhitelist 仅允许通过 /api/v1/tools/invoke 调用的工具（预览类，无副作用）

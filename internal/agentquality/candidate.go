@@ -61,6 +61,11 @@ type CandidateRecord struct {
 	UpdatedAt      time.Time                `json:"updated_at"`
 	ReviewedAt     *time.Time               `json:"reviewed_at,omitempty"`
 	LastVerifiedAt *time.Time               `json:"last_verified_at,omitempty"`
+
+	// Phase 3: Source tracking and change history
+	SourceKind     string            `json:"source_kind,omitempty"`
+	StateChanges   []CaseStateChange `json:"state_changes,omitempty"`
+	PromotionNote  string            `json:"promotion_note,omitempty"`
 }
 
 func CandidateFromFailure(sessionID, input, replayRef string, ev Event) CandidateRecord {

@@ -3,22 +3,24 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/chef-guo/agents-hive/internal/errs"
+	"github.com/chef-guo/agents-hive/internal/security"
 	"github.com/chef-guo/agents-hive/internal/store"
 )
 
 // resourceSaveRequest 外部资源保存请求
 type resourceSaveRequest struct {
-	Name        string `json:"name"`
-	Type        string `json:"type"`
-	Environment string `json:"environment"`
-	Description string `json:"description"`
-	Connection  string `json:"connection"`
-	Endpoint    string `json:"endpoint"`
-	Credentials string `json:"credentials"`
-	ReadOnly    bool   `json:"read_only"`
-	Enabled     bool   `json:"enabled"`
+	Name        string  `json:"name"`
+	Type        string  `json:"type"`
+	Environment string  `json:"environment"`
+	Description string  `json:"description"`
+	Connection  string  `json:"connection"`
+	Endpoint    string  `json:"endpoint"`
+	Credentials *string `json:"credentials"`
+	ReadOnly    bool    `json:"read_only"`
+	Enabled     bool    `json:"enabled"`
 }
 
 // registerResourceMethods 注册外部资源管理相关 RPC 方法
@@ -27,19 +29,19 @@ func registerResourceMethods(gw *Gateway, deps Deps) {
 	gw.Register(MethodDef{
 		Name:        "resources.list",
 		Description: "列出所有外部资源配置",
-		AuthScope:   "",
+		AuthScope:   "admin",
 		Handler: func(ctx context.Context, params json.RawMessage) (json.RawMessage, error) {
 			if deps.Store == nil {
 				return nil, errs.New(errs.CodeInternal, "存储后端未初始化")
 			}
 
-			records, err := deps.Store.ListExternalResources(context.Background())
+			records, err := deps.Store.ListExternalResources(ctx)
 			if err != nil {
 				return nil, errs.Wrap(errs.CodeInternal, "查询外部资源列表失败", err)
 			}
 
 			return json.Marshal(map[string]any{
-				"resources": records,
+				"resources": redactExternalResources(records),
 			})
 		},
 	})
@@ -48,7 +50,7 @@ func registerResourceMethods(gw *Gateway, deps Deps) {
 	gw.Register(MethodDef{
 		Name:        "resources.get",
 		Description: "根据名称获取单个外部资源配置",
-		AuthScope:   "",
+		AuthScope:   "admin",
 		Handler: func(ctx context.Context, params json.RawMessage) (json.RawMessage, error) {
 			if deps.Store == nil {
 				return nil, errs.New(errs.CodeInternal, "存储后端未初始化")
@@ -64,12 +66,12 @@ func registerResourceMethods(gw *Gateway, deps Deps) {
 				return nil, errs.New(errs.CodeInvalidArgument, "缺少 name 参数")
 			}
 
-			rec, err := deps.Store.GetExternalResource(context.Background(), p.Name)
+			rec, err := deps.Store.GetExternalResource(ctx, p.Name)
 			if err != nil {
 				return nil, errs.Wrap(errs.CodeNotFound, "外部资源未找到: "+p.Name, err)
 			}
 
-			return json.Marshal(rec)
+			return json.Marshal(redactExternalResource(rec))
 		},
 	})
 
@@ -91,6 +93,27 @@ func registerResourceMethods(gw *Gateway, deps Deps) {
 				return nil, errs.New(errs.CodeInvalidArgument, "缺少 name 字段")
 			}
 
+			credentials := ""
+			if req.Credentials != nil {
+				credentials = *req.Credentials
+			}
+			if req.Credentials == nil || security.HasRedactedMarker(credentials) {
+				existing, err := deps.Store.GetExternalResource(ctx, req.Name)
+				if err != nil {
+					if req.Credentials != nil {
+						return nil, errs.New(errs.CodeInvalidArgument, "credentials 包含脱敏占位，请输入完整凭证")
+					}
+				} else if req.Credentials == nil {
+					credentials = existing.Credentials
+				} else {
+					merged, err := mergeExternalResourceCredentials(existing.Credentials, credentials)
+					if err != nil {
+						return nil, err
+					}
+					credentials = merged
+				}
+			}
+
 			rec := &store.ExternalResourceRecord{
 				Name:        req.Name,
 				Type:        req.Type,
@@ -98,12 +121,12 @@ func registerResourceMethods(gw *Gateway, deps Deps) {
 				Description: req.Description,
 				Connection:  req.Connection,
 				Endpoint:    req.Endpoint,
-				Credentials: req.Credentials,
+				Credentials: credentials,
 				ReadOnly:    req.ReadOnly,
 				Enabled:     req.Enabled,
 			}
 
-			if err := deps.Store.SaveExternalResource(context.Background(), rec); err != nil {
+			if err := deps.Store.SaveExternalResource(ctx, rec); err != nil {
 				return nil, errs.Wrap(errs.CodeInternal, "保存外部资源失败", err)
 			}
 
@@ -134,7 +157,7 @@ func registerResourceMethods(gw *Gateway, deps Deps) {
 				return nil, errs.New(errs.CodeInvalidArgument, "缺少 name 参数")
 			}
 
-			if err := deps.Store.DeleteExternalResource(context.Background(), p.Name); err != nil {
+			if err := deps.Store.DeleteExternalResource(ctx, p.Name); err != nil {
 				return nil, errs.Wrap(errs.CodeInternal, "删除外部资源失败: "+p.Name, err)
 			}
 
@@ -144,4 +167,61 @@ func registerResourceMethods(gw *Gateway, deps Deps) {
 			})
 		},
 	})
+}
+
+func redactExternalResources(records []*store.ExternalResourceRecord) []*store.ExternalResourceRecord {
+	out := make([]*store.ExternalResourceRecord, 0, len(records))
+	for _, rec := range records {
+		out = append(out, redactExternalResource(rec))
+	}
+	return out
+}
+
+func redactExternalResource(rec *store.ExternalResourceRecord) *store.ExternalResourceRecord {
+	if rec == nil {
+		return nil
+	}
+	cp := *rec
+	if cp.Credentials != "" {
+		cp.Credentials = security.RedactedValue
+	}
+	return &cp
+}
+
+func mergeExternalResourceCredentials(existing, incoming string) (string, error) {
+	if !security.HasRedactedMarker(incoming) {
+		return incoming, nil
+	}
+	if strings.TrimSpace(existing) == "" {
+		return "", errs.New(errs.CodeInvalidArgument, "credentials 包含脱敏占位，请输入完整凭证")
+	}
+	if strings.TrimSpace(incoming) == security.RedactedValue {
+		return existing, nil
+	}
+
+	merged, ok := mergeCredentialJSON(existing, incoming)
+	if ok {
+		return merged, nil
+	}
+	return existing, nil
+}
+
+func mergeCredentialJSON(existing, incoming string) (string, bool) {
+	if !json.Valid([]byte(incoming)) || !json.Valid([]byte(existing)) {
+		return "", false
+	}
+	var incomingValue any
+	if err := json.Unmarshal([]byte(incoming), &incomingValue); err != nil {
+		return "", false
+	}
+	var existingValue any
+	if err := json.Unmarshal([]byte(existing), &existingValue); err != nil {
+		return "", false
+	}
+	merged := security.PreserveRedactedValues(incomingValue, existingValue)
+	out, err := json.Marshal(merged)
+	if err != nil {
+		return "", false
+	}
+	return string(out), true
 }

@@ -164,14 +164,17 @@ func TestSafeExecutorWrapper(t *testing.T) {
 		}
 	})
 
-	t.Run("deny policy blocks", func(t *testing.T) {
+	t.Run("deny policy passes through for upper-layer approval", func(t *testing.T) {
 		w := NewSafeExecutorWrapper(inner, &mockChecker{policy: "deny"})
-		_, err := w.Execute(context.Background(), ExecRequest{
-			Command: "echo blocked",
+		result, err := w.Execute(context.Background(), ExecRequest{
+			Command: "echo reviewed",
 			Timeout: 10 * time.Second,
 		})
-		if err == nil {
-			t.Error("expected deny error, got nil")
+		if err != nil {
+			t.Fatalf("deny policy should pass through to executor, got error: %v", err)
+		}
+		if trimOutput(result.Stdout) != "reviewed" {
+			t.Errorf("stdout = %q, want %q", result.Stdout, "reviewed")
 		}
 	})
 

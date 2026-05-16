@@ -32,7 +32,7 @@ interface ChatState {
   setCurrentSessionId: (sessionId: string | null) => void;
   addInlineApproval: (req: InputRequest) => void;
   removeInlineApproval: (requestId: string) => void;
-  loadModels: (client: NodeClient) => Promise<void>;
+  loadModels: (client: NodeClient, sessionId?: string) => Promise<void>;
   setToolCallStatus: (id: string, status: ToolCallStatus) => void;
   stopTask: (client: NodeClient, sessionId: string) => Promise<void>;
   replaceStreamingMessage: (msg: Message, streamId: string | null) => void;
@@ -148,6 +148,9 @@ function mergeMessage(existing: Message, incoming: Message): Message {
     tool_call_id: incoming.tool_call_id ?? existing.tool_call_id,
     tool_name: incoming.tool_name ?? existing.tool_name,
     is_error: incoming.is_error ?? existing.is_error,
+    recoverable: incoming.recoverable ?? existing.recoverable,
+    terminal: incoming.terminal ?? existing.terminal,
+    error_kind: incoming.error_kind ?? existing.error_kind,
     tool_call_preview: incoming.tool_call_preview === true ? true : undefined,
     timestamp: keepExistingTimestamp ? existing.timestamp || incoming.timestamp : incoming.timestamp || existing.timestamp,
   };
@@ -426,9 +429,9 @@ export const useChatStore = create<ChatState>((set) => ({
       inlineApprovals: s.inlineApprovals.filter((r) => r.id !== requestId),
     })),
 
-  loadModels: async (client) => {
+  loadModels: async (client, sessionId) => {
     try {
-      const res = await client.listModels();
+      const res = await client.listModels(sessionId);
       set({ availableModels: res.models || [], activeModel: res.active || null });
     } catch {
       // 忽略错误，保留空列表

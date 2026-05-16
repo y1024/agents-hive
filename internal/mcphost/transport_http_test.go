@@ -76,6 +76,15 @@ func TestHTTPTransport_Connect(t *testing.T) {
 	}
 }
 
+func TestSafeURLForLogDropsSecretQueryAndFragment(t *testing.T) {
+	got := safeURLForLog("https://mcp.example.com/metamcp?api_key=secret&token=also-secret#frag")
+	assert.Equal(t, "https://mcp.example.com/metamcp", got)
+	assert.NotContains(t, got, "secret")
+	assert.NotContains(t, got, "api_key")
+	assert.NotContains(t, got, "token")
+	assert.NotContains(t, got, "#")
+}
+
 func TestHTTPTransport_ConnectSendsInitializeParams(t *testing.T) {
 	var reqBody struct {
 		JSONRPC string `json:"jsonrpc"`

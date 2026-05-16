@@ -152,9 +152,121 @@ func TestBatchEvalRunStore_ListAndGet(t *testing.T) {
 	assert.Equal(t, second.ID, list[0].ID)
 }
 
+func TestBatchEvalRunStore_ListFiltersByAttribution(t *testing.T) {
+	now := time.Date(2026, 4, 2, 9, 0, 0, 0, time.UTC)
+	store := NewMemoryBatchEvalRunStore(func() time.Time { return now })
+
+	first, err := store.Start(BatchEvalStart{
+		BatchID:    "batch-1",
+		Kind:       BatchEvalKindManual,
+		DomainID:   "customer_service",
+		SourceKind: "workflow",
+		SourceName: "case_triage",
+		Candidates: []agentquality.CandidateRecord{
+			qualityWorkbenchCandidate("candidate-1", agentquality.CandidatePromotedRegressed, agentquality.FailureTool, "failed", now),
+		},
+	})
+	require.NoError(t, err)
+	_, err = store.Start(BatchEvalStart{
+		BatchID:    "batch-2",
+		Kind:       BatchEvalKindManual,
+		DomainID:   "generic",
+		SourceKind: "master",
+		SourceName: "react",
+		Candidates: []agentquality.CandidateRecord{
+			qualityWorkbenchCandidate("candidate-2", agentquality.CandidatePromotedRegressed, agentquality.FailureTool, "failed", now),
+		},
+	})
+	require.NoError(t, err)
+
+	list := store.List(BatchEvalRunListFilter{
+		DomainID:   "customer_service",
+		SourceKind: "workflow",
+		SourceName: "case_triage",
+		Limit:      10,
+	})
+
+	require.Len(t, list, 1)
+	assert.Equal(t, first.ID, list[0].ID)
+	assert.Equal(t, "customer_service", list[0].DomainID)
+}
+
 func writeGoldenCase(t *testing.T, dir string, c agentquality.Case) {
 	t.Helper()
 	b, err := json.Marshal(c)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, c.ID+".json"), b, 0o600))
+}
+
+func TestBatchEvalPersistsRunnerEvidenceLevel(t *testing.T) {
+	now := time.Date(2026, 4, 2, 9, 0, 0, 0, time.UTC)
+	store := NewMemoryBatchEvalRunStore(func() time.Time { return now })
+	casesDir := t.TempDir()
+	writeGoldenCase(t, casesDir, agentquality.Case{
+		ID:             "case-1",
+		Name:           "test case",
+		Route:          "web",
+		Input:          "hello",
+		ExpectedStatus: agentquality.StatusPass,
+		Required:       true,
+	})
+
+	run, err := store.Start(BatchEvalStart{
+		BatchID:    "batch-with-runner",
+		Kind:       BatchEvalKindManual,
+		CasesDir:   casesDir,
+		EvalRunner: agentquality.StaticEvalRunner{},
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, agentquality.EvidenceStaticSchema, run.RunnerInfo.EvidenceLevel)
+	assert.Equal(t, "static", run.RunnerInfo.Name)
+	assert.Equal(t, "1.0", run.RunnerInfo.Version)
+}
+
+func TestBatchEvalShadowModeAttachesShadowMetricsAndDomainRegression(t *testing.T) {
+	now := time.Date(2026, 4, 2, 9, 0, 0, 0, time.UTC)
+	store := NewMemoryBatchEvalRunStore(func() time.Time { return now })
+
+	run, err := store.Start(BatchEvalStart{
+		BatchID: "batch-shadow",
+		Kind:    BatchEvalKindShadow,
+		ShadowResults: []agentquality.ShadowEvalResult{
+			{
+				CaseID:   "case-1",
+				DomainID: "customer_service",
+				Passed:   true,
+				JudgeVerdict: agentquality.EvaluationVerdict{
+					Score:       8,
+					Verdict:     "passed",
+					FailureType: agentquality.FailureNone,
+				},
+				RunnerInfo: agentquality.RunnerInfo{EvidenceLevel: agentquality.EvidenceProductionShadow},
+				Timestamp:  now,
+			},
+			{
+				CaseID:   "case-2",
+				DomainID: "customer_service",
+				Passed:   false,
+				JudgeVerdict: agentquality.EvaluationVerdict{
+					Score:       4,
+					Verdict:     "tool mismatch",
+					FailureType: agentquality.FailureTool,
+				},
+				RunnerInfo: agentquality.RunnerInfo{EvidenceLevel: agentquality.EvidenceProductionShadow},
+				Timestamp:  now,
+			},
+		},
+	})
+
+	require.NoError(t, err)
+	require.Len(t, run.ShadowResults, 2)
+	require.Len(t, run.ShadowMetrics, 1)
+	assert.Equal(t, "customer_service", run.ShadowMetrics[0].DomainID)
+	assert.Equal(t, 2, run.ShadowMetrics[0].SampleCount)
+	assert.Equal(t, 0.5, run.ShadowMetrics[0].PassRate)
+	assert.Equal(t, 1, run.ShadowMetrics[0].ToolMisuses)
+	require.Len(t, run.DomainRegressions, 1)
+	assert.Equal(t, "fail", run.DomainRegressions[0].Status)
+	assert.Equal(t, string(agentquality.EvidenceProductionShadow), run.DomainRegressions[0].EvidenceLevel)
 }

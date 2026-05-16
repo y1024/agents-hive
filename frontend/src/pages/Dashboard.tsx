@@ -134,7 +134,7 @@ export function Dashboard() {
               <Bot className="w-8 h-8 mx-auto mb-3 text-[var(--text-secondary)] opacity-40" />
               <p className="text-sm text-[var(--text-secondary)] mb-3">{t('dashboard.noAgents')}</p>
               <button
-                onClick={() => navigate('/agents')}
+                onClick={() => navigate('/admin/agents')}
                 className="inline-flex items-center gap-1.5 text-sm text-[var(--accent-600)] dark:text-[var(--accent-300)] hover:underline"
               >
                 {t('dashboard.goToAgents', '查看 Agent 配置')}
@@ -165,7 +165,7 @@ export function Dashboard() {
               <Zap className="w-8 h-8 mx-auto mb-3 text-[var(--text-secondary)] opacity-40" />
               <p className="text-sm text-[var(--text-secondary)] mb-3">{t('dashboard.noSkills')}</p>
               <button
-                onClick={() => navigate('/skills')}
+                onClick={() => navigate('/admin/skills')}
                 className="inline-flex items-center gap-1.5 text-sm text-[var(--accent-600)] dark:text-[var(--accent-300)] hover:underline"
               >
                 {t('dashboard.goToSkills', '查看技能列表')}

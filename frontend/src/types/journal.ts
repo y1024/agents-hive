@@ -21,6 +21,18 @@ export interface JournalEvent {
 
 export interface QualityEventView {
   name: string;
+  case_id?: string;
+  run_id?: string;
+  trace_id?: string;
+  span_id?: string;
+  turn_id?: string;
+  domain_id?: string;
+  source_kind?: string;
+  source_name?: string;
+  owner_scope?: string;
+  owner_id?: string;
+  user_id?: string;
+  route?: string;
   failure_type?: string;
   retry_reason?: string;
   final_status?: string;
@@ -47,6 +59,11 @@ export interface QualityEventView {
     skipped_cross_user?: number;
     skipped_token_budget?: number;
     skipped_memory_total?: number;
+    memory_domain_id?: string;
+    memory_source_kind?: string;
+    memory_source_name?: string;
+    memory_owner_scope?: string;
+    memory_owner_id?: string;
     attachment_count?: number;
     prompt_versions?: string[];
     estimated_tokens?: number;

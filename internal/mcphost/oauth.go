@@ -72,7 +72,7 @@ func (c *OAuthClient) GetAccessToken(ctx context.Context, serverURL string) (str
 	if err == nil && cached != nil {
 		// 检查是否过期（留 30 秒缓冲）
 		if !cached.ExpiresAt.IsZero() && time.Now().After(cached.ExpiresAt.Add(-30*time.Second)) {
-			c.logger.Info("OAuth token 即将过期，尝试刷新", zap.String("server_url", serverURL))
+			c.logger.Info("OAuth token 即将过期，尝试刷新", zap.String("server_url", safeURLForLog(serverURL)))
 
 			// 尝试用 refresh_token 刷新
 			if cached.RefreshToken != "" {

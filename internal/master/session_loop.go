@@ -491,6 +491,7 @@ func (m *Master) restoreSessionFromStore(ctx context.Context, session *SessionSt
 	if record.UserID != "" {
 		session.UserID = record.UserID
 	}
+	session.SelectedModel = record.SelectedModel
 	session.Tags = record.Tags
 	session.Stats.MessageCount = record.MessageCount
 	session.Stats.TotalTokens = record.TotalTokens

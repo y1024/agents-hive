@@ -86,7 +86,7 @@ var (
 		"azure": {
 			Name:         "azure",
 			BaseURL:      "", // Azure 需要自定义 endpoint: https://{resource}.openai.azure.com
-			DefaultModel: "gpt-4o",
+			DefaultModel: "gpt-5",
 			Capabilities: map[Capability]bool{
 				CapVision:    true,
 				CapTools:     true,
@@ -310,8 +310,7 @@ func NewModelMatcher() *ModelMatcher {
 		aliases: map[string]string{
 			// OpenAI
 			"gpt4":        "gpt-4",
-			"gpt-4o":      "gpt-4o-2024-11-20",
-			"gpt4o":       "gpt-4o-2024-11-20",
+			"gpt4o":       "gpt-5-2024-11-20",
 			"gpt4-turbo":  "gpt-4-turbo-preview",
 			"gpt-4-turbo": "gpt-4-turbo-preview",
 			"gpt-3.5":     "gpt-3.5-turbo",
@@ -375,7 +374,19 @@ func NewModelMatcher() *ModelMatcher {
 // Match 模糊匹配模型名
 // 返回匹配的模型名和建议列表
 func (m *ModelMatcher) Match(input string) (matched string, suggestions []string) {
-	input = strings.ToLower(strings.TrimSpace(input))
+	rawInput := strings.TrimSpace(input)
+	input = strings.ToLower(rawInput)
+
+	// 已注册的精确模型名优先于别名映射，避免把用户明确配置的
+	// gpt-5 之类稳定模型 ID 自动改写成其他默认别名。
+	if rawInput != "" {
+		if GetModelMeta(rawInput) != nil {
+			return rawInput, nil
+		}
+		if rawInput != input && GetModelMeta(input) != nil {
+			return input, nil
+		}
+	}
 
 	// 1. 精确匹配别名
 	if model, ok := m.aliases[input]; ok {

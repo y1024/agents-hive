@@ -34,6 +34,7 @@ type ReflectionBlock struct {
 type RouteDecisionOptions struct {
 	ReflectionMode   string
 	ReflectionBlocks []ReflectionBlock
+	UserID           string
 	SessionGranted   []Capability
 	PlanAllowed      []Capability
 	CapabilityDeny   []Capability
@@ -41,13 +42,15 @@ type RouteDecisionOptions struct {
 
 // RouteDecision 是宿主在单轮中产出的工具可见性决策。
 type RouteDecision struct {
-	Intent            IntentFrame                  `json:"intent"`
-	AllowedTools      []string                     `json:"allowed_tools,omitempty"`
-	AllowedToolInputs map[string]map[string]string `json:"allowed_tool_inputs,omitempty"`
-	VisibleOnly       []string                     `json:"visible_only,omitempty"`
-	BlockedTools      []BlockedTool                `json:"blocked_tools,omitempty"`
-	Mode              DecisionMode                 `json:"mode"`
-	Reason            string                       `json:"reason,omitempty"`
+	Intent              IntentFrame                  `json:"intent"`
+	AllowedTools        []string                     `json:"allowed_tools,omitempty"`
+	AllowedCapabilities []CapabilityEntry            `json:"allowed_capabilities,omitempty"`
+	BlockedCapabilities []CapabilityEntry            `json:"blocked_capabilities,omitempty"`
+	AllowedToolInputs   map[string]map[string]string `json:"allowed_tool_inputs,omitempty"`
+	VisibleOnly         []string                     `json:"visible_only,omitempty"`
+	BlockedTools        []BlockedTool                `json:"blocked_tools,omitempty"`
+	Mode                DecisionMode                 `json:"mode"`
+	Reason              string                       `json:"reason,omitempty"`
 }
 
 // BuildRouteDecision 根据结构化意图和 typed profile 产出最小可调用集合。
@@ -78,6 +81,7 @@ func BuildRouteDecisionWithOptions(intent IntentFrame, profiles []ToolProfile, o
 				continue
 			}
 			decision.BlockedTools = append(decision.BlockedTools, BlockedTool{Name: profile.Name, Reason: "intent blocked"})
+			decision.BlockedCapabilities = append(decision.BlockedCapabilities, profile.Entry())
 		}
 		return decision
 	}
@@ -92,6 +96,7 @@ func BuildRouteDecisionWithOptions(intent IntentFrame, profiles []ToolProfile, o
 				continue
 			}
 			decision.BlockedTools = append(decision.BlockedTools, BlockedTool{Name: profile.Name, Reason: "external_send_multi_platform_requires_question"})
+			decision.BlockedCapabilities = append(decision.BlockedCapabilities, profile.Entry())
 		}
 		return decision
 	}
@@ -102,20 +107,17 @@ func BuildRouteDecisionWithOptions(intent IntentFrame, profiles []ToolProfile, o
 		profile = ToolActionProfile(profile, nil)
 		if block, ok := matchingReflectionBlock(profile.Name, opts.ReflectionMode, opts.ReflectionBlocks); ok {
 			decision.BlockedTools = append(decision.BlockedTools, BlockedTool{Name: profile.Name, Reason: reflectionBlockReason(block)})
+			decision.BlockedCapabilities = append(decision.BlockedCapabilities, profile.Entry())
 			continue
 		}
-		if reason := blockReason(intent, profile); reason != "" {
+		if reason := blockReason(intent, profile, opts.UserID); reason != "" {
 			decision.BlockedTools = append(decision.BlockedTools, BlockedTool{Name: profile.Name, Reason: reason})
+			decision.BlockedCapabilities = append(decision.BlockedCapabilities, profile.Entry())
 			continue
 		}
-		if gate := CheckCapabilityGate(CapabilityGateInput{
-			IntentRequired: RequiredCapabilitiesForIntent(intent),
-			ToolGranted:    ToolCapabilitiesFromProfile(profile),
-			SessionGranted: opts.SessionGranted,
-			PlanAllowed:    opts.PlanAllowed,
-			Deny:           opts.CapabilityDeny,
-		}); !gate.Allowed {
+		if gate := routeCapabilityGate(intent, profile, opts); !gate.Allowed {
 			decision.BlockedTools = append(decision.BlockedTools, BlockedTool{Name: profile.Name, Reason: gate.Reason})
+			decision.BlockedCapabilities = append(decision.BlockedCapabilities, profile.Entry())
 			continue
 		}
 		policy := EvaluateToolPolicy(profile, ToolPolicyContext{Intent: intent, ForRoute: true})
@@ -130,10 +132,12 @@ func BuildRouteDecisionWithOptions(intent IntentFrame, profiles []ToolProfile, o
 			if !slices.Contains(decision.AllowedTools, toolName) {
 				decision.AllowedTools = append(decision.AllowedTools, toolName)
 			}
+			decision.AllowedCapabilities = appendUniqueCapabilityEntry(decision.AllowedCapabilities, profile.Entry())
 			decision.Mode = DecisionModeAllow
 			continue
 		}
 		decision.BlockedTools = append(decision.BlockedTools, BlockedTool{Name: profile.Name, Reason: "not callable for intent"})
+		decision.BlockedCapabilities = append(decision.BlockedCapabilities, profile.Entry())
 	}
 	if decision.Mode == DecisionModeAllow {
 		decision.Reason = "matched intent and capability profile"
@@ -144,6 +148,32 @@ func BuildRouteDecisionWithOptions(intent IntentFrame, profiles []ToolProfile, o
 		decision.Reason = "no candidates"
 	}
 	return decision
+}
+
+func routeCapabilityGate(intent IntentFrame, profile ToolProfile, opts RouteDecisionOptions) CapabilityGateResult {
+	ctx := ToolPolicyContext{Intent: intent, ForRoute: true}
+	if capabilityGateDeferredByMissingSideEffectIntent(profile, ctx) {
+		return CapabilityGateResult{Allowed: true}
+	}
+	return CheckCapabilityGate(CapabilityGateInput{
+		IntentRequired: RequiredCapabilitiesForIntent(intent),
+		ToolGranted:    ToolCapabilitiesFromProfile(profile),
+		SessionGranted: opts.SessionGranted,
+		PlanAllowed:    opts.PlanAllowed,
+		Deny:           opts.CapabilityDeny,
+	})
+}
+
+func appendUniqueCapabilityEntry(entries []CapabilityEntry, entry CapabilityEntry) []CapabilityEntry {
+	if entry.Name == "" {
+		return entries
+	}
+	for _, existing := range entries {
+		if existing.Name == entry.Name {
+			return entries
+		}
+	}
+	return append(entries, entry)
 }
 
 func sameToolArgs(left, right map[string]string) bool {
@@ -191,7 +221,10 @@ func isBlockedIntent(kind IntentKind) bool {
 	return kind == IntentUnknown
 }
 
-func blockReason(intent IntentFrame, profile ToolProfile) string {
+func blockReason(intent IntentFrame, profile ToolProfile, userID string) string {
+	if reason := personalVisibilityBlockReason(profile, userID); reason != "" {
+		return reason
+	}
 	if externalSendMixedToolBlockedForIntent(intent, profile) {
 		return "side effect not allowed by intent"
 	}
@@ -205,11 +238,25 @@ func blockReason(intent IntentFrame, profile ToolProfile) string {
 	if policy.Action == ToolPolicyDeny {
 		return blockReasonForPolicyDecision(policy)
 	}
+	if policy.Action == ToolPolicyAsk && (policy.RouteStatus == ToolRouteBlockedDangerous || policy.RouteStatus == ToolRouteBlockedUnknown) {
+		return blockReasonForPolicyDecision(policy)
+	}
 	if isDiscoveryOnlyProfile(profile) {
 		return "discovery only"
 	}
 	if policy.RequiresSideEffectIntent && !policy.CallableNow && profile.SideEffect {
 		return "side effect not allowed by intent"
+	}
+	return ""
+}
+
+func personalVisibilityBlockReason(profile ToolProfile, userID string) string {
+	if strings.TrimSpace(profile.Visibility) != "personal" && strings.TrimSpace(profile.OwnerUserID) == "" {
+		return ""
+	}
+	owner := strings.TrimSpace(profile.OwnerUserID)
+	if owner == "" || strings.TrimSpace(userID) != owner {
+		return "personal skill not visible"
 	}
 	return ""
 }

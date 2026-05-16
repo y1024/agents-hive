@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"go.uber.org/zap"
 
+	"github.com/chef-guo/agents-hive/internal/security"
 	"github.com/chef-guo/agents-hive/internal/store"
 )
 
@@ -90,6 +92,38 @@ func TestLLM_ListProviders_MaskAPIKey(t *testing.T) {
 	}
 }
 
+func TestLLM_ListProviders_RedactsConfigJSONSecrets(t *testing.T) {
+	handler, st := newTestServerForLLM(t)
+	ctx := t.Context()
+
+	_ = st.SaveLLMProvider(ctx, &store.LLMProviderRecord{
+		Name: "openai-1", ProviderType: "openai", APIKey: "sk-1234567890abcdef",
+		Enabled: true, APIFormat: "chat", ServiceType: "llm",
+		ConfigJSON: `{"reasoning_effort":"high","nested":{"api_key":"raw-config-key"},"message":"client_secret=raw-inline-secret"}`,
+	})
+
+	rec := doJSON(t, handler, "GET", "/api/v1/admin/llm/providers", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("期望 200，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Providers []map[string]any `json:"providers"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	cfg := resp.Providers[0]["config_json"].(string)
+	for _, leaked := range []string{"raw-config-key", "raw-inline-secret"} {
+		if strings.Contains(cfg, leaked) {
+			t.Fatalf("provider config_json 泄露敏感值 %q: %s", leaked, cfg)
+		}
+	}
+	if !strings.Contains(cfg, security.RedactedValue) || !strings.Contains(cfg, `"reasoning_effort":"high"`) {
+		t.Fatalf("provider config_json 脱敏结果异常: %s", cfg)
+	}
+}
+
 // ── Test 2: Create 重复名返回 409 ──────────────────────────────────────────
 
 func TestLLM_CreateProvider_DuplicateReturns409(t *testing.T) {
@@ -129,6 +163,139 @@ func TestLLM_UpdateProvider_MaskedKeyNotOverwritten(t *testing.T) {
 	p, _ := st.GetLLMProvider(ctx, "p1")
 	if p.APIKey != "original-secret-key" {
 		t.Errorf("api_key 被 **** 覆盖，期望保留原值，得到: %s", p.APIKey)
+	}
+}
+
+func TestLLM_UpdateProvider_MaskedLongKeyNotOverwritten(t *testing.T) {
+	handler, st := newTestServerForLLM(t)
+	ctx := t.Context()
+
+	_ = st.SaveLLMProvider(ctx, &store.LLMProviderRecord{
+		Name: "p1", ProviderType: "openai", APIKey: "sk-original-secret",
+		Enabled: true, APIFormat: "chat", ServiceType: "llm", ConfigJSON: "{}",
+	})
+
+	body := map[string]any{"api_key": "sk-x****fFiE"}
+	rec := doJSON(t, handler, "PATCH", "/api/v1/admin/llm/providers/p1", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("更新应成功，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+
+	p, _ := st.GetLLMProvider(ctx, "p1")
+	if p.APIKey != "sk-original-secret" {
+		t.Fatalf("api_key 被脱敏值覆盖，得到: %s", p.APIKey)
+	}
+}
+
+func TestLLM_UpdateProvider_PreservesMaskedConfigJSONSecrets(t *testing.T) {
+	handler, st := newTestServerForLLM(t)
+	ctx := t.Context()
+
+	_ = st.SaveLLMProvider(ctx, &store.LLMProviderRecord{
+		Name: "p1", ProviderType: "openai", APIKey: "sk-original-secret",
+		Enabled: true, APIFormat: "chat", ServiceType: "llm",
+		ConfigJSON: `{"reasoning_effort":"low","nested":{"api_key":"real-config-key"},"plain":"old"}`,
+	})
+
+	body := map[string]any{
+		"config_json": `{"reasoning_effort":"high","nested":{"api_key":"[REDACTED]"},"plain":"new"}`,
+	}
+	rec := doJSON(t, handler, "PATCH", "/api/v1/admin/llm/providers/p1", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("更新应成功，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+
+	p, _ := st.GetLLMProvider(ctx, "p1")
+	for _, bad := range []string{security.RedactedValue, "****"} {
+		if strings.Contains(p.ConfigJSON, bad) {
+			t.Fatalf("脱敏占位被写入 provider config_json: %s", p.ConfigJSON)
+		}
+	}
+	if !strings.Contains(p.ConfigJSON, `"api_key":"real-config-key"`) ||
+		!strings.Contains(p.ConfigJSON, `"reasoning_effort":"high"`) ||
+		!strings.Contains(p.ConfigJSON, `"plain":"new"`) {
+		t.Fatalf("provider config_json 未正确保留真实 secret 并更新普通字段: %s", p.ConfigJSON)
+	}
+}
+
+func TestLLM_UpdateProvider_PreservesInlineRedactedConfigJSONValues(t *testing.T) {
+	handler, st := newTestServerForLLM(t)
+	ctx := t.Context()
+
+	_ = st.SaveLLMProvider(ctx, &store.LLMProviderRecord{
+		Name: "p1", ProviderType: "openai", APIKey: "sk-original-secret",
+		Enabled: true, APIFormat: "chat", ServiceType: "llm",
+		ConfigJSON: `{"callback_url":"https://callback.example.com/hook?token=real-token","plain":"old"}`,
+	})
+
+	rec := doJSON(t, handler, "PATCH", "/api/v1/admin/llm/providers/p1", map[string]any{
+		"config_json": `{"callback_url":"https://callback.example.com/hook?token=[REDACTED]","plain":"new"}`,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("更新应成功，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+
+	p, _ := st.GetLLMProvider(ctx, "p1")
+	if strings.Contains(p.ConfigJSON, security.RedactedValue) {
+		t.Fatalf("内联脱敏占位被写入 provider config_json: %s", p.ConfigJSON)
+	}
+	if !strings.Contains(p.ConfigJSON, `"callback_url":"https://callback.example.com/hook?token=real-token"`) ||
+		!strings.Contains(p.ConfigJSON, `"plain":"new"`) {
+		t.Fatalf("provider config_json 未正确保留内联脱敏真实值: %s", p.ConfigJSON)
+	}
+}
+
+func TestLLM_CreateProvider_RejectsInvalidConfigJSON(t *testing.T) {
+	handler, _ := newTestServerForLLM(t)
+
+	rec := doJSON(t, handler, "POST", "/api/v1/admin/llm/providers", map[string]any{
+		"name":          "bad-config",
+		"provider_type": "openai",
+		"config_json":   `{"api_key":`,
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("非法 config_json 应返回 400，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestLLM_UpdateProvider_RejectsInvalidConfigJSON(t *testing.T) {
+	handler, st := newTestServerForLLM(t)
+	ctx := t.Context()
+
+	_ = st.SaveLLMProvider(ctx, &store.LLMProviderRecord{
+		Name: "p1", ProviderType: "openai", APIKey: "sk-original-secret",
+		Enabled: true, APIFormat: "chat", ServiceType: "llm", ConfigJSON: `{"safe":true}`,
+	})
+
+	rec := doJSON(t, handler, "PATCH", "/api/v1/admin/llm/providers/p1", map[string]any{
+		"config_json": `{"api_key":`,
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("非法 config_json 应返回 400，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+	p, _ := st.GetLLMProvider(ctx, "p1")
+	if p.ConfigJSON != `{"safe":true}` {
+		t.Fatalf("非法 config_json 不应覆盖原值，得到: %s", p.ConfigJSON)
+	}
+}
+
+func TestLLM_UpdateProvider_RejectsInvalidBaseURL(t *testing.T) {
+	handler, st := newTestServerForLLM(t)
+	ctx := t.Context()
+
+	_ = st.SaveLLMProvider(ctx, &store.LLMProviderRecord{
+		Name: "p1", ProviderType: "openai", APIKey: "sk-original-secret",
+		BaseURL: "https://api.example.com", Enabled: true, APIFormat: "chat", ServiceType: "llm", ConfigJSON: "{}",
+	})
+
+	rec := doJSON(t, handler, "PATCH", "/api/v1/admin/llm/providers/p1", map[string]any{"base_url": "xiyun"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("非法 base_url 应返回 400，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+
+	p, _ := st.GetLLMProvider(ctx, "p1")
+	if p.BaseURL != "https://api.example.com" {
+		t.Fatalf("非法 base_url 不应写入，得到: %s", p.BaseURL)
 	}
 }
 
@@ -173,7 +340,7 @@ func TestLLM_DeleteProvider_CascadesModels(t *testing.T) {
 		Enabled: true, APIFormat: "chat", ServiceType: "llm", ConfigJSON: "{}",
 	})
 	_ = st.SaveLLMModel(ctx, &store.LLMModelRecord{
-		Name: "gpt4", ProviderName: "openai", Model: "gpt-4o", ConfigJSON: "{}",
+		Name: "gpt4", ProviderName: "openai", Model: "gpt-5", ConfigJSON: "{}",
 	})
 
 	rec := doJSON(t, handler, "DELETE", "/api/v1/admin/llm/providers/openai", nil)
@@ -207,7 +374,7 @@ func TestLLM_UpdateProvider_NotFoundReturns404(t *testing.T) {
 func TestLLM_CreateModel_DuplicateReturns409(t *testing.T) {
 	handler, _ := newTestServerForLLM(t)
 
-	body := map[string]any{"name": "m1", "model": "gpt-4o"}
+	body := map[string]any{"name": "m1", "model": "gpt-5"}
 	rec := doJSON(t, handler, "POST", "/api/v1/admin/llm/models", body)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("第一次创建应成功，得到 %d", rec.Code)
@@ -226,7 +393,7 @@ func TestLLM_UpdateModel_MaskedKeyNotOverwritten(t *testing.T) {
 	ctx := t.Context()
 
 	_ = st.SaveLLMModel(ctx, &store.LLMModelRecord{
-		Name: "m1", ProviderName: "p1", Model: "gpt-4o",
+		Name: "m1", ProviderName: "p1", Model: "gpt-5",
 		APIKey: "model-secret", ConfigJSON: "{}",
 	})
 
@@ -239,6 +406,208 @@ func TestLLM_UpdateModel_MaskedKeyNotOverwritten(t *testing.T) {
 	m, _ := st.GetLLMModel(ctx, "m1")
 	if m.APIKey != "model-secret" {
 		t.Errorf("api_key 被 **** 覆盖，期望保留原值，得到: %s", m.APIKey)
+	}
+}
+
+func TestLLM_UpdateModel_MaskedLongKeyNotOverwritten(t *testing.T) {
+	handler, st := newTestServerForLLM(t)
+	ctx := t.Context()
+
+	_ = st.SaveLLMModel(ctx, &store.LLMModelRecord{
+		Name: "m1", ProviderName: "p1", Model: "gpt-5",
+		APIKey: "model-secret", ConfigJSON: "{}",
+	})
+
+	rec := doJSON(t, handler, "PATCH", "/api/v1/admin/llm/models/m1", map[string]any{"api_key": "sk-x****fFiE"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("更新应成功，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+
+	m, _ := st.GetLLMModel(ctx, "m1")
+	if m.APIKey != "model-secret" {
+		t.Fatalf("api_key 被脱敏值覆盖，得到: %s", m.APIKey)
+	}
+}
+
+func TestLLM_UpdateModel_EmptyKeyClearsInvalidStoredOverride(t *testing.T) {
+	handler, st := newTestServerForLLM(t)
+	ctx := t.Context()
+
+	_ = st.SaveLLMModel(ctx, &store.LLMModelRecord{
+		Name: "m1", ProviderName: "p1", Model: "gpt-5",
+		APIKey: "xiyun", ConfigJSON: "{}",
+	})
+
+	rec := doJSON(t, handler, "PATCH", "/api/v1/admin/llm/models/m1", map[string]any{"api_key": ""})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("更新应成功，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+
+	m, _ := st.GetLLMModel(ctx, "m1")
+	if m.APIKey != "" {
+		t.Fatalf("无效 model 级 api_key 应被清空以继承 provider，得到: %s", m.APIKey)
+	}
+}
+
+func TestLLM_UpdateModel_RejectsInvalidBaseURL(t *testing.T) {
+	handler, st := newTestServerForLLM(t)
+	ctx := t.Context()
+
+	_ = st.SaveLLMModel(ctx, &store.LLMModelRecord{
+		Name: "m1", ProviderName: "p1", Model: "gpt-5",
+		BaseURL: "https://api.example.com", ConfigJSON: "{}",
+	})
+
+	rec := doJSON(t, handler, "PATCH", "/api/v1/admin/llm/models/m1", map[string]any{"base_url": "xiyun"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("非法 base_url 应返回 400，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+
+	m, _ := st.GetLLMModel(ctx, "m1")
+	if m.BaseURL != "https://api.example.com" {
+		t.Fatalf("非法 base_url 不应写入，得到: %s", m.BaseURL)
+	}
+}
+
+func TestLLM_ListModels_MasksAPIKey(t *testing.T) {
+	handler, st := newTestServerForLLM(t)
+	ctx := t.Context()
+
+	_ = st.SaveLLMModel(ctx, &store.LLMModelRecord{
+		Name: "m1", ProviderName: "p1", Model: "gpt-5",
+		APIKey: "sk-1234567890abcdef", ConfigJSON: "{}",
+	})
+
+	rec := doJSON(t, handler, "GET", "/api/v1/admin/llm/models", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("期望 200，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	key := resp.Models[0]["api_key"].(string)
+	if key == "sk-1234567890abcdef" || key != "sk-1****cdef" {
+		t.Fatalf("model api_key 未正确脱敏，得到: %s", key)
+	}
+}
+
+func TestLLM_ListModels_RedactsConfigJSONSecrets(t *testing.T) {
+	handler, st := newTestServerForLLM(t)
+	ctx := t.Context()
+
+	_ = st.SaveLLMModel(ctx, &store.LLMModelRecord{
+		Name: "m1", ProviderName: "p1", Model: "gpt-5",
+		APIKey:     "sk-1234567890abcdef",
+		ConfigJSON: `{"interactive_service_tier":"priority","headers":{"authorization":"Bearer raw-token"}}`,
+	})
+
+	rec := doJSON(t, handler, "GET", "/api/v1/admin/llm/models", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("期望 200，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	cfg := resp.Models[0]["config_json"].(string)
+	if strings.Contains(cfg, "raw-token") {
+		t.Fatalf("model config_json 泄露敏感值: %s", cfg)
+	}
+	if !strings.Contains(cfg, security.RedactedValue) || !strings.Contains(cfg, `"interactive_service_tier":"priority"`) {
+		t.Fatalf("model config_json 脱敏结果异常: %s", cfg)
+	}
+}
+
+func TestLLM_UpdateModel_PreservesMaskedConfigJSONSecrets(t *testing.T) {
+	handler, st := newTestServerForLLM(t)
+	ctx := t.Context()
+
+	_ = st.SaveLLMModel(ctx, &store.LLMModelRecord{
+		Name: "m1", ProviderName: "p1", Model: "gpt-5",
+		ConfigJSON: `{"headers":{"authorization":"Bearer real-token"},"cost_tier":2}`,
+	})
+
+	rec := doJSON(t, handler, "PATCH", "/api/v1/admin/llm/models/m1", map[string]any{
+		"config_json": `{"headers":{"authorization":"[REDACTED]"},"cost_tier":3}`,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("更新应成功，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+
+	m, _ := st.GetLLMModel(ctx, "m1")
+	if strings.Contains(m.ConfigJSON, security.RedactedValue) || strings.Contains(m.ConfigJSON, "****") {
+		t.Fatalf("脱敏占位被写入 model config_json: %s", m.ConfigJSON)
+	}
+	if !strings.Contains(m.ConfigJSON, `"authorization":"Bearer real-token"`) ||
+		!strings.Contains(m.ConfigJSON, `"cost_tier":3`) {
+		t.Fatalf("model config_json 未正确保留真实 secret 并更新普通字段: %s", m.ConfigJSON)
+	}
+}
+
+func TestLLM_UpdateModel_PreservesInlineRedactedConfigJSONValues(t *testing.T) {
+	handler, st := newTestServerForLLM(t)
+	ctx := t.Context()
+
+	_ = st.SaveLLMModel(ctx, &store.LLMModelRecord{
+		Name:       "m1",
+		Model:      "gpt-5",
+		ConfigJSON: `{"proxy_url":"https://proxy.example.com?client_secret=real-secret","cost_tier":2}`,
+	})
+
+	rec := doJSON(t, handler, "PATCH", "/api/v1/admin/llm/models/m1", map[string]any{
+		"config_json": `{"proxy_url":"https://proxy.example.com?client_secret=[REDACTED]","cost_tier":3}`,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("更新应成功，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+
+	m, _ := st.GetLLMModel(ctx, "m1")
+	if strings.Contains(m.ConfigJSON, security.RedactedValue) {
+		t.Fatalf("内联脱敏占位被写入 model config_json: %s", m.ConfigJSON)
+	}
+	if !strings.Contains(m.ConfigJSON, `"proxy_url":"https://proxy.example.com?client_secret=real-secret"`) ||
+		!strings.Contains(m.ConfigJSON, `"cost_tier":3`) {
+		t.Fatalf("model config_json 未正确保留内联脱敏真实值: %s", m.ConfigJSON)
+	}
+}
+
+func TestLLM_CreateModel_RejectsInvalidConfigJSON(t *testing.T) {
+	handler, _ := newTestServerForLLM(t)
+
+	rec := doJSON(t, handler, "POST", "/api/v1/admin/llm/models", map[string]any{
+		"name":        "bad-config",
+		"model":       "gpt-5",
+		"config_json": `{"api_key":`,
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("非法 config_json 应返回 400，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestLLM_UpdateModel_RejectsInvalidConfigJSON(t *testing.T) {
+	handler, st := newTestServerForLLM(t)
+	ctx := t.Context()
+
+	_ = st.SaveLLMModel(ctx, &store.LLMModelRecord{
+		Name: "m1", ProviderName: "p1", Model: "gpt-5", ConfigJSON: `{"safe":true}`,
+	})
+
+	rec := doJSON(t, handler, "PATCH", "/api/v1/admin/llm/models/m1", map[string]any{
+		"config_json": `{"api_key":`,
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("非法 config_json 应返回 400，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+	m, _ := st.GetLLMModel(ctx, "m1")
+	if m.ConfigJSON != `{"safe":true}` {
+		t.Fatalf("非法 config_json 不应覆盖原值，得到: %s", m.ConfigJSON)
 	}
 }
 
@@ -281,7 +650,7 @@ func TestLLM_UpdateModel_RenameAndSetDefaultClearsOthers(t *testing.T) {
 	ctx := t.Context()
 
 	_ = st.SaveLLMModel(ctx, &store.LLMModelRecord{
-		Name: "old-default", ProviderName: "openai", Model: "gpt-4o",
+		Name: "old-default", ProviderName: "openai", Model: "gpt-5",
 		IsDefault: true, ConfigJSON: "{}",
 	})
 	_ = st.SaveLLMModel(ctx, &store.LLMModelRecord{

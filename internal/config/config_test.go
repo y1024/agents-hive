@@ -1362,8 +1362,8 @@ func TestProviderResolve_Azure(t *testing.T) {
 	if cfg.LLM.BaseURL != "" {
 		t.Errorf("BaseURL = %q, want empty (Azure requires custom endpoint)", cfg.LLM.BaseURL)
 	}
-	if cfg.LLM.Model != "gpt-4o" {
-		t.Errorf("Model = %q, want %q", cfg.LLM.Model, "gpt-4o")
+	if cfg.LLM.Model != "gpt-5" {
+		t.Errorf("Model = %q, want %q", cfg.LLM.Model, "gpt-5")
 	}
 }
 

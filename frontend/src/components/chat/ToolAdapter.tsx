@@ -9,6 +9,7 @@ import { isTodoWriteTool, parseTodoToolSnapshot } from './todoToolSnapshot';
 
 type HiveStatus = 'running' | 'success' | 'error';
 type AiToolState =
+  | 'approval-requested'
   | 'input-streaming'
   | 'input-available'
   | 'output-available'
@@ -30,6 +31,8 @@ interface ToolAdapterProps {
   args: string;
   result?: string;
   hasError: boolean;
+  recoverable?: boolean;
+  errorKind?: string;
 }
 
 /**
@@ -41,15 +44,21 @@ interface ToolAdapterProps {
  *   - running / error 态默认展开（用户需要看到调用上下文 / 错误详情）
  *   - success 态默认折叠（完成后收起省空间，点开查看输入输出）
  */
-export function ToolAdapter({ id, name, args, result, hasError }: ToolAdapterProps) {
+export function ToolAdapter({ id, name, args, result, hasError, recoverable, errorKind }: ToolAdapterProps) {
   const { t } = useTranslation();
   const liveStatus = useChatStore((s) => s.toolCallStatuses?.[id]);
+  const isRecoverable = recoverable || liveStatus?.recoverable === true;
+  const resolvedErrorKind = liveStatus?.error_kind || errorKind;
 
   const resolvedStatus: HiveStatus = hasError
     ? 'error'
     : liveStatus?.status ?? 'success';
 
-  const aiState = HIVE_TO_AI[resolvedStatus];
+  const aiState: AiToolState = isRecoverable && resolvedStatus === 'error'
+    ? resolvedErrorKind?.startsWith('approval_')
+      ? 'approval-requested'
+      : 'input-available'
+    : HIVE_TO_AI[resolvedStatus];
   const isRunning = resolvedStatus === 'running';
   const displayName = getToolDisplayName(name, t);
 
@@ -70,6 +79,8 @@ export function ToolAdapter({ id, name, args, result, hasError }: ToolAdapterPro
             args={args}
             result={result}
             status={resolvedStatus}
+            recoverable={isRecoverable}
+            errorKind={resolvedErrorKind}
           />
         )}
       </ToolContent>

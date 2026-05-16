@@ -139,6 +139,9 @@ func (s *InMemoryOptimizationSuggestionStore) RejectSuggestion(ctx context.Conte
 
 func (s *InMemoryOptimizationSuggestionStore) MarkSuggestionApplied(ctx context.Context, id string, appliedBy string, now time.Time) (*OptimizationReviewSuggestion, error) {
 	return s.transitionSuggestion(ctx, id, func(row OptimizationReviewSuggestion) (OptimizationReviewSuggestion, error) {
+		if err := row.ValidateApprovalEvidence(); err != nil {
+			return row, err
+		}
 		return row.MarkApplied(appliedBy, now), nil
 	})
 }

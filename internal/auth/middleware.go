@@ -53,6 +53,18 @@ func AuthMiddleware(engine *Engine) func(http.Handler) http.Handler {
 			// auth 已启用：先标记，后续所有分支（含公开路径）都携带此标记
 			ctx := WithAuthEnabled(r.Context())
 
+			// Gateway RPC 需要同时支持 WebUI JWT 和 gateway.tokens 机器令牌。
+			// 这里不直接拒绝无效/缺失 JWT，而是尽力注入 WebUI 用户后交给 Gateway 自己做 scope 判定；
+			// 否则生产开启 auth 后，机器令牌会在到达 Gateway 前被误判为无效 JWT。
+			if isGatewayRPCPath(cleanPath) {
+				if user, claims, ok := authenticateBearerUser(r, engine); ok {
+					ctx = WithUser(ctx, user)
+					ctx = WithClaims(ctx, claims)
+				}
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+
 			// 公开路径放行：带尾斜杠用前缀匹配，不带尾斜杠用精确匹配
 			if publicExactPaths[cleanPath] {
 				next.ServeHTTP(w, r.WithContext(ctx))
@@ -79,22 +91,9 @@ func AuthMiddleware(engine *Engine) func(http.Handler) http.Handler {
 			}
 
 			// 提取 Bearer token
-			authHeader := r.Header.Get("Authorization")
-			if !strings.HasPrefix(authHeader, "Bearer ") {
+			user, claims, ok := authenticateBearerUser(r, engine)
+			if !ok {
 				http.Error(w, `{"error":"未授权","code":"unauthorized"}`, http.StatusUnauthorized)
-				return
-			}
-			tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
-
-			claims, err := engine.JWT().Verify(tokenStr)
-			if err != nil {
-				http.Error(w, `{"error":"token 无效","code":"unauthorized"}`, http.StatusUnauthorized)
-				return
-			}
-
-			user, err := engine.GetUserByIDCached(r.Context(), claims.Subject)
-			if err != nil || user == nil {
-				http.Error(w, `{"error":"用户不存在","code":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
 			if user.Status != "active" {
@@ -107,6 +106,29 @@ func AuthMiddleware(engine *Engine) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+func isGatewayRPCPath(cleanPath string) bool {
+	return cleanPath == "/api/v1/rpc" || cleanPath == "/api/v1/rpc/ws"
+}
+
+func authenticateBearerUser(r *http.Request, engine *Engine) (*User, *Claims, bool) {
+	authHeader := r.Header.Get("Authorization")
+	if !strings.HasPrefix(authHeader, "Bearer ") {
+		return nil, nil, false
+	}
+	tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+
+	claims, err := engine.JWT().Verify(tokenStr)
+	if err != nil {
+		return nil, nil, false
+	}
+
+	user, err := engine.GetUserByIDCached(r.Context(), claims.Subject)
+	if err != nil || user == nil {
+		return nil, nil, false
+	}
+	return user, claims, true
 }
 
 // AdminOnly 仅允许 admin 角色访问

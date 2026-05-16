@@ -13,6 +13,7 @@ import (
 	"github.com/chef-guo/agents-hive/internal/mcphost"
 	"github.com/chef-guo/agents-hive/internal/router"
 	"github.com/chef-guo/agents-hive/internal/skills"
+	"github.com/chef-guo/agents-hive/internal/toolruntime"
 	"github.com/chef-guo/agents-hive/internal/tools"
 )
 
@@ -98,7 +99,11 @@ func modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntentWithOptio
 		return nil, toolRecallObservation{Mode: config.NormalizeToolRecallConfig(recallCfg).Mode}
 	}
 	catalog = stableToolDefinitions(catalog)
-	recallSet, obs := perTurnRecalledToolSetWithIntent(session, catalog, skillMetas, latestUserQuery, recallCfg, intent)
+	userID := ""
+	if session != nil {
+		userID = session.UserID
+	}
+	recallSet, obs := perTurnRecalledToolSetWithIntent(session, catalog, skillMetas, latestUserQuery, recallCfg, intent, userID)
 	out := make([]mcphost.ToolDefinition, 0, len(catalog))
 	for _, tool := range catalog {
 		baselineVisible := isDefaultVisibleToolWithOptions(tool, opts)
@@ -122,6 +127,7 @@ func modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntentWithOptio
 	}
 	obs.Entries = buildAdmissionEntries(session, catalog, out, obs.RouteDecision)
 	if session != nil {
+		session.SetRouteDecision(obs.RouteDecision)
 		session.SetAllowedTools(allowedToolsForRuntime(obs.RouteDecision, out))
 		session.SetAllowedToolInputs(mergeAllowedToolInputsWithMixedReadDefaults(obs.RouteDecision.AllowedToolInputs, out))
 	}
@@ -238,8 +244,12 @@ func perTurnRecalledToolSet(session *SessionState, catalog []mcphost.ToolDefinit
 	return perTurnRecalledToolSetWithIntent(session, catalog, skillMetas, latestUserQuery, recallCfg, inferRouteIntent(latestUserQuery))
 }
 
-func perTurnRecalledToolSetWithIntent(session *SessionState, catalog []mcphost.ToolDefinition, skillMetas []skills.SkillMetadata, latestUserQuery string, recallCfg config.ToolRecallConfig, intent router.IntentFrame) (map[string]bool, toolRecallObservation) {
+func perTurnRecalledToolSetWithIntent(session *SessionState, catalog []mcphost.ToolDefinition, skillMetas []skills.SkillMetadata, latestUserQuery string, recallCfg config.ToolRecallConfig, intent router.IntentFrame, userID ...string) (map[string]bool, toolRecallObservation) {
 	recallCfg = config.NormalizeToolRecallConfig(recallCfg)
+	routeUserID := ""
+	if len(userID) > 0 {
+		routeUserID = userID[0]
+	}
 	obs := toolRecallObservation{
 		Mode:               recallCfg.Mode,
 		QueryPreview:       truncateRunes(strings.TrimSpace(latestUserQuery), 80),
@@ -259,13 +269,21 @@ func perTurnRecalledToolSetWithIntent(session *SessionState, catalog []mcphost.T
 	if len(recalls) == 0 {
 		profiles := recalledToolProfiles(nil, skillMetas)
 		obs.CandidateProfiles = profiles
-		obs.RouteDecision = router.BuildRouteDecisionWithBlocks(normalizeRouteIntent(intent), profiles, "exec", sessionReflectionBlocks(session))
+		obs.RouteDecision = router.BuildRouteDecisionWithOptions(normalizeRouteIntent(intent), profiles, router.RouteDecisionOptions{
+			ReflectionMode:   "exec",
+			ReflectionBlocks: sessionReflectionBlocks(session),
+			UserID:           routeUserID,
+		})
 		return nil, obs
 	}
 	intent = normalizeRouteIntent(intent)
 	profiles := recalledToolProfiles(recalls, skillMetas)
 	obs.CandidateProfiles = profiles
-	decision := router.BuildRouteDecisionWithBlocks(intent, profiles, "exec", sessionReflectionBlocks(session))
+	decision := router.BuildRouteDecisionWithOptions(intent, profiles, router.RouteDecisionOptions{
+		ReflectionMode:   "exec",
+		ReflectionBlocks: sessionReflectionBlocks(session),
+		UserID:           routeUserID,
+	})
 	obs.RouteDecision = decision
 	allowed := stringSet(decision.AllowedTools)
 	profilesByName := toolProfileByName(profiles)
@@ -325,7 +343,7 @@ func ensureExternalSendCandidates(recalls []tools.ToolRecallHit, catalog []mcpho
 		if name == "" || seen[name] {
 			continue
 		}
-		if !profileSupportsExternalSend(router.InferToolProfile(tool, router.ProfileHint{})) {
+		if !profileSupportsExternalSend(toolruntime.DescriptorFromDefinition(tool).Profile) {
 			continue
 		}
 		recalls = append(recalls, tools.ToolRecallHit{Tool: tool, Score: score})
@@ -383,7 +401,7 @@ func ensureUnifiedIMCandidates(recalls []tools.ToolRecallHit, catalog []mcphost.
 func pruneExternalSendToolsForQuestion(recalls []tools.ToolRecallHit) []tools.ToolRecallHit {
 	out := recalls[:0]
 	for _, recall := range recalls {
-		profile := router.InferToolProfile(recall.Tool, router.ProfileHint{})
+		profile := toolruntime.DescriptorFromDefinition(recall.Tool).Profile
 		if profileSupportsExternalSend(profile) {
 			continue
 		}
@@ -489,8 +507,9 @@ func buildAdmissionEntries(session *SessionState, catalog []mcphost.ToolDefiniti
 			continue
 		}
 		planDecision := EvaluatePlanToolGate(context.Background(), session, name)
-		profile := router.InferToolProfile(tool, router.ProfileHint{})
-		policy := router.EvaluateToolPolicy(profile, router.ToolPolicyContext{ForRoute: true})
+		admission := toolruntime.Admit(toolruntime.DescriptorFromDefinition(tool), router.ToolPolicyContext{ForRoute: true})
+		profile := admission.Descriptor.Profile
+		policy := admission.Policy
 		discoveryOnly := name == "tool_search" || policy.RouteStatus == router.ToolRouteDiscoveryOnly || profile.Invocation == router.InvocationDiscoveryOnly || blockReasons[name] == "discovery only" || blockReasons[name] == "discovery_only"
 		primaryReason := ""
 		switch {
@@ -502,10 +521,6 @@ func buildAdmissionEntries(session *SessionState, catalog []mcphost.ToolDefiniti
 			primaryReason = blockReasons[name]
 		}
 		allowedInputs := defaultRuntimeAllowedInputsForTool(name, decision.AllowedToolInputs[name], callableSet[name])
-		mayRequireApproval := policy.RequiresApproval || policy.Action == router.ToolPolicyDeny
-		if discoveryOnly {
-			mayRequireApproval = policy.RequiresApproval
-		}
 		entries[name] = admissionEntry{
 			Name:                name,
 			SurvivedPolicy:      true,
@@ -513,7 +528,7 @@ func buildAdmissionEntries(session *SessionState, catalog []mcphost.ToolDefiniti
 			ExecutableByRuntime: planDecision.Allowed,
 			TaskCallable:        callableSet[name],
 			DiscoveryOnly:       discoveryOnly,
-			MayRequireApproval:  mayRequireApproval,
+			MayRequireApproval:  policy.MayRequireApproval,
 			AllowedInputs:       allowedInputs,
 			DangerousActions:    router.StructuredDangerousActions(name),
 			PrimaryBlockReason:  primaryReason,
@@ -562,8 +577,8 @@ func allowedToolsForRuntime(decision router.RouteDecision, visible []mcphost.Too
 			allowed[name] = true
 			continue
 		}
-		profile := router.InferToolProfile(tool, router.ProfileHint{})
-		policy := router.EvaluateToolPolicy(profile, router.ToolPolicyContext{ForRoute: true})
+		admission := toolruntime.Admit(toolruntime.DescriptorFromDefinition(tool), router.ToolPolicyContext{ForRoute: true})
+		policy := admission.Policy
 		if policy.Action == router.ToolPolicyAllow && policy.CallableNow {
 			allowed[name] = true
 		}
@@ -750,7 +765,12 @@ func recalledToolProfiles(recalls []tools.ToolRecallHit, skillMetas []skills.Ski
 			continue
 		}
 		seen[name] = true
-		profiles = append(profiles, router.InferToolProfile(recall.Tool, profileHintForVisibilityTool(name)))
+		descriptor := toolruntime.DescriptorFromDefinition(recall.Tool)
+		profile := descriptor.Profile
+		if hint := profileHintForVisibilityTool(name); hint.Kind != "" {
+			profile = router.InferToolProfile(recall.Tool, hint)
+		}
+		profiles = append(profiles, profile)
 	}
 	for _, meta := range skillMetas {
 		name := strings.TrimSpace(meta.Name)
@@ -758,7 +778,12 @@ func recalledToolProfiles(recalls []tools.ToolRecallHit, skillMetas []skills.Ski
 			continue
 		}
 		seen[name] = true
-		profiles = append(profiles, router.InferSkillWorkflowProfile(name, meta.Description))
+		profiles = append(profiles, router.InferSkillWorkflowProfileFromMetadata(router.SkillWorkflowMetadata{
+			Name:        name,
+			Description: meta.Description,
+			Scope:       string(meta.Scope),
+			UserID:      meta.UserID,
+		}))
 	}
 	return profiles
 }

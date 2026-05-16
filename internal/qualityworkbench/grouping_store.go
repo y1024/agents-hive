@@ -88,9 +88,14 @@ func ValidateGroupingRule(rule GroupingRule) error {
 	if len(rule.KeyFields) == 0 {
 		return errors.New("grouping rule key_fields is required")
 	}
+	switch normalizedKeyVersion(rule.KeyVersion) {
+	case "v1", "v2":
+	default:
+		return fmt.Errorf("unsupported grouping key_version %s", rule.KeyVersion)
+	}
 	for _, field := range rule.KeyFields {
 		switch field {
-		case "failure_type", "tool", "skill", "tool_or_skill", "prompt_key", "case_id", "error_digest", "delegation_depth":
+		case "failure_type", "tool", "skill", "tool_or_skill", "prompt_key", "domain_id", "source_kind", "source_name", "case_id", "error_digest", "delegation_depth":
 		default:
 			return fmt.Errorf("unsupported grouping key field %s", field)
 		}
@@ -119,6 +124,7 @@ func sortGroupingRules(rules []GroupingRule) {
 }
 
 func cloneGroupingRule(rule GroupingRule) GroupingRule {
+	rule.KeyVersion = normalizedKeyVersion(rule.KeyVersion)
 	rule.KeyFields = append([]string(nil), rule.KeyFields...)
 	rule.DigestNormalize = append([]string(nil), rule.DigestNormalize...)
 	return rule

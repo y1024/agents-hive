@@ -25,6 +25,9 @@ interface MessagePayload {
   tool_call_id?: string;
   tool_name?: string;
   is_error?: boolean;
+  recoverable?: boolean;
+  terminal?: boolean;
+  error_kind?: string;
 }
 
 interface ToolCallPayload {
@@ -33,6 +36,9 @@ interface ToolCallPayload {
   status: 'start' | 'success' | 'error';
   duration?: number;
   error?: string;
+  recoverable?: boolean;
+  terminal?: boolean;
+  error_kind?: string;
   failure_type?: string;
   requires_user_approval?: boolean;
   suggested_action?: string;
@@ -165,6 +171,9 @@ export function useWebSocket({ url, sessionId, enabled = true, onMessage, client
             tool_call_id: payload.tool_call_id,
             tool_name: payload.tool_name,
             is_error: payload.is_error,
+            recoverable: payload.recoverable,
+            terminal: payload.terminal,
+            error_kind: payload.error_kind,
           };
           if (wasStreaming && fullMsg.role === 'assistant' && streamId) {
             replaceStreamingMessage(fullMsg, streamId);
@@ -237,6 +246,9 @@ export function useWebSocket({ url, sessionId, enabled = true, onMessage, client
           status: tcPayload.status === 'start' ? 'running' : tcPayload.status === 'error' ? 'error' : 'success',
           duration: tcPayload.duration,
           error: tcPayload.error,
+          recoverable: tcPayload.recoverable,
+          terminal: tcPayload.terminal,
+          error_kind: tcPayload.error_kind,
           failure_type: tcPayload.failure_type,
           requires_user_approval: tcPayload.requires_user_approval,
           suggested_action: tcPayload.suggested_action,

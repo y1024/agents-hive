@@ -12,6 +12,7 @@ import (
 
 	"github.com/chef-guo/agents-hive/internal/mcphost"
 	"github.com/chef-guo/agents-hive/internal/router"
+	"github.com/chef-guo/agents-hive/internal/toolruntime"
 )
 
 // toolSearchInput 是 tool_search 的入参。
@@ -26,6 +27,7 @@ type toolSearchHit struct {
 	Description         string   `json:"description,omitempty"`
 	DangerLevel         string   `json:"danger_level"`
 	RequiresApproval    bool     `json:"requires_approval"`
+	MayRequireApproval  bool     `json:"may_require_approval"`
 	DangerousActions    []string `json:"dangerous_actions,omitempty"`
 	ActionField         string   `json:"action_field,omitempty"`
 	ReadOnlyActions     []string `json:"read_only_actions,omitempty"`
@@ -36,6 +38,8 @@ type toolSearchHit struct {
 	Kind                string   `json:"kind"`
 	Domain              string   `json:"domain,omitempty"`
 	Source              string   `json:"source"`
+	Risk                string   `json:"risk"`
+	Visibility          string   `json:"visibility"`
 	Invocation          string   `json:"invocation"`
 	RouteStatus         string   `json:"route_status"`
 	CallableNow         bool     `json:"callable_now"`
@@ -92,14 +96,16 @@ func handleToolSearch(host *mcphost.Host, raw json.RawMessage) (*mcphost.ToolRes
 	hits := make([]toolSearchHit, 0, len(recalls))
 	for _, recall := range recalls {
 		def := recall.Tool
-		profile := router.InferToolProfile(def, router.ProfileHint{})
-		policy := router.EvaluateToolPolicy(profile, toolSearchPolicyContext())
-		kind, domain, source, invocation, routeStatus, callableNow, executionNote := inferToolSearchMetadata(profile, policy, qLower)
+		admission := toolruntime.Admit(toolruntime.DescriptorFromDefinition(def), toolSearchPolicyContext())
+		profile := admission.Descriptor.Profile
+		policy := admission.Policy
+		kind, domain, source, risk, visibility, invocation, routeStatus, callableNow, executionNote := inferToolSearchMetadata(profile, policy, qLower)
 		hits = append(hits, toolSearchHit{
 			Name:                def.Name,
 			Description:         def.Description,
 			DangerLevel:         inferToolDangerLevel(profile),
-			RequiresApproval:    policy.RequiresApproval || policy.Action == router.ToolPolicyDeny,
+			RequiresApproval:    policy.RequiresApproval,
+			MayRequireApproval:  policy.MayRequireApproval,
 			DangerousActions:    router.StructuredDangerousActions(profile.Name),
 			ActionField:         router.MixedActionField(profile.Name),
 			ReadOnlyActions:     router.MixedReadOnlyActions(profile.Name),
@@ -110,6 +116,8 @@ func handleToolSearch(host *mcphost.Host, raw json.RawMessage) (*mcphost.ToolRes
 			Kind:                kind,
 			Domain:              domain,
 			Source:              source,
+			Risk:                risk,
+			Visibility:          visibility,
 			Invocation:          invocation,
 			RouteStatus:         routeStatus,
 			CallableNow:         callableNow,
@@ -154,14 +162,16 @@ func toolSearchPolicyContext() router.ToolPolicyContext {
 	}
 }
 
-func inferToolSearchMetadata(profile router.ToolProfile, policy router.ToolPolicyDecision, queryLower string) (kind, domain, source, invocation, routeStatus string, callableNow bool, executionNote string) {
+func inferToolSearchMetadata(profile router.ToolProfile, policy router.ToolPolicyDecision, queryLower string) (kind, domain, source, risk, visibility, invocation, routeStatus string, callableNow bool, executionNote string) {
 	kind = string(profile.Kind)
 	domain = profile.Domain
 	source = string(profile.Source)
+	risk = string(profile.Risk)
+	visibility = profile.Visibility
 	invocation = string(profile.Invocation)
 	routeStatus, callableNow = inferToolRouteStatus(policy)
 	executionNote = toolSearchExecutionNote(routeStatus, callableNow)
-	return kind, domain, source, invocation, routeStatus, callableNow, executionNote
+	return kind, domain, source, risk, visibility, invocation, routeStatus, callableNow, executionNote
 }
 
 func inferToolRouteStatus(policy router.ToolPolicyDecision) (string, bool) {

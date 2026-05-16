@@ -19,6 +19,7 @@ import (
 	"github.com/chef-guo/agents-hive/internal/journal"
 	"github.com/chef-guo/agents-hive/internal/master"
 	"github.com/chef-guo/agents-hive/internal/store"
+	"github.com/chef-guo/agents-hive/internal/toolruntime"
 )
 
 // Session API 请求/响应类型
@@ -37,13 +38,14 @@ type CreateSessionResponse struct {
 
 // SessionListItem 会话列表项
 type SessionListItem struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name"`
-	MessageCount int       `json:"message_count"`
-	LastAccessed time.Time `json:"last_accessed"`
-	Tags         []string  `json:"tags,omitempty"`
-	IsActive     bool      `json:"is_active"`
-	IsStarred    bool      `json:"is_starred"`
+	ID            string    `json:"id"`
+	Name          string    `json:"name"`
+	MessageCount  int       `json:"message_count"`
+	LastAccessed  time.Time `json:"last_accessed"`
+	SelectedModel string    `json:"selected_model,omitempty"`
+	Tags          []string  `json:"tags,omitempty"`
+	IsActive      bool      `json:"is_active"`
+	IsStarred     bool      `json:"is_starred"`
 }
 
 // SessionListResponse 会话列表响应
@@ -58,6 +60,7 @@ type SessionDetailResponse struct {
 	CreatedAt      string   `json:"created"`
 	UpdatedAt      string   `json:"updated"`
 	LastAccessedAt string   `json:"last_accessed"`
+	SelectedModel  string   `json:"selected_model,omitempty"`
 	MessageCount   int      `json:"message_count"`
 	TotalTokens    int      `json:"total_tokens"`
 	Tags           []string `json:"tags,omitempty"`
@@ -155,13 +158,14 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		lastAccessed, _ := time.Parse(time.RFC3339, session.LastAccessedAt)
 
 		item := SessionListItem{
-			ID:           session.ID,
-			Name:         session.Name,
-			MessageCount: session.MessageCount,
-			LastAccessed: lastAccessed,
-			Tags:         session.Tags,
-			IsActive:     session.ID == activeSessionID,
-			IsStarred:    session.IsStarred,
+			ID:            session.ID,
+			Name:          session.Name,
+			MessageCount:  session.MessageCount,
+			LastAccessed:  lastAccessed,
+			SelectedModel: session.SelectedModel,
+			Tags:          session.Tags,
+			IsActive:      session.ID == activeSessionID,
+			IsStarred:     session.IsStarred,
 		}
 
 		items = append(items, item)
@@ -210,6 +214,7 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:      session.CreatedAt,
 		UpdatedAt:      session.UpdatedAt,
 		LastAccessedAt: session.LastAccessedAt,
+		SelectedModel:  session.SelectedModel,
 		MessageCount:   session.MessageCount,
 		TotalTokens:    session.TotalTokens,
 		Tags:           session.Tags,
@@ -528,7 +533,10 @@ type MessageResponse struct {
 	ToolCallID       string         `json:"tool_call_id,omitempty"`
 	IsError          bool           `json:"is_error,omitempty"`  // 错误标记（tool 消息）
 	ToolName         string         `json:"tool_name,omitempty"` // 工具名称（tool 消息）
-	Usage            *UsageInfo     `json:"usage,omitempty"`     // token 用量（assistant 消息）
+	Recoverable      bool           `json:"recoverable,omitempty"`
+	Terminal         bool           `json:"terminal,omitempty"`
+	ErrorKind        string         `json:"error_kind,omitempty"`
+	Usage            *UsageInfo     `json:"usage,omitempty"` // token 用量（assistant 消息）
 }
 
 // UsageInfo token 用量信息
@@ -612,6 +620,9 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request) {
 		var reasoningContent string
 		var isError bool
 		var toolName string
+		var recoverable bool
+		var terminal bool
+		var errorKind string
 		if metadata != nil {
 			if tc, ok := metadata["tool_calls"]; ok {
 				// tool_calls 可能是 JSON 数组（直接解析）或 JSON 字符串（需要二次解析）
@@ -658,6 +669,22 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request) {
 			if tn, ok := metadata["tool_name"].(string); ok {
 				toolName = tn
 			}
+			if rv, ok := metadata["recoverable"].(bool); ok {
+				recoverable = rv
+			}
+			if tv, ok := metadata["terminal"].(bool); ok {
+				terminal = tv
+			}
+			if ek, ok := metadata["error_kind"].(string); ok {
+				errorKind = ek
+			}
+		}
+		if isError && toolruntime.IsRecoverableToolCallError(msg.Content) {
+			recoverable = true
+			terminal = false
+			if errorKind == "" {
+				errorKind = toolruntime.RecoverableToolCallErrorKind(msg.Content)
+			}
 		}
 
 		// 从 metadata 提取 token 用量（持久化在 metadata JSONB 中）
@@ -687,6 +714,9 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request) {
 			ToolCallID:       toolCallID,
 			IsError:          isError,
 			ToolName:         toolName,
+			Recoverable:      recoverable,
+			Terminal:         terminal,
+			ErrorKind:        errorKind,
 			Usage:            usage,
 		})
 	}

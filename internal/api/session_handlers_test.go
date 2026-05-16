@@ -12,19 +12,27 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/chef-guo/agents-hive/internal/agentquality"
 	"github.com/chef-guo/agents-hive/internal/auth"
 	"github.com/chef-guo/agents-hive/internal/config"
 	"github.com/chef-guo/agents-hive/internal/errs"
+	"github.com/chef-guo/agents-hive/internal/journal"
 	"github.com/chef-guo/agents-hive/internal/master"
 	"github.com/chef-guo/agents-hive/internal/skills"
 	"github.com/chef-guo/agents-hive/internal/store"
 	"github.com/chef-guo/agents-hive/internal/subagent"
+	"github.com/chef-guo/agents-hive/internal/toolruntime"
 )
 
 // newTestServerForSessions creates a test server with session support
 func newTestServerForSessions(t *testing.T) (http.Handler, *master.Master, func()) {
 	t.Helper()
+	handler, m, _, cleanup := newTestServerForSessionsWithStore(t)
+	return handler, m, cleanup
+}
 
+func newTestServerForSessionsWithStore(t *testing.T) (http.Handler, *master.Master, *store.MemoryStore, func()) {
+	t.Helper()
 	logger, _ := zap.NewDevelopment()
 	skillReg := skills.NewOverlayRegistry(logger)
 	agentReg := subagent.NewRegistry(logger)
@@ -62,15 +70,19 @@ func newTestServerForSessions(t *testing.T) (http.Handler, *master.Master, func(
 		config.Default(),
 		"",  // configPath 空字符串用于测试
 		nil, // channelRouter 在这些测试中不需要
-		nil, // store 在这些测试中不需要
+		st,
 		nil, // authEngine 在这些测试中不需要
 		logger,
 	)
+	srv.SetQualityEvalRunner(agentquality.AgentRunEvalRunner{
+		Adapter: master.NewAgentQualityRunAdapter(m),
+	})
+	srv.SetQualityShadowEvalStore(agentquality.NewInMemoryShadowEvalResultStore())
 
 	mux := http.NewServeMux()
 	srv.registerRoutes(mux)
 
-	return mux, m, func() {
+	return mux, m, st, func() {
 		cancel()
 		// 等待 SessionLoop 完成，确保所有后台 goroutine 停止
 		select {
@@ -397,6 +409,53 @@ func TestWebSessionHandlersRejectIMSessions(t *testing.T) {
 	}
 }
 
+func TestHandleGetMessagesPreservesRecoverableToolMetadata(t *testing.T) {
+	handler, _, st, cleanup := newTestServerForSessionsWithStore(t)
+	defer cleanup()
+
+	now := time.Now().Format(time.RFC3339)
+	sessionID := "recoverable-tool-session"
+	if err := st.SaveSession(context.Background(), &store.SessionRecord{
+		ID:             sessionID,
+		Name:           "recoverable tool metadata",
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		LastAccessedAt: now,
+	}); err != nil {
+		t.Fatalf("save session: %v", err)
+	}
+	content := toolruntime.RecoverableToolCallErrorContent("approval_channel_missing", "需要审批")
+	if err := st.AddMessage(context.Background(), sessionID, "tool", content, map[string]any{
+		"tool_call_id": "call-send",
+		"tool_name":    "feishu_api",
+		"is_error":     true,
+		"recoverable":  true,
+		"terminal":     false,
+		"error_kind":   "approval_channel_missing",
+	}); err != nil {
+		t.Fatalf("save message: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+sessionID+"/messages", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp MessagesListResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Messages) != 1 {
+		t.Fatalf("messages = %d, want 1", len(resp.Messages))
+	}
+	msg := resp.Messages[0]
+	if !msg.IsError || !msg.Recoverable || msg.Terminal || msg.ErrorKind != "approval_channel_missing" {
+		t.Fatalf("message metadata = %+v, want recoverable non-terminal approval_channel_missing", msg)
+	}
+}
+
 // --- DELETE SESSION TESTS ---
 
 func TestHandleDeleteSession_Success(t *testing.T) {
@@ -539,6 +598,33 @@ func TestSessionAPI_FullWorkflow(t *testing.T) {
 
 // --- JOURNAL TESTS ---
 
+type testSessionJournal struct {
+	called bool
+}
+
+func (j *testSessionJournal) StartSession(context.Context, string, string) error { return nil }
+func (j *testSessionJournal) LogToolCall(context.Context, journal.ToolCallEntry) error {
+	return nil
+}
+func (j *testSessionJournal) LogFileChange(context.Context, journal.FileChangeEntry) error {
+	return nil
+}
+func (j *testSessionJournal) LogDecision(context.Context, journal.DecisionEntry) error {
+	return nil
+}
+func (j *testSessionJournal) EndSession(context.Context, string, string) error { return nil }
+func (j *testSessionJournal) GetJournal(context.Context, string, int) (*journal.SessionJournal, error) {
+	return nil, nil
+}
+func (j *testSessionJournal) DeleteSession(context.Context, string) error { return nil }
+func (j *testSessionJournal) GetJournalEvents(context.Context, string, int, time.Time) ([]journal.JournalEvent, error) {
+	j.called = true
+	return []journal.JournalEvent{{Type: "decision", Decision: "ok", Timestamp: time.Now()}}, nil
+}
+func (j *testSessionJournal) GetJournalStats(context.Context, []string) (map[string]*journal.JournalStats, error) {
+	return nil, nil
+}
+
 func TestHandleGetSessionJournal_EmptyID(t *testing.T) {
 	handler, _, cleanup := newTestServerForSessions(t)
 	defer cleanup()
@@ -566,6 +652,31 @@ func TestHandleGetSessionJournal_NotFound(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("expected 404, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSessionJournalRejectsCrossOwner(t *testing.T) {
+	handler, m, cleanup := newTestServerForSessions(t)
+	defer cleanup()
+
+	ownerCtx := auth.WithUser(auth.WithAuthEnabled(context.Background()), &auth.User{ID: "owner-1", Role: "user"})
+	sessionID, err := m.CreateSession(ownerCtx, "journal-owner", "direct")
+	if err != nil {
+		t.Fatalf("CreateSession failed: %v", err)
+	}
+	j := &testSessionJournal{}
+	m.SetJournal(j)
+
+	req := httptest.NewRequest("GET", "/api/v1/sessions/"+sessionID+"/journal", nil)
+	req = req.WithContext(auth.WithUser(auth.WithAuthEnabled(req.Context()), &auth.User{ID: "other-1", Role: "user"}))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body: %s", rec.Code, rec.Body.String())
+	}
+	if j.called {
+		t.Fatal("journal must not be queried before ownership passes")
 	}
 }
 

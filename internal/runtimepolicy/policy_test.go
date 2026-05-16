@@ -70,3 +70,11 @@ func TestValidate_RejectsInvalidValues(t *testing.T) {
 		})
 	}
 }
+
+func TestRuntimePolicyDoesNotAuthorizeBusinessDomainTools(t *testing.T) {
+	policy := Default()
+
+	if policy.AuthorizesBusinessDomainTools() {
+		t.Fatal("runtime policy must not authorize business-domain tools")
+	}
+}

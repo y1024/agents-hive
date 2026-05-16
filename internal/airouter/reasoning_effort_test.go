@@ -19,7 +19,7 @@ func TestModelScoreSupportsAutoReasoningEffort(t *testing.T) {
 		{
 			name: "manual config does not imply auto support",
 			model: ModelScore{
-				Model:           "gpt-4o",
+				Model:           "gpt-5",
 				Capabilities:    []string{"tools"},
 				ReasoningEffort: "high",
 			},

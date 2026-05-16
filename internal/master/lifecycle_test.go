@@ -123,19 +123,36 @@ func TestPermissionFn_IM_PolicyAllow(t *testing.T) {
 	}
 }
 
-// TestPermissionFn_IM_PolicyDeny 路径 (b)：IM session + PolicyDeny 命令（rm -rf /）→ Granted:false。
-// invariant: MatchPolicy 必须早于 im- 前缀短路；否则 IM 用户能打穿 rm -rf /。
-func TestPermissionFn_IM_PolicyDeny(t *testing.T) {
+// TestPermissionFn_IM_RootDeletePolicyAsk 路径 (b)：IM session + rm -rf / → HITL 审批。
+// invariant: MatchPolicy 必须早于 im- 前缀短路；否则 IM 用户会绕过审批。
+func TestPermissionFn_IM_RootDeletePolicyAsk(t *testing.T) {
 	m, cancel := setupHITLMaster(t, config.HITLConfig{Enabled: true})
 	defer cancel()
 	defer m.Stop()
 
-	resp, err := callPermissionFn(t, m, "im-user-1", "bash", buildBashInput(t, "rm -rf /"))
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-	if resp.Granted {
-		t.Error("PolicyDeny 命令在 IM 通道必须被拒绝（防 rm -rf / 打穿）")
+	subID, ch := m.SubscribeWSBroadcast()
+	defer m.UnsubscribeWSBroadcast(subID)
+
+	respCh := make(chan skills.PermissionResponse, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		resp, err := callPermissionFn(t, m, "im-user-1", "bash", buildBashInput(t, "rm -rf /"))
+		respCh <- resp
+		errCh <- err
+	}()
+
+	approveNextPermissionRequest(t, m, ch, "im-user-1", "bash")
+
+	select {
+	case resp := <-respCh:
+		if !resp.Granted {
+			t.Error("IM + rm -rf / 经用户批准后必须 Granted=true")
+		}
+		if err := <-errCh; err != nil {
+			t.Errorf("unexpected err: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("IM + rm -rf / 审批后未返回")
 	}
 }
 
@@ -195,18 +212,35 @@ func TestPermissionFn_IM_PolicyAsk(t *testing.T) {
 	}
 }
 
-// TestPermissionFn_NonIM_PolicyDeny 路径 (d)：非 IM session + PolicyDeny → Granted:false。
-func TestPermissionFn_NonIM_PolicyDeny(t *testing.T) {
+// TestPermissionFn_NonIM_MkfsPolicyAsk 路径 (d)：非 IM session + mkfs → HITL 审批。
+func TestPermissionFn_NonIM_MkfsPolicyAsk(t *testing.T) {
 	m, cancel := setupHITLMaster(t, config.HITLConfig{Enabled: true})
 	defer cancel()
 	defer m.Stop()
 
-	resp, err := callPermissionFn(t, m, "web-session-1", "bash", buildBashInput(t, "mkfs.ext4 /dev/sda1"))
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-	if resp.Granted {
-		t.Error("PolicyDeny 命令必须被拒绝，无论会话类型")
+	subID, ch := m.SubscribeWSBroadcast()
+	defer m.UnsubscribeWSBroadcast(subID)
+
+	respCh := make(chan skills.PermissionResponse, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		resp, err := callPermissionFn(t, m, "web-session-1", "bash", buildBashInput(t, "mkfs.ext4 /dev/sda1"))
+		respCh <- resp
+		errCh <- err
+	}()
+
+	approveNextPermissionRequest(t, m, ch, "web-session-1", "bash")
+
+	select {
+	case resp := <-respCh:
+		if !resp.Granted {
+			t.Error("非 IM + mkfs 经用户批准后必须 Granted=true")
+		}
+		if err := <-errCh; err != nil {
+			t.Errorf("unexpected err: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("非 IM + mkfs 审批后未返回")
 	}
 }
 
@@ -426,6 +460,102 @@ func TestPermissionManager_NormalSendIMMessageDoesNotAsk(t *testing.T) {
 		t.Fatalf("send_im_message 普通发送应直接放行: %v", err)
 	}
 	assertNoPermissionBroadcast(t, ch, "send_im_message")
+}
+
+func TestPermissionManager_MinimalUnifiedAllowIgnoresLegacyAskRule(t *testing.T) {
+	m, cancel := setupHITLMaster(t, config.HITLConfig{
+		Enabled: true,
+		PermissionRules: []skills.PermissionRule{
+			{ToolName: "send_im_message", Action: skills.PermissionAsk},
+			{ToolName: "feishu_api", Pattern: "send_message", Action: skills.PermissionAsk},
+		},
+	})
+	defer cancel()
+	defer m.Stop()
+
+	subID, ch := m.SubscribeWSBroadcast()
+	defer m.UnsubscribeWSBroadcast(subID)
+
+	err := callCheckPermission(t, m, "im-legacy-ask-send", "send_im_message", mustJSON(t, map[string]any{
+		"platform": "feishu",
+		"chat_id":  "oc_xxx",
+		"content":  "hello",
+	}))
+	if err != nil {
+		t.Fatalf("minimal 模式下 unified allow 不应被 legacy ask 降级: %v", err)
+	}
+	assertNoPermissionBroadcast(t, ch, "send_im_message")
+
+	err = callCheckPermission(t, m, "im-legacy-ask-feishu", "feishu_api", mustJSON(t, map[string]any{
+		"action":  "send_message",
+		"chat_id": "oc_xxx",
+		"content": "hello",
+	}))
+	if err != nil {
+		t.Fatalf("minimal 模式下 feishu_api.send_message unified allow 不应被 legacy ask 降级: %v", err)
+	}
+	assertNoPermissionBroadcast(t, ch, "feishu_api.send_message")
+}
+
+func TestPermissionManager_MinimalUnifiedAllowIgnoresLegacyDenyRule(t *testing.T) {
+	m, cancel := setupHITLMaster(t, config.HITLConfig{
+		Enabled: true,
+		PermissionRules: []skills.PermissionRule{
+			{ToolName: "send_im_message", Action: skills.PermissionDeny},
+		},
+	})
+	defer cancel()
+	defer m.Stop()
+
+	err := callCheckPermission(t, m, "im-legacy-deny-send", "send_im_message", mustJSON(t, map[string]any{
+		"platform": "feishu",
+		"chat_id":  "oc_xxx",
+		"content":  "hello",
+	}))
+	if err != nil {
+		t.Fatalf("minimal 模式下 unified allow 不应被 legacy deny 降级: %v", err)
+	}
+}
+
+func TestPermissionManager_StrictModeStillUsesLegacyRulesAsRollback(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	skillReg := skills.NewRegistry(logger)
+	agentReg := subagent.NewRegistry(logger)
+	m := NewMaster(Config{
+		Model:                  "test",
+		SecurityPermissionMode: "strict",
+	}, config.HITLConfig{
+		Enabled: true,
+		PermissionRules: []skills.PermissionRule{
+			{ToolName: "send_im_message", Action: skills.PermissionAsk},
+		},
+	}, agentReg, skillReg, nil, logger)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Start(ctx)
+	defer m.Stop()
+
+	subID, ch := m.SubscribeWSBroadcast()
+	defer m.UnsubscribeWSBroadcast(subID)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- callCheckPermission(t, m, "im-strict-send", "send_im_message", mustJSON(t, map[string]any{
+			"platform": "feishu",
+			"chat_id":  "oc_xxx",
+			"content":  "hello",
+		}))
+	}()
+
+	approveNextPermissionRequest(t, m, ch, "im-strict-send", "send_im_message")
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("strict 模式 legacy ask approve 后应放行: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("strict 模式 legacy ask 未触发审批或未返回")
+	}
 }
 
 func TestPermissionManager_StructuredDanger_MemoryDeleteAsksButSearchAllows(t *testing.T) {

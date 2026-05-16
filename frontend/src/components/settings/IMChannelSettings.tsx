@@ -47,10 +47,10 @@ export function IMChannelSettings() {
     try {
       const cfg: RuntimeConfig = await client.getRuntimeConfig();
       if (cfg.channel) {
-        if (cfg.channel.dingtalk) setDingtalk({ ...emptyDingTalk, ...cfg.channel.dingtalk });
-        if (cfg.channel.feishu) setFeishu({ ...emptyFeishu, ...cfg.channel.feishu });
-        if (cfg.channel.wecom) setWecom({ ...emptyWeCom, ...cfg.channel.wecom });
-        setWechatbot({ enabled: cfg.channel.wechatbot?.enabled ?? false });
+        if (cfg.channel.dingtalk) setDingtalk(mergeChannelSecretPlaceholder(emptyDingTalk, cfg.channel.dingtalk));
+        if (cfg.channel.feishu) setFeishu(mergeChannelSecretPlaceholder(emptyFeishu, cfg.channel.feishu));
+        if (cfg.channel.wecom) setWecom(mergeChannelSecretPlaceholder(emptyWeCom, cfg.channel.wecom));
+        setWechatbot({ ...emptyWeChatBot, ...(cfg.channel.wechatbot || {}) });
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : t('runtimeConfig.loadFailed');
@@ -348,6 +348,12 @@ function FieldRow({ label, value, onChange, secret, hint }: {
     </div>
   );
 }
+
+function mergeChannelSecretPlaceholder<T extends object>(empty: T, incoming: Partial<T>): T {
+  const next: T = { ...empty, ...incoming };
+  return next;
+}
+
 
 /** 下拉选择行，形态与 FieldRow 保持一致（label + hint + 控件） */
 function SelectRow({ label, hint, value, options, onChange }: {

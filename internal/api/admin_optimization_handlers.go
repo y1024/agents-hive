@@ -210,6 +210,12 @@ func (s *Server) handleAdminOptimizationCreateApproval(w http.ResponseWriter, r 
 	if reviewer == "" {
 		reviewer = "admin"
 	}
+	if body.SubjectType == agentquality.ApprovalSubjectSuggestion && body.Action == agentquality.ApprovalActionApprove {
+		if err := s.validateSuggestionApprovalSubject(r.Context(), body.SubjectID); err != nil {
+			writeJSON(w, http.StatusPreconditionRequired, ErrorResponse{Error: err.Error(), Code: errs.CodeFailedPrecondition})
+			return
+		}
+	}
 	rec, err := s.optimizationApprovalStoreOrDefault().RecordApproval(r.Context(), agentquality.ApprovalRecord{
 		ID:           fmt.Sprintf("approval_%d", time.Now().UnixNano()),
 		SubjectID:    body.SubjectID,
@@ -224,7 +230,27 @@ func (s *Server) handleAdminOptimizationCreateApproval(w http.ResponseWriter, r 
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error(), Code: errs.CodeInvalidInput})
 		return
 	}
+	candidate, candidateErr := s.createCandidateFromApprovalIfNeeded(r.Context(), *rec)
+	if candidateErr != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: candidateErr.Error(), Code: errs.CodeInternal})
+		return
+	}
+	if candidate != nil {
+		writeJSON(w, http.StatusCreated, map[string]any{"approval": rec, "candidate": candidate})
+		return
+	}
 	writeJSON(w, http.StatusCreated, rec)
+}
+
+func (s *Server) validateSuggestionApprovalSubject(ctx context.Context, id string) error {
+	suggestion, ok, err := s.optimizationSuggestionStore().GetSuggestion(ctx, strings.TrimSpace(id))
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("优化建议不存在")
+	}
+	return suggestion.ValidateApprovalEvidence()
 }
 
 func (s *Server) handleAdminOptimizationEvaluateRollbackAlert(w http.ResponseWriter, r *http.Request) {
@@ -302,7 +328,21 @@ func (s *Server) handleAdminOptimizationApproveSuggestion(w http.ResponseWriter,
 		Note string `json:"note"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	approved, err := s.optimizationSuggestionStore().ApproveSuggestion(r.Context(), id, auth.UserIDFrom(r.Context()), body.Note, time.Now())
+	store := s.optimizationSuggestionStore()
+	suggestion, ok, err := store.GetSuggestion(r.Context(), id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: err.Error(), Code: errs.CodeInternal})
+		return
+	}
+	if !ok {
+		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "优化建议不存在", Code: errs.CodeNotFound})
+		return
+	}
+	if err := suggestion.ValidateApprovalEvidence(); err != nil {
+		writeJSON(w, http.StatusPreconditionRequired, ErrorResponse{Error: err.Error(), Code: errs.CodeFailedPrecondition})
+		return
+	}
+	approved, err := store.ApproveSuggestion(r.Context(), id, auth.UserIDFrom(r.Context()), body.Note, time.Now())
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) || strings.Contains(err.Error(), "not found") {
 			writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "优化建议不存在", Code: errs.CodeNotFound})
@@ -331,6 +371,15 @@ func (s *Server) handleAdminOptimizationRejectSuggestion(w http.ResponseWriter, 
 			return
 		}
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error(), Code: errs.CodeInvalidInput})
+		return
+	}
+	candidate, candidateErr := s.createCandidateFromSuggestionRejection(r.Context(), *rejected)
+	if candidateErr != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: candidateErr.Error(), Code: errs.CodeInternal})
+		return
+	}
+	if candidate != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"suggestion": rejected, "candidate": candidate})
 		return
 	}
 	writeJSON(w, http.StatusOK, rejected)
@@ -376,6 +425,15 @@ func (s *Server) handleAdminOptimizationApplySuggestion(w http.ResponseWriter, r
 			return
 		}
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": message, "code": errs.CodeInvalidInput, "suggestion": updated})
+		return
+	}
+	if err := suggestion.ValidateApprovalEvidence(); err != nil {
+		updated, updateErr := store.MarkSuggestionApplyError(r.Context(), id, appliedBy, err.Error(), now)
+		if updateErr != nil {
+			writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: updateErr.Error(), Code: errs.CodeInternal})
+			return
+		}
+		writeJSON(w, http.StatusPreconditionRequired, map[string]any{"error": err.Error(), "code": errs.CodeFailedPrecondition, "suggestion": updated})
 		return
 	}
 
@@ -582,7 +640,75 @@ func (s *Server) handleAdminOptimizationRollbackSuggestion(w http.ResponseWriter
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: err.Error(), Code: errs.CodeInternal})
 		return
 	}
+	candidate, candidateErr := s.createCandidateFromRollbackIncident(r.Context(), agentquality.RollbackRecord{
+		ID:           "rollback_" + strings.TrimSpace(id),
+		SuggestionID: id,
+		Trigger:      agentquality.RollbackTriggerManual,
+		TriggeredBy:  rolledBackBy,
+		CreatedAt:    time.Now(),
+		Rollout:      *rolledBack,
+	})
+	if candidateErr != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: candidateErr.Error(), Code: errs.CodeInternal})
+		return
+	}
+	if candidate != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"rollout": rolledBack, "candidate": candidate})
+		return
+	}
 	writeJSON(w, http.StatusOK, rolledBack)
+}
+
+func (s *Server) createCandidateFromApprovalIfNeeded(ctx context.Context, approval agentquality.ApprovalRecord) (*agentquality.CandidateRecord, error) {
+	if approval.Action != agentquality.ApprovalActionReject || s.qualityCandidateStore == nil {
+		return nil, nil
+	}
+	switch approval.SubjectType {
+	case agentquality.ApprovalSubjectEvalDiff, agentquality.ApprovalSubjectSuggestion:
+	default:
+		return nil, nil
+	}
+	rec := agentquality.CreateCandidateFromApprovalRejection(approval)
+	if strings.TrimSpace(rec.ID) == "" {
+		return nil, nil
+	}
+	return s.qualityCandidateStore.UpsertCandidate(ctx, rec)
+}
+
+func (s *Server) createCandidateFromSuggestionRejection(ctx context.Context, suggestion agentquality.OptimizationReviewSuggestion) (*agentquality.CandidateRecord, error) {
+	if s.qualityCandidateStore == nil {
+		return nil, nil
+	}
+	approval := agentquality.ApprovalRecord{
+		ID:           "suggestion_reject_" + strings.TrimSpace(suggestion.ID),
+		SubjectID:    suggestion.ID,
+		SubjectType:  agentquality.ApprovalSubjectSuggestion,
+		Action:       agentquality.ApprovalActionReject,
+		Reviewer:     suggestion.ApprovedBy,
+		ReviewerRole: agentquality.ApprovalRoleAdmin,
+		Note:         suggestion.ApprovalNote,
+	}
+	if approval.Reviewer == "" {
+		approval.Reviewer = "admin"
+	}
+	if suggestion.ApprovedAt != nil {
+		approval.CreatedAt = *suggestion.ApprovedAt
+	}
+	if approval.CreatedAt.IsZero() {
+		approval.CreatedAt = time.Now()
+	}
+	return s.createCandidateFromApprovalIfNeeded(ctx, approval)
+}
+
+func (s *Server) createCandidateFromRollbackIncident(ctx context.Context, incident agentquality.RollbackRecord) (*agentquality.CandidateRecord, error) {
+	if s.qualityCandidateStore == nil {
+		return nil, nil
+	}
+	rec := agentquality.CreateCandidateFromRollbackIncident(incident)
+	if strings.TrimSpace(rec.ID) == "" {
+		return nil, nil
+	}
+	return s.qualityCandidateStore.UpsertCandidate(ctx, rec)
 }
 
 func (s *Server) rollbackOptimizationRollout(r *http.Request, rollout agentquality.OptimizationRollout, rolledBackBy string) error {

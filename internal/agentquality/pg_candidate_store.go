@@ -210,6 +210,34 @@ func candidateWhere(filter CandidateFilter) (string, []any) {
 		clauses = append(clauses, fmt.Sprintf("route=$%d", len(args)+1))
 		args = append(args, filter.Route)
 	}
+	if filter.DomainID != "" {
+		clauses = append(clauses, fmt.Sprintf("source_event->>'domain_id'=$%d", len(args)+1))
+		args = append(args, filter.DomainID)
+	}
+	if filter.SourceKind != "" {
+		clauses = append(clauses, fmt.Sprintf("source_event->>'source_kind'=$%d", len(args)+1))
+		args = append(args, filter.SourceKind)
+	}
+	if filter.SourceName != "" {
+		clauses = append(clauses, fmt.Sprintf("source_event->>'source_name'=$%d", len(args)+1))
+		args = append(args, filter.SourceName)
+	}
+	if filter.OwnerScope != "" {
+		clauses = append(clauses, fmt.Sprintf("source_event->>'owner_scope'=$%d", len(args)+1))
+		args = append(args, string(filter.OwnerScope))
+	}
+	if filter.OwnerID != "" {
+		clauses = append(clauses, fmt.Sprintf("source_event->>'owner_id'=$%d", len(args)+1))
+		args = append(args, filter.OwnerID)
+	}
+	if filter.UserID != "" {
+		clauses = append(clauses, fmt.Sprintf("source_event->>'user_id'=$%d", len(args)+1))
+		args = append(args, filter.UserID)
+	}
+	if filter.FailureType != "" {
+		clauses = append(clauses, fmt.Sprintf("COALESCE(NULLIF(source_event->>'failure_type',''), failure_type)=$%d", len(args)+1))
+		args = append(args, string(filter.FailureType))
+	}
 	if len(clauses) == 0 {
 		return "", args
 	}

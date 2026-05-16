@@ -71,7 +71,7 @@ func TestResolveReasoningEffortKeepsManualOverride(t *testing.T) {
 }
 
 func TestResolveReasoningEffortNoOpsForUnsupportedModel(t *testing.T) {
-	if got := resolveReasoningEffort("", "Design the migration plan and compare tradeoffs.", "gpt-4o"); got != "" {
+	if got := resolveReasoningEffort("", "Design the migration plan and compare tradeoffs.", "gpt-5"); got != "" {
 		t.Fatalf("unsupported model auto effort = %q, want empty", got)
 	}
 }
@@ -100,7 +100,7 @@ func TestMasterResolveRequestReasoningEffortUsesActiveRouterModel(t *testing.T) 
 
 func TestMasterResolveRequestReasoningEffortNoOpsWhenActiveModelUnsupported(t *testing.T) {
 	m := newReasoningEffortTestMaster(t, Config{
-		Model:    "gpt-4o",
+		Model:    "gpt-5",
 		APIKey:   "test-key",
 		Provider: "openai",
 		ReasoningEffortAuto: config.ReasoningEffortAutoConfig{

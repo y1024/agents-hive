@@ -10,6 +10,8 @@
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=flat&logo=docker&logoColor=white)](https://docs.docker.com/compose/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
+**Repository:** [GitHub](https://github.com/chef-guo/agents-hive) | [Gitee mirror](https://gitee.com/smart_kitchen/agents-hive)
+
 agents-hive is an engineering runtime and quality control plane for ReAct agents. It does more than connect models to tools: it brings task ingress, planning, tool calls, human approval, SubAgent collaboration, memory context, IM delivery, execution tracing, quality evaluation, optimization, and rollback into one traceable and governable runtime chain.
 
 The hard production problems are not just "how does the model call a function?" They are: why did the agent make this decision, which capabilities did it call, did it cross a permission boundary, where did the failure happen, can the run be replayed and evaluated, and can the next run avoid the same class of mistake? Hive turns agents from chat assistants with tools into hosted, constrained, auditable, scored, regression-tested, and continuously improving execution units.
@@ -75,7 +77,7 @@ The console centralizes LLM, Prompt, Skill, Channel, permission, Memory, quality
 If you use Codex, Claude Code, Cursor, Windsurf, or another coding agent, you can paste this prompt:
 
 ```text
-If agents-hive is not cloned yet, clone https://github.com/chef-guo/agents-hive.git, then follow the Docker Compose path in README: create .env, build hive-sandbox:latest, run docker compose up -d, and tell me the access URL plus any missing configuration.
+If agents-hive is not cloned yet, clone https://github.com/chef-guo/agents-hive.git; if GitHub access is unstable, use https://gitee.com/smart_kitchen/agents-hive.git instead. Then follow the Docker Compose path in README: create .env, build hive-sandbox:latest, run docker compose up -d, and tell me the access URL plus any missing configuration.
 ```
 
 This prompt tells the coding agent to prefer Docker Compose, which avoids common setup misses around the sandbox image, PostgreSQL, and embedded frontend build.
@@ -86,6 +88,8 @@ The Docker deployment includes the Hive service and PostgreSQL. The Hive service
 
 ```bash
 git clone https://github.com/chef-guo/agents-hive.git
+# If GitHub access is unstable, use the Gitee mirror:
+# git clone https://gitee.com/smart_kitchen/agents-hive.git
 cd agents-hive
 
 # Use a strong password in production.
@@ -125,6 +129,8 @@ Local development requires Go 1.25+, Node.js, and PostgreSQL.
 
 ```bash
 git clone https://github.com/chef-guo/agents-hive.git
+# If GitHub access is unstable, use the Gitee mirror:
+# git clone https://gitee.com/smart_kitchen/agents-hive.git
 cd agents-hive
 
 cp config.example.json config.json

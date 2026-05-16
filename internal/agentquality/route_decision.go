@@ -18,6 +18,8 @@ type RouteDecisionEvent struct {
 	Domain            string                       `json:"domain,omitempty"`
 	RoutingConfidence float64                      `json:"routing_confidence,omitempty"`
 	AllowedTools      []string                     `json:"allowed_tools,omitempty"`
+	AllowedEntries    []router.CapabilityEntry     `json:"allowed_entries,omitempty"`
+	BlockedEntries    []router.CapabilityEntry     `json:"blocked_entries,omitempty"`
 	CallableTools     []string                     `json:"callable_tools,omitempty"`
 	RecommendedTools  []string                     `json:"recommended_tools,omitempty"`
 	AllowedToolInputs map[string]map[string]string `json:"allowed_tool_inputs,omitempty"`
@@ -46,9 +48,11 @@ func RouteDecisionEventFromRouter(decision router.RouteDecision) RouteDecisionEv
 	return RouteDecisionEvent{
 		Mode:              string(decision.Mode),
 		IntentKind:        string(decision.Intent.Kind),
-		Domain:            decision.Intent.Subject,
+		Domain:            routeDecisionDomain(decision.Intent),
 		RoutingConfidence: decision.Intent.Confidence,
 		AllowedTools:      append([]string(nil), decision.AllowedTools...),
+		AllowedEntries:    cloneCapabilityEntries(decision.AllowedCapabilities),
+		BlockedEntries:    cloneCapabilityEntries(decision.BlockedCapabilities),
 		CallableTools:     append([]string(nil), decision.AllowedTools...),
 		RecommendedTools:  append([]string(nil), decision.VisibleOnly...),
 		AllowedToolInputs: cloneAllowedToolInputs(decision.AllowedToolInputs),
@@ -57,6 +61,33 @@ func RouteDecisionEventFromRouter(decision router.RouteDecision) RouteDecisionEv
 		BlockedReasons:    reasons,
 		Reason:            decision.Reason,
 	}
+}
+
+func routeDecisionDomain(intent router.IntentFrame) string {
+	if strings.TrimSpace(intent.DomainID) != "" {
+		return strings.TrimSpace(intent.DomainID)
+	}
+	switch intent.Kind {
+	case router.IntentCreateSkill, router.IntentModifySkill:
+		return "skill_authoring"
+	case router.IntentManageTool:
+		return "mcp_server_building"
+	default:
+		return "generic"
+	}
+}
+
+func cloneCapabilityEntries(in []router.CapabilityEntry) []router.CapabilityEntry {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]router.CapabilityEntry, 0, len(in))
+	for _, entry := range in {
+		copied := entry
+		copied.Capabilities = append([]router.Capability(nil), entry.Capabilities...)
+		out = append(out, copied)
+	}
+	return out
 }
 
 func cloneAllowedToolInputs(in map[string]map[string]string) map[string]map[string]string {
@@ -254,8 +285,8 @@ func EvaluateRouteEvalGate(cases []RouteEvalCase, results []RouteEvalResult, thr
 			}
 		}
 	}
-	metrics.FalsePositiveCallableRate = ratioFloat(metrics.FalsePositiveCallableCount, metrics.FalseMatchCases)
-	metrics.KindDomainClassificationRatio = ratioFloat(metrics.KindDomainCandidatePassCount, metrics.KindDomainCandidateCount)
+	metrics.FalsePositiveCallableRate = routeEvalRatio(metrics.FalsePositiveCallableCount, metrics.FalseMatchCases)
+	metrics.KindDomainClassificationRatio = routeEvalRatio(metrics.KindDomainCandidatePassCount, metrics.KindDomainCandidateCount)
 
 	var failures []string
 	if metrics.TotalCases < thresholds.MinCases {
@@ -291,7 +322,7 @@ func candidateKindDomainComplete(candidate router.ToolProfile) bool {
 		candidate.Risk != ""
 }
 
-func ratioFloat(numerator, denominator int) float64 {
+func routeEvalRatio(numerator, denominator int) float64 {
 	if denominator <= 0 {
 		return 0
 	}

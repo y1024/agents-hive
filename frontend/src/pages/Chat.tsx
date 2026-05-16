@@ -1,7 +1,7 @@
 import { useEffect, useCallback, useMemo } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { ArrowLeft, X } from 'lucide-react';
+import { X } from 'lucide-react';
 import { ApiRequestError } from '../api/client';
 import { useSessionStore } from '../store/session';
 import { useChatStore } from '../store/chat';
@@ -54,6 +54,7 @@ export function Chat() {
     if (id) {
       useCanvasStore.getState().closeAll(); // 切换会话时清理 Canvas
       clearMessages();
+      useHITLStore.getState().clearAll();
       useTodosStore.getState().clear();
       // 切换会话时清理进度
       useTaskProgressStore.getState().clear();
@@ -84,10 +85,11 @@ export function Chat() {
           navigate('/');
         }
       });
-      loadModels(client);
+      loadModels(client, id);
     }
     return () => {
       clearMessages();
+      useHITLStore.getState().clearAll();
       useCanvasStore.getState().closeAll();
       useTaskProgressStore.getState().clear();
       useTodosStore.getState().clear();
@@ -153,7 +155,7 @@ export function Chat() {
     if (id) stopTask(client, id);
   }, [id, client, stopTask]);
 
-  // 注入全局 Header 的 slots（返回按钮 + 会话名 + 消息统计）
+  // 注入全局 Header 的 slots（会话名 + 消息统计）
   const setSlots = useHeaderStore((s) => s.setSlots);
   const clearSlots = useHeaderStore((s) => s.clearSlots);
   const sessionName = messages.length === 0
@@ -166,15 +168,7 @@ export function Chat() {
 
   useEffect(() => {
     setSlots({
-      leftExtra: (
-        <button
-          onClick={() => navigate('/sessions')}
-          className="p-1.5 rounded-lg text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors"
-          aria-label={t('chat.back')}
-        >
-          <ArrowLeft className="w-4 h-4" />
-        </button>
-      ),
+      leftExtra: null,
       centerOverride: (
         <span className="text-sm font-semibold text-[var(--text-primary)] truncate max-w-xs pointer-events-auto">
           {sessionName}
@@ -197,7 +191,7 @@ export function Chat() {
       ),
     });
     return () => clearSlots();
-  }, [sessionName, currentSession, totalTokens, handleClear, navigate, t, setSlots, clearSlots]);
+  }, [sessionName, currentSession, totalTokens, handleClear, t, setSlots, clearSlots]);
 
   if (!id) {
     return (
@@ -233,9 +227,11 @@ export function Chat() {
             loading={sending}
             streamingStatus={streaming ? agentStatus : null}
             onRegenerate={handleRegenerate}
+            sessionId={id}
           />
           <TodosList variant="mobile" />
           <ChatInput
+            sessionId={id}
             onSend={handleSend}
             onStop={handleStop}
             disabled={inputDisabled}

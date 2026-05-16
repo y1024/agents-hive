@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { LocalNodeClient } from '../node-client';
 import type { ApiClient } from '../client';
-import type { EvalRun, GroupingRule, MemoryExportDocument, VectorSpaceMigrationResponse, VersionMatrixInput } from '../../types/api';
+import type { EvalRun, GroupingRule, MemoryExportDocument, OptimizationReviewSuggestion, QualityCandidateRecord, VectorSpaceMigrationResponse, VersionMatrixInput } from '../../types/api';
 
 vi.mock('../../store/auth', () => ({
   useAuthStore: {
@@ -27,6 +27,39 @@ function createApiClientMock() {
 }
 
 describe('LocalNodeClient admin capability endpoints', () => {
+  it('lists models globally when no session id is provided', async () => {
+    const api = createApiClientMock();
+    api.get.mockResolvedValue({ models: [], active: '' });
+    const client = new LocalNodeClient(api);
+
+    await client.listModels();
+
+    expect(api.get).toHaveBeenCalledWith('/api/v1/models');
+  });
+
+  it('lists models with an encoded session id when provided', async () => {
+    const api = createApiClientMock();
+    api.get.mockResolvedValue({ models: [], active: '' });
+    const client = new LocalNodeClient(api);
+
+    await client.listModels('sess/with space?x=1');
+
+    expect(api.get).toHaveBeenCalledWith('/api/v1/models?session_id=sess%2Fwith%20space%3Fx%3D1');
+  });
+
+  it('switches model with the session-scoped request body', async () => {
+    const api = createApiClientMock();
+    api.put.mockResolvedValue(undefined);
+    const client = new LocalNodeClient(api);
+
+    await client.switchModel('sess-1', 'gpt-5');
+
+    expect(api.put).toHaveBeenCalledWith('/api/v1/model', {
+      name: 'gpt-5',
+      session_id: 'sess-1',
+    });
+  });
+
   it('calls MCP runtime tool catalog RPC', async () => {
     const api = createApiClientMock();
     api.post.mockResolvedValue({
@@ -105,6 +138,95 @@ describe('LocalNodeClient admin capability endpoints', () => {
     expect(api.post).toHaveBeenNthCalledWith(3, '/api/v1/admin/quality-workbench/version-diff', input);
   });
 
+  it('passes quality workbench attribution filters to cluster and dashboard endpoints', async () => {
+    const api = createApiClientMock();
+    api.get.mockResolvedValue({});
+    const client = new LocalNodeClient(api);
+
+    await client.adminListQualityWorkbenchClusters({
+      page: 2,
+      size: 25,
+      status: 'new',
+      route: 'web',
+      domain_id: 'customer_service',
+      source_kind: 'workflow',
+      source_name: 'case_triage',
+      failure_type: 'tool',
+    });
+    await client.adminGetQualityDashboardSnapshot({
+      since: '2026-05-01',
+      until: '2026-05-08',
+      domain_id: 'customer_service',
+      source_kind: 'workflow',
+      source_name: 'case_triage',
+      failure_type: 'tool',
+    });
+    await client.adminGetQualityDashboardSeries({
+      domain_id: 'customer_service',
+      failure_type: 'permission',
+    });
+
+    expect(api.get).toHaveBeenNthCalledWith(1, '/api/v1/admin/quality-workbench/clusters?page=2&size=25&status=new&route=web&domain_id=customer_service&source_kind=workflow&source_name=case_triage&failure_type=tool');
+    expect(api.get).toHaveBeenNthCalledWith(2, '/api/v1/admin/quality-workbench/dashboard/snapshot?since=2026-05-01&until=2026-05-08&domain_id=customer_service&source_kind=workflow&source_name=case_triage&failure_type=tool');
+    expect(api.get).toHaveBeenNthCalledWith(3, '/api/v1/admin/quality-workbench/dashboard/series?domain_id=customer_service&failure_type=permission');
+  });
+
+  it('passes quality workbench attribution through replay and batch eval APIs', async () => {
+    const api = createApiClientMock();
+    api.get.mockResolvedValue({});
+    api.post.mockResolvedValue({});
+    const client = new LocalNodeClient(api);
+
+    await client.adminCreateReplayJobs({
+      kind: 'cluster',
+      target_ids: ['cl_1'],
+      max_attempt: 1,
+      domain_id: 'customer_service',
+      source_kind: 'workflow',
+      source_name: 'case_triage',
+    });
+    await client.adminListReplayJobs({
+      page: 2,
+      size: 10,
+      status: 'queued',
+      kind: 'cluster',
+      domain_id: 'customer_service',
+      source_kind: 'workflow',
+      source_name: 'case_triage',
+    });
+    await client.adminCreateBatchEval({
+      mode: 'manual',
+      cases_dir: './cases',
+      domain_id: 'customer_service',
+      source_kind: 'workflow',
+      source_name: 'case_triage',
+    });
+    await client.adminListBatchEvals({
+      page: 1,
+      size: 20,
+      status: 'failed',
+      domain_id: 'customer_service',
+    });
+
+    expect(api.post).toHaveBeenNthCalledWith(1, '/api/v1/admin/quality-workbench/replays', {
+      kind: 'cluster',
+      target_ids: ['cl_1'],
+      max_attempt: 1,
+      domain_id: 'customer_service',
+      source_kind: 'workflow',
+      source_name: 'case_triage',
+    });
+    expect(api.get).toHaveBeenNthCalledWith(1, '/api/v1/admin/quality-workbench/replays?page=2&size=10&kind=cluster&status=queued&domain_id=customer_service&source_kind=workflow&source_name=case_triage');
+    expect(api.post).toHaveBeenNthCalledWith(2, '/api/v1/admin/quality-workbench/batch-evals', {
+      mode: 'manual',
+      cases_dir: './cases',
+      domain_id: 'customer_service',
+      source_kind: 'workflow',
+      source_name: 'case_triage',
+    });
+    expect(api.get).toHaveBeenNthCalledWith(2, '/api/v1/admin/quality-workbench/batch-evals?page=1&size=20&status=failed&domain_id=customer_service');
+  });
+
   it('calls memory export/import/vector-space/backlog endpoints with backend JSON keys', async () => {
     const api = createApiClientMock();
     api.get.mockResolvedValue({});
@@ -176,4 +298,116 @@ describe('LocalNodeClient admin capability endpoints', () => {
     expect(api.get).toHaveBeenNthCalledWith(2, '/api/v1/admin/optimization/rollback-alerts');
     expect(api.get).toHaveBeenNthCalledWith(3, '/api/v1/admin/optimization/rollbacks');
   });
+
+  it('unwraps optimization mutation wrappers while preserving candidate context', async () => {
+    const api = createApiClientMock();
+    const client = new LocalNodeClient(api);
+    const candidate = createQualityCandidate('candidate-1');
+    const suggestion = createOptimizationSuggestion('suggestion-1');
+    const rollout = {
+      id: 'rollout-1',
+      suggestion_id: suggestion.id,
+      target: 'prompt' as const,
+      target_key: 'triage.prompt',
+      previous_value: 'old',
+      previous_exists: true,
+      applied_value: 'new',
+      status: 'rolled_back' as const,
+      applied_by: 'admin',
+      rolled_back_by: 'admin',
+      created_at: '2026-05-16T00:00:00Z',
+      updated_at: '2026-05-16T00:00:00Z',
+      rolled_back_at: '2026-05-16T00:00:00Z',
+    };
+    const approval = {
+      id: 'approval-1',
+      subject_id: suggestion.id,
+      subject_type: 'suggestion' as const,
+      action: 'reject' as const,
+      reviewer: 'admin',
+      reviewer_role: 'lead' as const,
+      note: 'bad case',
+      created_at: '2026-05-16T00:00:00Z',
+    };
+    api.post
+      .mockResolvedValueOnce({ suggestion, candidate })
+      .mockResolvedValueOnce({ rollout, candidate })
+      .mockResolvedValueOnce({ approval, candidate });
+
+    const rejected = await client.adminRejectOptimizationSuggestion(suggestion.id, 'bad case');
+    const rolledBack = await client.adminRollbackOptimizationSuggestion(suggestion.id);
+    const createdApproval = await client.adminCreateOptimizationApproval({
+      subject_id: suggestion.id,
+      subject_type: 'suggestion',
+      action: 'reject',
+      reviewer_role: 'lead',
+      note: 'bad case',
+    });
+
+    expect(rejected.id).toBe(suggestion.id);
+    expect(rejected.status).toBe('pending');
+    expect(rejected.candidate?.id).toBe(candidate.id);
+    expect(rolledBack.id).toBe(rollout.id);
+    expect(rolledBack.status).toBe('rolled_back');
+    expect(rolledBack.candidate?.id).toBe(candidate.id);
+    expect(createdApproval.id).toBe(approval.id);
+    expect(createdApproval.candidate?.id).toBe(candidate.id);
+  });
+
+  it('keeps optimization mutation responses compatible when backend returns raw objects', async () => {
+    const api = createApiClientMock();
+    const client = new LocalNodeClient(api);
+    const suggestion = createOptimizationSuggestion('suggestion-raw');
+    api.post.mockResolvedValueOnce(suggestion);
+
+    const approved = await client.adminApproveOptimizationSuggestion(suggestion.id, 'ok');
+
+    expect(approved).toEqual(suggestion);
+  });
 });
+
+function createQualityCandidate(id: string): QualityCandidateRecord {
+  return {
+    id,
+    status: 'new',
+    route: 'web',
+    session_id: 'session-1',
+    replay_ref: 'replay-1',
+    input: 'failed input',
+    case: {
+      id: 'case-1',
+      name: 'Failed input',
+      route: 'web',
+      input: 'failed input',
+      expected_status: 'success',
+      required: true,
+    },
+    failure_type: 'regression',
+    risk: 'medium',
+    fingerprint: 'fp-1',
+    source_event: {},
+    created_at: '2026-05-16T00:00:00Z',
+    updated_at: '2026-05-16T00:00:00Z',
+  };
+}
+
+function createOptimizationSuggestion(id: string): OptimizationReviewSuggestion {
+  return {
+    id,
+    status: 'pending',
+    target: 'prompt',
+    kind: 'prompt_diff_suggestion',
+    title: 'Improve prompt',
+    rationale: 'Regression candidate created',
+    current_value: 'old',
+    proposed_value: 'new',
+    diff_format: 'text',
+    source_candidate_id: 'candidate-1',
+    review_required: true,
+    created_by: 'system',
+    apply_status: 'unapplied',
+    created_at: '2026-05-16T00:00:00Z',
+    updated_at: '2026-05-16T00:00:00Z',
+    expires_at: '2026-05-17T00:00:00Z',
+  };
+}

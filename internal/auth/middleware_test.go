@@ -72,6 +72,36 @@ func TestMiddlewareInvalidToken(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
+func TestMiddlewareGatewayRPCAllowsGatewayTokenToReachGateway(t *testing.T) {
+	engine, _ := newTestMiddlewareEngine()
+	rec := callMiddleware(engine, "/api/v1/rpc", "Bearer machine-token")
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestMiddlewareGatewayRPCInjectsValidWebUser(t *testing.T) {
+	engine, store := newTestMiddlewareEngine()
+
+	user := &User{ID: "user-admin", ExternalID: "ext-admin", AuthProvider: "feishu", Role: "admin", Status: "active"}
+	store.byID[user.ID] = user
+
+	token, err := engine.JWT().Issue(user.ID, user.Role, "feishu")
+	require.NoError(t, err)
+
+	var capturedUser *User
+	handler := AuthMiddleware(engine)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedUser = UserFrom(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rpc", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	require.NotNil(t, capturedUser)
+	assert.Equal(t, "user-admin", capturedUser.ID)
+}
+
 func TestMiddlewareDisabledUser(t *testing.T) {
 	engine, store := newTestMiddlewareEngine()
 

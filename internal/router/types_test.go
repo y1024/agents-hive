@@ -179,6 +179,28 @@ func TestBuildRouteDecisionCreateSkillAllowsSkillAuthoringWorkflow(t *testing.T)
 	}
 }
 
+func TestBuildRouteDecisionCreateSkillDoesNotTreatCustomToolDomainAsSkillWorkflow(t *testing.T) {
+	decision := BuildRouteDecision(IntentFrame{Kind: IntentCreateSkill}, []ToolProfile{
+		{
+			Name:       "custom_skill_writer",
+			Kind:       CapabilityKindCustomTool,
+			Domain:     "skill_authoring",
+			Source:     CapabilitySourceCustomDir,
+			Invocation: InvocationDirectTool,
+			Risk:       RiskLocalWrite,
+			Trust:      TrustLocal,
+			SideEffect: true,
+		},
+	})
+
+	if containsString(decision.AllowedTools, "skill") {
+		t.Fatalf("custom direct tool must not be routed through skill entrypoint: %+v", decision)
+	}
+	if len(decision.BlockedTools) != 1 || decision.BlockedTools[0].Reason != "side effect not allowed by intent" {
+		t.Fatalf("BlockedTools = %+v, want side effect not allowed by intent", decision.BlockedTools)
+	}
+}
+
 func TestInferSkillWorkflowProfileKeepsGenericSkillDescriptionsOutOfAuthoringDomain(t *testing.T) {
 	profile := InferSkillWorkflowProfile("frontend-design", "Create distinctive, production-grade frontend interfaces with high design quality. Use this skill when the user asks to build web components.")
 
@@ -917,6 +939,71 @@ func TestBuildRouteDecisionDoesNotRouteRuntimeExecEvenWhenPolicyCanAsk(t *testin
 	}
 }
 
+func TestRouteDecisionCarriesAllowedCapabilityEntries(t *testing.T) {
+	profile := InferToolProfile(mcphost.ToolDefinition{Name: "read_file", Core: true}, ProfileHint{})
+	decision := BuildRouteDecision(IntentFrame{Kind: IntentRead}, []ToolProfile{profile})
+
+	if len(decision.AllowedCapabilities) != 1 {
+		t.Fatalf("AllowedCapabilities = %+v, want one read_file entry", decision.AllowedCapabilities)
+	}
+	entry := decision.AllowedCapabilities[0]
+	if entry.Name != "read_file" || entry.Kind != CapabilityKindBuiltinTool || entry.Source != CapabilitySourceBuiltin {
+		t.Fatalf("AllowedCapabilities[0] = %+v, want builtin read_file", entry)
+	}
+	if entry.Version == "" || entry.Visibility == "" || entry.PolicyProfile == "" {
+		t.Fatalf("allowed capability missing audit metadata: %+v", entry)
+	}
+}
+
+func TestRouteDecisionCarriesBlockedCapabilityEntries(t *testing.T) {
+	profile := InferToolProfile(mcphost.ToolDefinition{Name: "metamcp__delete_dashboard", Description: "Delete Grafana dashboard", SourceServer: "metamcp", Trusted: true}, ProfileHint{})
+	decision := BuildRouteDecision(IntentFrame{Kind: IntentRead}, []ToolProfile{profile})
+
+	if len(decision.BlockedCapabilities) != 1 {
+		t.Fatalf("BlockedCapabilities = %+v, want one blocked entry", decision.BlockedCapabilities)
+	}
+	entry := decision.BlockedCapabilities[0]
+	if entry.Name != "metamcp__delete_dashboard" || entry.Source != CapabilitySourceMCPServer || entry.Risk != RiskDestructive {
+		t.Fatalf("BlockedCapabilities[0] = %+v, want destructive MCP entry", entry)
+	}
+}
+
+func TestCustomerServiceToolsDeclareRouterCapabilities(t *testing.T) {
+	cases := []struct {
+		name       string
+		wantDomain string
+		wantRisk   RiskLevel
+		wantCaps   []Capability
+	}{
+		{name: "kb_search", wantDomain: "customer_service", wantRisk: RiskReadOnly, wantCaps: []Capability{CapabilityCustomerServiceKBRead}},
+		{name: "escalate_to_human", wantDomain: "customer_service", wantRisk: RiskExternalWrite, wantCaps: []Capability{CapabilityExternalSend, CapabilityCustomerServiceEscalate}},
+		{name: "cancel_escalation", wantDomain: "customer_service", wantRisk: RiskLocalWrite, wantCaps: []Capability{CapabilityCustomerServiceCancelEscalation}},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			profile, ok := BuiltinToolProfile(tt.name)
+			if !ok {
+				t.Fatalf("BuiltinToolProfile(%q) ok=false", tt.name)
+			}
+			if profile.Domain != tt.wantDomain || profile.Risk != tt.wantRisk || profile.Kind != CapabilityKindBuiltinTool || profile.Source != CapabilitySourceBuiltin {
+				t.Fatalf("profile = %+v, want domain=%s risk=%s builtin source", profile, tt.wantDomain, tt.wantRisk)
+			}
+			for _, want := range tt.wantCaps {
+				if !containsCapability(profile.Capabilities, want) {
+					t.Fatalf("profile capabilities = %+v, want %s", profile.Capabilities, want)
+				}
+			}
+		})
+	}
+
+	groups := HostToolPolicyGroups()
+	for _, want := range []string{"kb_search", "escalate_to_human", "cancel_escalation"} {
+		if !containsString(groups["customer_service"], want) {
+			t.Fatalf("customer_service host group = %+v, missing %s", groups["customer_service"], want)
+		}
+	}
+}
+
 func TestToolProfileEntryCopiesCapabilities(t *testing.T) {
 	profile := ToolProfile{
 		Name:         "mcp-builder",
@@ -926,6 +1013,8 @@ func TestToolProfileEntryCopiesCapabilities(t *testing.T) {
 		Invocation:   InvocationSkillTool,
 		Risk:         RiskLocalWrite,
 		Capabilities: []Capability{"meta.mcp.build"},
+		Version:      "v1",
+		Visibility:   "workspace",
 	}
 
 	entry := profile.Entry()
@@ -937,6 +1026,9 @@ func TestToolProfileEntryCopiesCapabilities(t *testing.T) {
 	if len(entry.Capabilities) != 1 || entry.Capabilities[0] != "meta.mcp.build" {
 		t.Fatalf("Entry must copy capabilities, got %+v", entry.Capabilities)
 	}
+	if entry.Version != "v1" || entry.Visibility != "workspace" {
+		t.Fatalf("Entry must copy audit metadata, got %+v", entry)
+	}
 }
 
 func contains(s, substr string) bool {
@@ -944,6 +1036,15 @@ func contains(s, substr string) bool {
 }
 
 func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsCapability(values []Capability, want Capability) bool {
 	for _, value := range values {
 		if value == want {
 			return true

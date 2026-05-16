@@ -1,6 +1,7 @@
 package master
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -14,6 +15,15 @@ import (
 	"github.com/chef-guo/agents-hive/internal/observability"
 	"github.com/chef-guo/agents-hive/internal/router"
 )
+
+type recordingQualityShadowRunner struct {
+	events []agentquality.Event
+}
+
+func (r *recordingQualityShadowRunner) RunShadowEval(_ context.Context, ev agentquality.Event) error {
+	r.events = append(r.events, ev)
+	return nil
+}
 
 func TestMaster_EnqueueLog_NilSafe(t *testing.T) {
 	m := &Master{}
@@ -51,6 +61,126 @@ func TestEmitQualityEvent_EnqueuesMetricAndLog(t *testing.T) {
 	assert.Equal(t, "quality.tool_decision", first.metric.Name)
 	assert.NotContains(t, first.metric.Labels, "session_id")
 	assert.Equal(t, "session-1", second.log.SessionID)
+}
+
+func TestEmitQualityEventRunsShadowEvalWithEnrichedEvent(t *testing.T) {
+	m := &Master{obsCh: make(chan observabilityEntry, 4)}
+	runner := &recordingQualityShadowRunner{}
+	m.SetQualityShadowEvalRunner(runner)
+	defer m.SetQualityShadowEvalRunner(nil)
+
+	m.emitQualityEvent("trace", "span", "session-1", agentquality.Event{
+		Name:        agentquality.EventToolDecision,
+		Route:       "web",
+		FailureType: agentquality.FailureTool,
+		FinalStatus: agentquality.StatusFail,
+	})
+
+	require.Len(t, runner.events, 1)
+	got := runner.events[0]
+	assert.Equal(t, "trace", got.TraceID)
+	assert.Equal(t, "span", got.SpanID)
+	assert.Equal(t, "generic", got.DomainID)
+	assert.Equal(t, "master", got.SourceKind)
+	assert.Equal(t, "master", got.SourceName)
+	assert.NotEmpty(t, got.SessionIDHash)
+}
+
+func TestQualityEventCarriesExecutionRefWithoutMetricCardinalityExplosion(t *testing.T) {
+	sm := NewSessionManager(make(chan struct{}), nil)
+	sm.SetSession(&SessionState{
+		ID:     "session-1",
+		UserID: "user-1",
+	})
+	m := &Master{
+		obsCh:      make(chan observabilityEntry, 4),
+		journal:    journal.NoopJournal{},
+		journalCh:  make(chan journalEntry, 1),
+		sessionMgr: sm,
+	}
+
+	m.emitQualityEvent("trace-1", "span-1", "session-1", agentquality.Event{
+		Name:        agentquality.EventAgentTurn,
+		Route:       "web",
+		FailureType: agentquality.FailureNone,
+		FinalStatus: agentquality.StatusPass,
+	})
+
+	metricEntry := <-m.obsCh
+	logEntry := <-m.obsCh
+	require.NotNil(t, metricEntry.metric)
+	require.NotNil(t, logEntry.log)
+	assert.NotContains(t, metricEntry.metric.Labels, "run_id")
+	assert.NotContains(t, metricEntry.metric.Labels, "trace_id")
+	assert.NotContains(t, metricEntry.metric.Labels, "span_id")
+	assert.NotContains(t, metricEntry.metric.Labels, "turn_id")
+	assert.NotContains(t, metricEntry.metric.Labels, "user_id")
+	assert.NotContains(t, metricEntry.metric.Labels, "owner_id")
+
+	raw, ok := logEntry.log.Attributes["quality_event"].(json.RawMessage)
+	require.True(t, ok)
+	var ev agentquality.Event
+	require.NoError(t, json.Unmarshal(raw, &ev))
+	assert.Equal(t, "trace-1", ev.TraceID)
+	assert.Equal(t, "span-1", ev.SpanID)
+	assert.Equal(t, "trace-1", ev.TurnID)
+	assert.Equal(t, "generic", ev.DomainID)
+	assert.Equal(t, "master", ev.SourceKind)
+	assert.Equal(t, "master", ev.SourceName)
+	assert.Equal(t, agentquality.OwnerScopeUser, ev.OwnerScope)
+	assert.Equal(t, "user-1", ev.OwnerID)
+	assert.Equal(t, "user-1", ev.UserID)
+
+	journalEntry := <-m.journalCh
+	require.NotNil(t, journalEntry.decision)
+	assert.Contains(t, journalEntry.decision.Reason, `"trace_id":"trace-1"`)
+	assert.Contains(t, journalEntry.decision.Reason, `"owner_id":"user-1"`)
+}
+
+func TestContextBuildQualityEventCarriesMemoryDomainSourceAndOwner(t *testing.T) {
+	sm := NewSessionManager(make(chan struct{}), nil)
+	sm.SetSession(&SessionState{
+		ID:     "session-1",
+		UserID: "user-1",
+	})
+	m := &Master{
+		obsCh:      make(chan observabilityEntry, 4),
+		journal:    journal.NoopJournal{},
+		journalCh:  make(chan journalEntry, 1),
+		sessionMgr: sm,
+	}
+
+	m.emitQualityEvent("trace-1", "span-1", "session-1", agentquality.Event{
+		Name:        agentquality.EventContextBuild,
+		Route:       "web",
+		FailureType: agentquality.FailureNone,
+		FinalStatus: agentquality.StatusPass,
+		ContextBuild: agentquality.ContextBuild{
+			MessageCount:     3,
+			MemoryInjected:   true,
+			MemoryDomainID:   "customer_service",
+			MemorySourceKind: "workflow",
+			MemorySourceName: "case_triage",
+			MemoryOwnerScope: "user",
+			MemoryOwnerID:    "user-1",
+		},
+	})
+
+	metricEntry := <-m.obsCh
+	logEntry := <-m.obsCh
+	require.NotNil(t, metricEntry.metric)
+	assert.NotContains(t, metricEntry.metric.Labels, "owner_id")
+
+	raw, ok := logEntry.log.Attributes["quality_event"].(json.RawMessage)
+	require.True(t, ok)
+	var ev agentquality.Event
+	require.NoError(t, json.Unmarshal(raw, &ev))
+	assert.Equal(t, agentquality.EventContextBuild, ev.Name)
+	assert.Equal(t, "customer_service", ev.ContextBuild.MemoryDomainID)
+	assert.Equal(t, "workflow", ev.ContextBuild.MemorySourceKind)
+	assert.Equal(t, "case_triage", ev.ContextBuild.MemorySourceName)
+	assert.Equal(t, "user", ev.ContextBuild.MemoryOwnerScope)
+	assert.Equal(t, "user-1", ev.ContextBuild.MemoryOwnerID)
 }
 
 func TestRecordToolRecall_EmitsQualityEvent(t *testing.T) {
@@ -190,6 +320,94 @@ func TestEmitQualityEvent_EnqueuesJournalDecision(t *testing.T) {
 	require.NotNil(t, got.decision)
 	assert.Equal(t, "quality.agent_turn", got.decision.Decision)
 	assert.Contains(t, got.decision.Reason, `"failure_type":"tool"`)
+}
+
+func TestEmitQualityEventRedactsLogAndJournal(t *testing.T) {
+	m := &Master{
+		obsCh:     make(chan observabilityEntry, 4),
+		journal:   journal.NoopJournal{},
+		journalCh: make(chan journalEntry, 1),
+	}
+	m.emitQualityEvent("trace", "span", "session-1", agentquality.Event{
+		Name:        agentquality.EventToolDecision,
+		Route:       "web",
+		FailureType: agentquality.FailureTool,
+		FinalStatus: agentquality.StatusFail,
+		Attributes: map[string]any{
+			"api_key": "key-123",
+			"nested": map[string]any{
+				"authorization": "Bearer token-123",
+				"message":       "failed with access_token=inline-token",
+			},
+		},
+	})
+
+	<-m.obsCh
+	logEntry := <-m.obsCh
+	raw, ok := logEntry.log.Attributes["quality_event"].(json.RawMessage)
+	require.True(t, ok)
+	assert.NotContains(t, string(raw), "key-123")
+	assert.NotContains(t, string(raw), "token-123")
+	assert.NotContains(t, string(raw), "inline-token")
+	assert.Contains(t, string(raw), "[REDACTED]")
+
+	got := <-m.journalCh
+	require.NotNil(t, got.decision)
+	assert.NotContains(t, got.decision.Reason, "key-123")
+	assert.NotContains(t, got.decision.Reason, "token-123")
+	assert.NotContains(t, got.decision.Reason, "inline-token")
+	assert.Contains(t, got.decision.Reason, "[REDACTED]")
+}
+
+func TestQualityJournalDecisionDoesNotPersistRawToken(t *testing.T) {
+	m := &Master{
+		journal:   journal.NoopJournal{},
+		journalCh: make(chan journalEntry, 1),
+	}
+	raw := redactQualityEventJSON(agentquality.Event{
+		Name:        agentquality.EventPermissionDecision,
+		Route:       "web",
+		FailureType: agentquality.FailurePermission,
+		FinalStatus: agentquality.StatusFail,
+	}, []byte(`{"name":"quality.permission_decision","attributes":{"context_token":"ctx-123"}}`))
+
+	m.enqueueQualityJournalDecision("session-1", agentquality.Event{Name: agentquality.EventPermissionDecision}, raw)
+
+	got := <-m.journalCh
+	require.NotNil(t, got.decision)
+	assert.NotContains(t, got.decision.Reason, "ctx-123")
+	assert.Contains(t, got.decision.Reason, "[REDACTED]")
+}
+
+func TestEmitQualityEventMarshalErrorFailsClosed(t *testing.T) {
+	m := &Master{
+		obsCh:     make(chan observabilityEntry, 4),
+		journal:   journal.NoopJournal{},
+		journalCh: make(chan journalEntry, 1),
+	}
+	m.emitQualityEvent("trace", "span", "session-1", agentquality.Event{
+		Name:        agentquality.EventToolDecision,
+		Route:       "web",
+		FailureType: agentquality.FailureTool,
+		FinalStatus: agentquality.StatusFail,
+		Attributes: map[string]any{
+			"api_key": "key-123",
+			"bad":     func() {},
+		},
+	})
+
+	<-m.obsCh
+	logEntry := <-m.obsCh
+	raw, ok := logEntry.log.Attributes["quality_event"].(json.RawMessage)
+	require.True(t, ok)
+	assert.Contains(t, string(raw), `"redaction_error":true`)
+	assert.Contains(t, string(raw), `"name":"quality.tool_decision"`)
+	assert.NotContains(t, string(raw), "key-123")
+
+	got := <-m.journalCh
+	require.NotNil(t, got.decision)
+	assert.Contains(t, got.decision.Reason, `"redaction_error":true`)
+	assert.NotContains(t, got.decision.Reason, "key-123")
 }
 
 func TestRecordReflection_AppendsNoteAndEmitsEvent(t *testing.T) {

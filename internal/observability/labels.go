@@ -5,6 +5,7 @@ var allowedMetricLabels = map[string]map[string]bool{
 		"route":              true,
 		"status":             true,
 		"failure_type":       true,
+		"stop_reason":        true,
 		"decision":           true,
 		"retry_reason":       true,
 		"tool_name":          true,

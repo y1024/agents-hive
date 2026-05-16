@@ -51,6 +51,12 @@ func TestDecisionSpanFromRouteDecisionCapturesReplayFields(t *testing.T) {
 	if len(span.Allowed) != 1 || span.Allowed[0] != "read_file" {
 		t.Fatalf("Allowed = %+v", span.Allowed)
 	}
+	if len(span.AllowedEntries) != 1 || span.AllowedEntries[0].Name != "read_file" || span.AllowedEntries[0].Source != CapabilitySourceBuiltin {
+		t.Fatalf("AllowedEntries = %+v, want read_file capability entry", span.AllowedEntries)
+	}
+	if len(span.BlockedEntries) != 1 || span.BlockedEntries[0].Name != "unknown_send" || span.BlockedEntries[0].Risk != RiskDestructive {
+		t.Fatalf("BlockedEntries = %+v, want unknown_send capability entry", span.BlockedEntries)
+	}
 	if span.BlockedReasons["unknown_send"] != "unknown destructive/open-world tool" {
 		t.Fatalf("BlockedReasons = %+v", span.BlockedReasons)
 	}
@@ -97,8 +103,22 @@ func TestReplayStoreReturnsSpansByTraceIDAndRouteDecisionSummary(t *testing.T) {
 		CreatedAt:     time.Date(2026, 5, 8, 10, 1, 0, 0, time.UTC),
 		Intent:        DecisionSpanIntent{Kind: IntentExternalWrite, Source: "classifier"},
 		Allowed:       []string{"feishu_api"},
-		VisibleOnly:   []string{"tool_search"},
-		Blocked:       []string{"write_file"},
+		AllowedEntries: []CapabilityEntry{{
+			Name:   "feishu_api",
+			Kind:   CapabilityKindBuiltinTool,
+			Domain: "messaging",
+			Source: CapabilitySourceBuiltin,
+			Risk:   RiskExternalWrite,
+		}},
+		VisibleOnly: []string{"tool_search"},
+		Blocked:     []string{"write_file"},
+		BlockedEntries: []CapabilityEntry{{
+			Name:   "write_file",
+			Kind:   CapabilityKindBuiltinTool,
+			Domain: "filesystem",
+			Source: CapabilitySourceBuiltin,
+			Risk:   RiskLocalWrite,
+		}},
 		BlockedReasons: map[string]string{
 			"write_file": "side effect not allowed by intent",
 		},
@@ -128,6 +148,12 @@ func TestReplayStoreReturnsSpansByTraceIDAndRouteDecisionSummary(t *testing.T) {
 	}
 	if len(summary.AllowedTools) != 1 || summary.AllowedTools[0] != "feishu_api" {
 		t.Fatalf("summary AllowedTools = %+v", summary.AllowedTools)
+	}
+	if len(summary.AllowedEntries) != 1 || summary.AllowedEntries[0].Name != "feishu_api" {
+		t.Fatalf("summary AllowedEntries = %+v", summary.AllowedEntries)
+	}
+	if len(summary.BlockedEntries) != 1 || summary.BlockedEntries[0].Name != "write_file" {
+		t.Fatalf("summary BlockedEntries = %+v", summary.BlockedEntries)
 	}
 	if summary.BlockedReasons["write_file"] != "side effect not allowed by intent" {
 		t.Fatalf("summary BlockedReasons = %+v", summary.BlockedReasons)

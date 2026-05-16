@@ -1,30 +1,87 @@
 package agentquality
 
+import "context"
+
+type RunnerEvidenceLevel string
+
+const (
+	EvidenceStaticSchema     RunnerEvidenceLevel = "static_schema"
+	EvidenceReplayTrace      RunnerEvidenceLevel = "replay_trace"
+	EvidenceSimulatedRunner  RunnerEvidenceLevel = "simulated_runner"
+	EvidenceRealRunner       RunnerEvidenceLevel = "real_runner"
+	EvidenceProductionShadow RunnerEvidenceLevel = "production_shadow"
+	EvidenceHumanVerified    RunnerEvidenceLevel = "human_verified"
+)
+
+type RunnerInfo struct {
+	Name          string              `json:"name"`
+	Version       string              `json:"version"`
+	EvidenceLevel RunnerEvidenceLevel `json:"evidence_level"`
+}
+
 type EvalRunner interface {
 	Run(cases []LoadedCase) (GateInput, error)
 }
 
+type ContextEvalRunner interface {
+	RunWithContext(ctx context.Context, cases []LoadedCase) (GateInput, error)
+}
+
+type DescribedEvalRunner interface {
+	EvalRunner
+	Info() RunnerInfo
+}
+
 type StaticEvalRunner struct{}
+
+func (StaticEvalRunner) Info() RunnerInfo {
+	return RunnerInfo{
+		Name:          "static",
+		Version:       "1.0",
+		EvidenceLevel: EvidenceStaticSchema,
+	}
+}
 
 func (StaticEvalRunner) Run(cases []LoadedCase) (GateInput, error) {
 	return StaticEvalSummary(cases), nil
 }
 
+// CanApproveOptimization returns true if the evidence level is strong enough
+// to approve optimization decisions. Static schema checks are insufficient.
+func CanApproveOptimization(level RunnerEvidenceLevel) bool {
+	switch level {
+	case EvidenceRealRunner, EvidenceProductionShadow, EvidenceHumanVerified:
+		return true
+	default:
+		return false
+	}
+}
+
+func CanAuthorizeRolloutEvidence(level RunnerEvidenceLevel) bool {
+	switch level {
+	case EvidenceRealRunner, EvidenceProductionShadow, EvidenceHumanVerified:
+		return true
+	default:
+		return false
+	}
+}
+
 func StaticEvalSummary(cases []LoadedCase) GateInput {
 	input := GateInput{
-		Results:            make([]Result, 0, len(cases)),
-		Events:             make([]Event, 0, len(cases)*2),
-		EventsByCase:       make(map[string][]Event, len(cases)),
-		ToolActualByCaseID: make(map[string][]string, len(cases)),
-		CandidateByCaseID:  make(map[string]bool),
-		ReplayRefByCaseID:  make(map[string]string),
+		Results:             make([]Result, 0, len(cases)),
+		Events:              make([]Event, 0, len(cases)*2),
+		EventsByCase:        make(map[string][]Event, len(cases)),
+		ToolActualByCaseID:  make(map[string][]string, len(cases)),
+		CandidateByCaseID:   make(map[string]bool),
+		ReplayRefByCaseID:   make(map[string]string),
+		FinalOutputByCaseID: make(map[string]string),
 	}
 	for _, lc := range cases {
 		c := lc.Case
 		input.Results = append(input.Results, Result{
 			CaseID: c.ID,
 			Passed: true,
-			Reason: "static baseline matched case expectation",
+			Reason: "static schema check only",
 		})
 
 		tool := staticToolForCase(c)

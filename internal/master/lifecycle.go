@@ -192,8 +192,7 @@ func (m *Master) startBackgroundSync(ctx context.Context) {
 // 权限极简架构（v2, add-spec-driven-cognition Phase 1）：
 //  1. 非 shell 家族工具 → 直接 Granted:true（Input 是结构化 JSON，不是 shell 文本）
 //  2. shell 家族工具 → 先调 SafeExecutor.MatchPolicy
-//     - PolicyDeny → Granted:false（绝对禁止）+ audit log + metric
-//     - PolicyAsk → 走 HITL 审批（仅高风险/破坏性命令会命中这档）
+//     - PolicyDeny / PolicyAsk → 走 HITL 审批（用户确认后可以执行）
 //     - PolicyAllow / 默认 / 命令解析失败（safe-deny）→ 对应分支
 //  3. strict 模式（PermissionMode=="strict"）兜底：跳过 default-allow，全部走 HITL
 //
@@ -277,7 +276,7 @@ func (m *Master) createPermissionPromptFn() func(context.Context, skills.Permiss
 
 		switch policy {
 		case security.PolicyDeny:
-			m.logger.Warn("命令被安全策略拒绝",
+			m.logger.Warn("命令命中 deny 策略，转入人工审批",
 				zap.String("session_id", sessionID),
 				zap.String("tool", req.ToolName),
 				zap.String("command", cmd),
@@ -287,23 +286,24 @@ func (m *Master) createPermissionPromptFn() func(context.Context, skills.Permiss
 				Name:        agentquality.EventPermissionDecision,
 				Route:       routeFromSessionID(sessionID),
 				FailureType: agentquality.FailurePermission,
-				FinalStatus: agentquality.StatusBlocked,
+				FinalStatus: agentquality.StatusNeedsUser,
 				Attributes: map[string]any{
-					"tool_name": req.ToolName,
-					"policy":    "deny",
-					"pattern":   pattern,
+					"tool_name":  req.ToolName,
+					"policy":     "ask",
+					"raw_policy": "deny",
+					"pattern":    pattern,
 				},
 			})
 			m.enqueueMetric(observability.Metric{
-				Name:  "security.policy_deny_total",
+				Name:  "security.dangerous_operation_ask_total",
 				Value: 1,
 				Labels: map[string]any{
 					"tool_name": req.ToolName,
-					"policy":    "deny",
+					"policy":    "deny_to_ask",
 					"route":     routeFromSessionID(sessionID),
 				},
 			})
-			return skills.PermissionResponse{Granted: false}, nil
+			return m.requestHITLPermission(ctx, req, sessionID)
 
 		case security.PolicyAsk:
 			// PolicyAsk 一律走 HITL 审批。飞书 IM 已具备卡片审批回路，

@@ -13,6 +13,7 @@ import (
 	"github.com/chef-guo/agents-hive/internal/auth"
 	"github.com/chef-guo/agents-hive/internal/mcphost"
 	"github.com/chef-guo/agents-hive/internal/skills"
+	"github.com/chef-guo/agents-hive/internal/toolruntime"
 )
 
 // ChoiceTypeSkillInstallConfirmation 必须与 internal/skillhitl.ChoiceTypeSkillInstallConfirmation
@@ -182,7 +183,7 @@ func handleSkillInstall(ctx context.Context, deps skillInstallDeps, raw json.Raw
 	approved, aerr := askInstallApproval(ctx, deps.Emitter, in.Name, string(scope), resolved.Source, userID)
 	if aerr != nil {
 		broadcast(skillInstallProgress{Name: in.Name, Scope: string(scope), Source: resolved.Source, Stage: "error", Reason: aerr.Error()})
-		return errorResult("skill_install approval 失败: " + aerr.Error()), nil
+		return errorResult(aerr.Error()), nil
 	}
 	if !approved {
 		broadcast(skillInstallProgress{Name: in.Name, Scope: string(scope), Source: resolved.Source, Stage: "error", Reason: "user_declined"})
@@ -244,15 +245,15 @@ func resolveForInstall(ctx context.Context, d *skills.Discovery, in skillInstall
 // askInstallApproval 发 input_request，解析 action → approved bool。
 // action 语义：approve / proceed → true；其他 → false。
 //
-// emitter 为 nil：返回 hard error "HITL emitter not configured"（Master 未就绪/bootstrap 顺序错误），
-// handler 层把错误包成 tool failure 展示给 LLM；**不是** silent decline（避免静默跳过审批即放行）。
+// emitter 为 nil 或审批请求失败时返回可恢复工具错误；明确拒绝才走 user_declined。
 func askInstallApproval(
 	ctx context.Context,
 	emitter hitlEmitter,
 	name, scope, source, userID string,
 ) (bool, error) {
 	if emitter == nil {
-		return false, errors.New("HITL emitter not configured")
+		return false, errors.New(toolruntime.RecoverableToolCallErrorContent("approval_channel_missing",
+			fmt.Sprintf("skill_install 需要人工确认，但审批通道未初始化。当前 skill 未安装；name=%s；scope=%s；source=%s", name, scope, source)))
 	}
 	data, _ := json.Marshal(map[string]any{
 		"name":           name,
@@ -273,10 +274,12 @@ func askInstallApproval(
 	}
 	resp, err := emitter.EmitInputRequest(ctx, req)
 	if err != nil {
-		return false, err
+		return false, errors.New(toolruntime.RecoverableToolCallErrorContent("approval_request_failed",
+			fmt.Sprintf("skill_install 的审批请求失败。当前 skill 未安装；name=%s；scope=%s；source=%s；error=%s", name, scope, source, err.Error())))
 	}
 	if resp == nil {
-		return false, nil
+		return false, errors.New(toolruntime.RecoverableToolCallErrorContent("approval_request_failed",
+			fmt.Sprintf("skill_install 的审批请求未返回结果。当前 skill 未安装；name=%s；scope=%s；source=%s", name, scope, source)))
 	}
 	switch strings.ToLower(resp.Action) {
 	case "approve", "proceed", "confirm":

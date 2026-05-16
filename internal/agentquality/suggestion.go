@@ -48,6 +48,7 @@ type OptimizationReviewSuggestion struct {
 	SourceCandidateID string                `json:"source_candidate_id"`
 	SourceEvalDiffID  string                `json:"source_eval_diff_id,omitempty"`
 	SourceEvent       Event                 `json:"source_event"`
+	RunnerInfo        RunnerInfo            `json:"runner_info,omitempty"`
 	ReviewRequired    bool                  `json:"review_required"`
 	CreatedBy         string                `json:"created_by"`
 	ApprovedBy        string                `json:"approved_by,omitempty"`
@@ -138,6 +139,7 @@ func (g *SuggestionGenerator) GenerateFromEvalDiff(diff EvalDiff, createdBy stri
 			ProposedValue:    draft.Proposed,
 			DiffFormat:       "text",
 			SourceEvalDiffID: diff.ID,
+			RunnerInfo:       diff.TreatmentRunnerInfo,
 			ReviewRequired:   true,
 			CreatedBy:        createdBy,
 			CreatedAt:        now,
@@ -152,12 +154,26 @@ func (s OptimizationReviewSuggestion) IsExpired(now time.Time) bool {
 	return !s.ExpiresAt.IsZero() && now.After(s.ExpiresAt)
 }
 
+func (s OptimizationReviewSuggestion) CanApprove() bool {
+	return CanApproveOptimization(s.RunnerInfo.EvidenceLevel)
+}
+
+func (s OptimizationReviewSuggestion) ValidateApprovalEvidence() error {
+	if s.CanApprove() {
+		return nil
+	}
+	return fmt.Errorf("suggestion %s requires real_runner, production_shadow, or human_verified evidence before approval/apply, got %q", s.ID, s.RunnerInfo.EvidenceLevel)
+}
+
 func (s OptimizationReviewSuggestion) Approve(reviewer, note string, now time.Time) (OptimizationReviewSuggestion, error) {
 	if s.Status != SuggestionPending {
 		return s, fmt.Errorf("suggestion %s is not pending", s.ID)
 	}
 	if s.IsExpired(now) {
 		return s, fmt.Errorf("suggestion %s expired", s.ID)
+	}
+	if err := s.ValidateApprovalEvidence(); err != nil {
+		return s, err
 	}
 	s.Status = SuggestionApproved
 	s.ApprovedBy = strings.TrimSpace(reviewer)

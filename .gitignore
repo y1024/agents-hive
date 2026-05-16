@@ -45,7 +45,10 @@ DESIGN.md
 CLAUDE.md
 AGENTS.md
 config.json
-scripts/
+scripts/*
+!scripts/ci/
+!scripts/ci/**
+!scripts/check_run_quality_foundation_guard.sh
 openspec/
 config.prd.json
 hive-linux

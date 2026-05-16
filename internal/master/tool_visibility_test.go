@@ -576,6 +576,67 @@ func TestModelVisibleTools_CreateSkillRoutesThroughSkillCreatorNotMCPBuilder(t *
 	}
 }
 
+func TestPersonalSkillHiddenFromOtherUser(t *testing.T) {
+	aliceSession := &SessionState{ID: "s-alice", UserID: "alice"}
+	bobSession := &SessionState{ID: "s-bob", UserID: "bob"}
+	catalog := []mcphost.ToolDefinition{
+		{Name: "tool_search", Core: true},
+		{Name: "skill"},
+	}
+	skillMetasForAlice := []skills.SkillMetadata{
+		{
+			Name:        "skill-creator",
+			Description: "Create private Codex skills",
+			Scope:       skills.ScopePersonal,
+			UserID:      "alice",
+		},
+	}
+	intent := router.IntentFrame{
+		Kind:              router.IntentCreateSkill,
+		AllowsSideEffects: true,
+	}
+
+	aliceVisible, aliceObs := modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntent(
+		aliceSession,
+		catalog,
+		skillMetasForAlice,
+		"创建一个私人技能",
+		config.DefaultToolRecallConfig(),
+		intent,
+	)
+	if !hasTool(aliceVisible, "skill") {
+		t.Fatalf("own personal skill workflow should keep skill entrypoint visible, visible=%v", toolNamesForTest(aliceVisible))
+	}
+	if got := aliceObs.RouteDecision.AllowedToolInputs["skill"]["name"]; got != "skill-creator" {
+		t.Fatalf("alice allowed skill name = %q, want skill-creator", got)
+	}
+
+	bobVisible, bobObs := modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntent(
+		bobSession,
+		catalog,
+		skillMetasForAlice,
+		"创建一个私人技能",
+		config.DefaultToolRecallConfig(),
+		intent,
+	)
+	if got := bobObs.RouteDecision.AllowedToolInputs["skill"]["name"]; got != "" {
+		t.Fatalf("bob must not receive alice personal skill allowed input, got %q", got)
+	}
+	if bobObs.RouteDecision.Mode != router.DecisionModeDiscover {
+		t.Fatalf("bob route mode = %q, want discover; decision=%+v", bobObs.RouteDecision.Mode, bobObs.RouteDecision)
+	}
+	reasons := routeBlockReasons(bobObs.RouteDecision.BlockedTools)
+	if reasons["skill-creator"] != "personal skill not visible" {
+		t.Fatalf("bob block reasons = %+v, want personal skill not visible", reasons)
+	}
+	if !hasTool(bobVisible, "skill") {
+		t.Fatalf("default skill entrypoint should remain visible in list mode, visible=%v", toolNamesForTest(bobVisible))
+	}
+	if allowed, ok := bobSession.AllowedToolInput("skill", "name"); !ok || allowed != routeEmptyInputValue {
+		t.Fatalf("bob skill input constraint = %q/%v, want list-mode sentinel", allowed, ok)
+	}
+}
+
 func TestModelVisibleTools_CreateMCPServerRoutesMCPBuilderAsSkillWorkflow(t *testing.T) {
 	session := &SessionState{ID: "s1"}
 	catalog := []mcphost.ToolDefinition{
@@ -908,8 +969,8 @@ func TestToolRecallObservation_EntriesForExternalSend(t *testing.T) {
 	if entry.DiscoveryOnly {
 		t.Fatalf("feishu_api should not be discovery-only: %#v", entry)
 	}
-	if entry.MayRequireApproval {
-		t.Fatalf("normal feishu send/read actions should not be advertised as blanket approval-required: %#v", entry)
+	if !entry.MayRequireApproval {
+		t.Fatalf("feishu_api catalog hint should advertise privileged action exceptions: %#v", entry)
 	}
 	if !strings.Contains(entry.AllowedInputs["action"], "send_message") || strings.Contains(entry.AllowedInputs["action"], "create_task") {
 		t.Fatalf("external-send admission should constrain feishu_api actions, got %#v", entry.AllowedInputs)
@@ -919,6 +980,40 @@ func TestToolRecallObservation_EntriesForExternalSend(t *testing.T) {
 	}
 	if entry.PrimaryBlockReason != "" {
 		t.Fatalf("unexpected block reason: %#v", entry)
+	}
+}
+
+func TestToolRecallObservation_BlockedDangerousUsesMayRequireApprovalOnly(t *testing.T) {
+	session := &SessionState{ID: "s-dangerous-admit"}
+	catalog := []mcphost.ToolDefinition{
+		{Name: "tool_search", Core: true},
+		{
+			Name:        "metamcp__delete_dashboard",
+			Description: "Delete Grafana dashboard",
+			Trusted:     true,
+		},
+	}
+
+	_, obs := modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntent(
+		session,
+		catalog,
+		nil,
+		"删除 dashboard",
+		config.DefaultToolRecallConfig(),
+		router.IntentFrame{Kind: router.IntentExternalWrite, RequiresExternal: true, AllowsSideEffects: true},
+	)
+	entry, ok := obs.Entries["metamcp__delete_dashboard"]
+	if !ok {
+		t.Fatalf("missing dangerous entry: %#v", obs.Entries)
+	}
+	if entry.TaskCallable {
+		t.Fatalf("blocked dangerous tool must not be task-callable: %#v", entry)
+	}
+	if !entry.MayRequireApproval {
+		t.Fatalf("blocked dangerous tool should remain catalog high-risk: %#v", entry)
+	}
+	if entry.PrimaryBlockReason == "" {
+		t.Fatalf("blocked dangerous tool should expose a block reason: %#v", entry)
 	}
 }
 
@@ -984,8 +1079,8 @@ func TestToolRecallObservation_FeishuExternalReadAllowsOnlyReadActions(t *testin
 	if !entry.TaskCallable {
 		t.Fatalf("feishu_api should be task-callable for external-read intent: %#v", entry)
 	}
-	if entry.MayRequireApproval {
-		t.Fatalf("feishu_api read admission should not be blanket approval-required: %#v", entry)
+	if !entry.MayRequireApproval {
+		t.Fatalf("feishu_api read admission should still advertise privileged action exceptions: %#v", entry)
 	}
 	allowedActions := entry.AllowedInputs["action"]
 	if !strings.Contains(allowedActions, "get_doc_content") || !strings.Contains(allowedActions, "read_sheet") {

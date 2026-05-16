@@ -12,6 +12,7 @@ import (
 	"github.com/chef-guo/agents-hive/internal/agentquality"
 	"github.com/chef-guo/agents-hive/internal/auth"
 	"github.com/chef-guo/agents-hive/internal/errs"
+	"github.com/chef-guo/agents-hive/internal/security"
 )
 
 func (s *Server) handleAdminQualityCreateCandidate(w http.ResponseWriter, r *http.Request) {
@@ -59,7 +60,7 @@ func (s *Server) handleAdminQualityCreateCandidate(w http.ResponseWriter, r *htt
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: err.Error(), Code: errs.CodeInternal})
 		return
 	}
-	writeJSON(w, http.StatusCreated, enrichQualityCandidate(*created))
+	writeAdminQualityJSON(w, http.StatusCreated, enrichQualityCandidate(*created))
 }
 
 func (s *Server) handleAdminQualityListCandidates(w http.ResponseWriter, r *http.Request) {
@@ -70,10 +71,13 @@ func (s *Server) handleAdminQualityListCandidates(w http.ResponseWriter, r *http
 
 	page, size := parsePagination(r)
 	filter := agentquality.CandidateFilter{
-		Status: agentquality.CandidateStatus(r.URL.Query().Get("status")),
-		Route:  r.URL.Query().Get("route"),
-		Limit:  size,
-		Offset: (page - 1) * size,
+		Status:     agentquality.CandidateStatus(r.URL.Query().Get("status")),
+		Route:      r.URL.Query().Get("route"),
+		OwnerScope: agentquality.OwnerScope(strings.TrimSpace(r.URL.Query().Get("owner_scope"))),
+		OwnerID:    strings.TrimSpace(r.URL.Query().Get("owner_id")),
+		UserID:     auth.UserIDFrom(r.Context()),
+		Limit:      size,
+		Offset:     (page - 1) * size,
 	}
 	if filter.Status != "" {
 		if err := agentquality.ValidateCandidateStatus(filter.Status); err != nil {
@@ -91,7 +95,7 @@ func (s *Server) handleAdminQualityListCandidates(w http.ResponseWriter, r *http
 	for i := range items {
 		enriched[i] = enrichQualityCandidate(items[i])
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	writeAdminQualityJSON(w, http.StatusOK, map[string]any{
 		"candidates": enriched,
 		"total":      total,
 		"page":       page,
@@ -127,6 +131,25 @@ func (s *Server) handleAdminQualityUpdateCandidate(w http.ResponseWriter, r *htt
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "promoted 必须提供 promoted_case_id", Code: errs.CodeInvalidInput})
 		return
 	}
+	if body.Status == agentquality.CandidatePromoted {
+		got, ok, err := s.qualityCandidateStore.GetCandidate(r.Context(), id)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: err.Error(), Code: errs.CodeInternal})
+			return
+		}
+		if !ok {
+			writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "候选用例不存在", Code: errs.CodeNotFound})
+			return
+		}
+		candidate := *got
+		candidate.Status = agentquality.CandidatePromoted
+		candidate.ReviewNote = body.ReviewNote
+		candidate.PromotedCaseID = strings.TrimSpace(body.PromotedCaseID)
+		if _, err := promotedGoldenCaseFromLifecycle(candidate); err != nil {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error(), Code: errs.CodeInvalidInput})
+			return
+		}
+	}
 
 	reviewer := auth.UserIDFrom(r.Context())
 	err := s.qualityCandidateStore.UpdateCandidateStatus(r.Context(), id, body.Status, reviewer, body.ReviewNote, body.PromotedCaseID)
@@ -152,7 +175,7 @@ func (s *Server) handleAdminQualityUpdateCandidate(w http.ResponseWriter, r *htt
 		writeJSON(w, http.StatusOK, map[string]string{"status": string(body.Status)})
 		return
 	}
-	writeJSON(w, http.StatusOK, enrichQualityCandidate(*got))
+	writeAdminQualityJSON(w, http.StatusOK, enrichQualityCandidate(*got))
 }
 
 func (s *Server) handleAdminQualityExportCandidate(w http.ResponseWriter, r *http.Request) {
@@ -174,12 +197,12 @@ func (s *Server) handleAdminQualityExportCandidate(w http.ResponseWriter, r *htt
 		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "候选用例不存在", Code: errs.CodeNotFound})
 		return
 	}
-	golden, err := agentquality.GoldenCaseFromPromotedCandidate(*got)
+	golden, err := promotedGoldenCaseFromLifecycle(*got)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error(), Code: errs.CodeInvalidInput})
 		return
 	}
-	writeJSON(w, http.StatusOK, golden)
+	writeAdminQualityJSON(w, http.StatusOK, golden)
 }
 
 func isRegressionCandidateEvent(ev agentquality.Event) bool {
@@ -195,9 +218,71 @@ func isRegressionCandidateEvent(ev agentquality.Event) bool {
 func enrichQualityCandidate(rec agentquality.CandidateRecord) agentquality.CandidateRecord {
 	rec.Suggestions = agentquality.BuildOptimizationSuggestions(rec)
 	if rec.Status == agentquality.CandidatePromoted {
-		if golden, err := agentquality.GoldenCaseFromPromotedCandidate(rec); err == nil {
+		if golden, err := promotedGoldenCaseFromLifecycle(rec); err == nil {
 			rec.GoldenCase = &golden
 		}
 	}
 	return rec
+}
+
+func promotedGoldenCaseFromLifecycle(rec agentquality.CandidateRecord) (agentquality.Case, error) {
+	if rec.Status != agentquality.CandidatePromoted {
+		return agentquality.Case{}, errors.New("candidate is not promoted")
+	}
+	caseID := strings.TrimSpace(rec.PromotedCaseID)
+	if caseID == "" {
+		return agentquality.Case{}, errors.New("promoted candidate requires promoted_case_id")
+	}
+	lifecycleCandidate := rec
+	lifecycleCandidate.PromotedCaseID = caseID
+	if lifecycleCandidate.Case.ExpectedStatus == "" || lifecycleCandidate.Case.ExpectedStatus == agentquality.StatusFail {
+		lifecycleCandidate.Case.ExpectedStatus = agentquality.StatusPass
+	}
+	if lifecycleCandidate.Case.Risk == "" {
+		lifecycleCandidate.Case.Risk = firstNonEmptyQualityCandidateString(lifecycleCandidate.Risk, "safe")
+	}
+	draft, err := agentquality.PromoteCandidateToGoldenDraft(lifecycleCandidate)
+	if err != nil {
+		return agentquality.Case{}, err
+	}
+	draft.ID = caseID
+	draft.Required = true
+	draft.State = string(agentquality.GoldenCaseStateActive)
+	if draft.Risk == "" {
+		draft.Risk = "safe"
+	}
+	if err := agentquality.ValidateActiveGoldenCase(draft); err != nil {
+		return agentquality.Case{}, err
+	}
+	return draft, nil
+}
+
+func firstNonEmptyQualityCandidateString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func writeAdminQualityJSON(w http.ResponseWriter, status int, v any) {
+	redacted, err := redactAdminQualityResponse(v)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "质量响应脱敏失败", Code: errs.CodeInternal})
+		return
+	}
+	writeJSON(w, status, redacted)
+}
+
+func redactAdminQualityResponse(v any) (any, error) {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	var decoded any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return nil, err
+	}
+	return security.RedactSecrets(decoded)
 }

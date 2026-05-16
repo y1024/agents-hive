@@ -812,5 +812,34 @@
       "other-skill-author": "callable input conflict"
     },
     "want_visible_only": ["tool_search"]
+  },
+  {
+    "id": "cross_user_personal_skill_not_callable_from_route_eval",
+    "tags": ["false-match", "personal-skill", "tenant-isolation"],
+    "intent": {
+      "kind": "create_skill",
+      "subject": "Use Alice's private skill authoring helper"
+    },
+    "candidates": [
+      {
+        "name": "skill-creator",
+        "kind": "skill_workflow",
+        "domain": "skill_authoring",
+        "source": "local_skill",
+        "invocation": "skill_tool",
+        "risk": "local_write",
+        "trust": "local",
+        "capabilities": ["meta.skill.create"],
+        "allowed_intent_kinds": ["create_skill"],
+        "owner_user_id": "alice",
+        "visibility": "personal"
+      }
+    ],
+    "want_mode": "discover",
+    "want_blocked_tools": ["skill-creator"],
+    "want_blocked_reason": {
+      "skill-creator": "personal skill not visible"
+    },
+    "want_visible_only": ["tool_search"]
   }
 ]

@@ -20,6 +20,7 @@ const (
 	TargetScopeSession   TargetScope = "session"
 	TargetScopeAgent     TargetScope = "agent"
 	TargetScopeSkill     TargetScope = "skill"
+	TargetScopeDomain    TargetScope = "domain"
 
 	TargetVisibilityPrivate TargetVisibility = "private"
 	TargetVisibilityGlobal  TargetVisibility = "global"
@@ -39,6 +40,9 @@ type MemoryTarget struct {
 	SessionID   string           `json:"session_id,omitempty"`
 	AgentName   string           `json:"agent_name,omitempty"`
 	SkillName   string           `json:"skill_name,omitempty"`
+	DomainID    string           `json:"domain_id,omitempty"`
+	SourceKind  string           `json:"source_kind,omitempty"`
+	SourceName  string           `json:"source_name,omitempty"`
 }
 
 func DecodeMemoryTarget(raw json.RawMessage, memType MemoryType, userID string) MemoryTarget {
@@ -166,6 +170,15 @@ func normalizeTarget(target MemoryTarget, rctx RuntimeContext, memType MemoryTyp
 	if target.SkillName == "" {
 		target.SkillName = rctx.SkillName
 	}
+	if target.DomainID == "" {
+		target.DomainID = rctx.DomainID
+	}
+	if target.SourceKind == "" {
+		target.SourceKind = rctx.SourceKind
+	}
+	if target.SourceName == "" {
+		target.SourceName = rctx.SourceName
+	}
 	if target.ID == "" {
 		target.ID = defaultTargetID(target)
 	}
@@ -180,7 +193,7 @@ func validateTarget(target MemoryTarget) error {
 	switch target.Scope {
 	case TargetScopeUser, TargetScopeGlobal, TargetScopeTeam, TargetScopeOrg,
 		TargetScopeWorkspace, TargetScopeProject, TargetScopeRepo, TargetScopeSession,
-		TargetScopeAgent, TargetScopeSkill:
+		TargetScopeAgent, TargetScopeSkill, TargetScopeDomain:
 	default:
 		return fmt.Errorf("无效的 target_scope: %s", target.Scope)
 	}
@@ -214,6 +227,8 @@ func defaultTargetID(target MemoryTarget) string {
 		return target.AgentName
 	case TargetScopeSkill:
 		return target.SkillName
+	case TargetScopeDomain:
+		return target.DomainID
 	default:
 		return ""
 	}

@@ -6,10 +6,17 @@ import (
 )
 
 type CandidateFilter struct {
-	Status CandidateStatus
-	Route  string
-	Limit  int
-	Offset int
+	Status      CandidateStatus
+	Route       string
+	DomainID    string
+	SourceKind  string
+	SourceName  string
+	OwnerScope  OwnerScope
+	OwnerID     string
+	UserID      string
+	FailureType FailureType
+	Limit       int
+	Offset      int
 }
 
 type CandidateStore interface {

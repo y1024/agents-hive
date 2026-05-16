@@ -100,7 +100,10 @@ func PlanVectorSpaceMigration(records []MemoryRecord, opts VectorSpaceMigrationO
 		offset = len(records)
 	}
 
-	plan := VectorSpaceMigrationPlan{DryRun: opts.DryRun}
+	plan := VectorSpaceMigrationPlan{
+		DryRun:  opts.DryRun,
+		Updates: []VectorSpaceMigrationUpdate{},
+	}
 	nextOffset := offset
 	for i := offset; i < len(records); i++ {
 		plan.Scanned++

@@ -153,13 +153,14 @@ func (m *MemoryStore) ForkSession(_ context.Context, parentID string, forkPoint 
 	}
 	now := time.Now().Format(time.RFC3339)
 	m.sessions[newSessionID] = &SessionRecord{
-		ID:        newSessionID,
-		Name:      newName,
-		CreatedAt: now,
-		UpdatedAt: now,
-		ParentID:  parentID,
-		ForkPoint: forkPoint,
-		UserID:    userID,
+		ID:            newSessionID,
+		Name:          newName,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		SelectedModel: parent.SelectedModel,
+		ParentID:      parentID,
+		ForkPoint:     forkPoint,
+		UserID:        userID,
 	}
 	// Copy messages up to fork point
 	if msgs, ok := m.messages[parentID]; ok && forkPoint <= len(msgs) {

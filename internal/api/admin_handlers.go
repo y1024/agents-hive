@@ -1,11 +1,11 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -15,6 +15,7 @@ import (
 	"github.com/chef-guo/agents-hive/internal/accounting"
 	"github.com/chef-guo/agents-hive/internal/auth"
 	"github.com/chef-guo/agents-hive/internal/errs"
+	"github.com/chef-guo/agents-hive/internal/security"
 )
 
 // ── 辅助函数 ──────────────────────────────────────────────────────────────────
@@ -32,17 +33,18 @@ func parsePagination(r *http.Request) (page, size int) {
 	return
 }
 
-var sensitiveKeys = []string{"app_secret", "bind_password", "client_secret"}
-
-// maskSecrets 将 config_json 中的敏感字段替换为 ****
+// maskSecrets 将 config_json 中的敏感字段替换为统一脱敏占位。
 func maskSecrets(config map[string]any) map[string]any {
-	masked := make(map[string]any, len(config))
-	for k, v := range config {
-		if slices.Contains(sensitiveKeys, k) {
-			masked[k] = "****"
-		} else {
-			masked[k] = v
-		}
+	if config == nil {
+		return map[string]any{}
+	}
+	redacted, err := security.RedactSecrets(config)
+	if err != nil {
+		return config
+	}
+	masked, ok := redacted.(map[string]any)
+	if !ok {
+		return map[string]any{}
 	}
 	return masked
 }
@@ -339,6 +341,14 @@ func (s *Server) handleUpdateProvider(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "无效的请求体", Code: errs.CodeBadRequest})
 		return
 	}
+	if len(update.ConfigJSON) > 0 && string(update.ConfigJSON) != "{}" && string(update.ConfigJSON) != "null" {
+		merged, err := mergeAuthProviderConfigJSON(r.Context(), s.authEngine.Store(), name, update.ConfigJSON)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error(), Code: errs.CodeBadRequest})
+			return
+		}
+		update.ConfigJSON = merged
+	}
 	if err := s.authEngine.Store().UpdateProviderFields(r.Context(), name, update); err != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: err.Error(), Code: errs.CodeInternal})
 		return
@@ -347,6 +357,43 @@ func (s *Server) handleUpdateProvider(w http.ResponseWriter, r *http.Request) {
 		s.logger.Warn("Provider 热加载失败", zap.Error(err))
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func mergeAuthProviderConfigJSON(ctx context.Context, st auth.Store, name string, incoming json.RawMessage) (json.RawMessage, error) {
+	if !json.Valid(incoming) {
+		return nil, errors.New("config_json 不是合法的 JSON")
+	}
+
+	var incomingValue any
+	if err := json.Unmarshal(incoming, &incomingValue); err != nil {
+		return nil, err
+	}
+
+	existingRaw := json.RawMessage(`{}`)
+	if st != nil {
+		providers, err := st.ListAllProviders(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range providers {
+			if p.Name == name {
+				existingRaw = p.ConfigJSON
+				break
+			}
+		}
+	}
+
+	var existingValue any
+	if len(existingRaw) > 0 && json.Valid(existingRaw) {
+		_ = json.Unmarshal(existingRaw, &existingValue)
+	}
+
+	merged := security.PreserveRedactedValues(incomingValue, existingValue)
+	out, err := json.Marshal(merged)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(out), nil
 }
 
 // handleDeleteProvider DELETE /api/v1/admin/auth/providers/{name}

@@ -164,6 +164,8 @@ func (m *Master) checkNestedToolInputAllowed(ctx context.Context, toolName strin
 	if session != nil && len(input) > 0 {
 		if allowedInputs := session.AllowedToolInputsSnapshot()[toolName]; len(allowedInputs) > 0 {
 			if reason, _, denied := routeInputDenyReason(toolName, input, allowedInputs); denied {
+				m.recordRouteInputDeniedMetric(toolName, input, "nested")
+				m.recordFilesystemActionObservation(ctx, sessionID, toolName, input, "denied", "route_input_denied", 0)
 				return fmt.Errorf("%s", toolruntime.RecoverableToolCallErrorContent("nested_route_input_outside_allowed_values",
 					fmt.Sprintf("%s。当前嵌套调用未执行。请按 allowed_inputs 重构参数，不要重复相同工具和参数。", reason)))
 			}

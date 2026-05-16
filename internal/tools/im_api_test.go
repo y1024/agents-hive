@@ -159,6 +159,92 @@ func TestIMAPISendMessageUsesAdapter(t *testing.T) {
 	}
 }
 
+func TestIMAPISendMessageRecordsUnifiedPathMetrics(t *testing.T) {
+	adapter := &fakeIMAdapter{platform: imcore.PlatformFeishu}
+	writer := &captureIMMetricsWriter{}
+	host := mcphost.NewHost(zap.NewNop())
+	RegisterIMAPIToolWithOptions(host, zap.NewNop(), imcore.NewService(adapter), IMAPIToolOptions{
+		MetricsWriter: writer,
+	})
+
+	result := executeIMAPITestTool(t, host, context.Background(), map[string]any{
+		"action":       "send_message",
+		"platform":     "feishu",
+		"recipient_id": "ou_user_123",
+		"content":      "hello",
+	})
+	if result.IsError {
+		t.Fatalf("预期成功，但返回错误: %s", result.DecodeContent())
+	}
+
+	metric := writer.waitMetric(t, metricIMSendUnifiedPathTotal, "success")
+	if metric.Value != 1 {
+		t.Fatalf("metric value = %v, want 1", metric.Value)
+	}
+	if metric.Labels["tool_name"] != "im_api" {
+		t.Fatalf("tool_name label = %v, want im_api", metric.Labels["tool_name"])
+	}
+	if metric.Labels["operation"] != "send_message" {
+		t.Fatalf("operation label = %v, want send_message", metric.Labels["operation"])
+	}
+	if metric.Labels["im"] != "feishu" {
+		t.Fatalf("im label = %v, want feishu", metric.Labels["im"])
+	}
+	if _, exists := metric.Labels["recipient_id"]; exists {
+		t.Fatal("metric labels must not include raw recipient_id")
+	}
+}
+
+func TestIMAPISendMessageRecordsUnifiedErrorMetrics(t *testing.T) {
+	writer := &captureIMMetricsWriter{}
+	host := mcphost.NewHost(zap.NewNop())
+	RegisterIMAPIToolWithOptions(host, zap.NewNop(), imcore.NewService(&fakeIMAdapter{platform: imcore.PlatformFeishu}), IMAPIToolOptions{
+		MetricsWriter: writer,
+	})
+
+	result := executeIMAPITestTool(t, host, context.Background(), map[string]any{
+		"action":       "send_message",
+		"platform":     "wechatbot",
+		"recipient_id": "wxid_peer",
+		"content":      "hello",
+	})
+	if !result.IsError {
+		t.Fatalf("预期失败，但返回成功: %s", result.DecodeContent())
+	}
+
+	metric := writer.waitMetric(t, metricIMSendUnifiedPathTotal, "error")
+	if metric.Labels["tool_name"] != "im_api" || metric.Labels["im"] != "wechatbot" {
+		t.Fatalf("unexpected metric labels: %+v", metric.Labels)
+	}
+}
+
+func TestIMAPIMetricsRequireExplicitWriterAndDoNotUseLegacyGlobal(t *testing.T) {
+	logger := zap.NewNop()
+	legacyWriter := &captureIMMetricsWriter{}
+	legacyHost := mcphost.NewHost(logger)
+	RegisterSendIMMessage(legacyHost, logger, &MockIMRouter{metricsWriter: legacyWriter})
+
+	unifiedHost := mcphost.NewHost(logger)
+	RegisterIMAPITool(unifiedHost, logger, imcore.NewService(&fakeIMAdapter{platform: imcore.PlatformFeishu}))
+	result := executeIMAPITestTool(t, unifiedHost, context.Background(), map[string]any{
+		"action":       "send_message",
+		"platform":     "feishu",
+		"recipient_id": "ou_user_123",
+		"content":      "hello",
+	})
+	if result.IsError {
+		t.Fatalf("预期成功，但返回错误: %s", result.DecodeContent())
+	}
+
+	legacyWriter.mu.Lock()
+	defer legacyWriter.mu.Unlock()
+	for _, metric := range legacyWriter.metrics {
+		if metric.Name == metricIMSendUnifiedPathTotal {
+			t.Fatalf("im_api without explicit MetricsWriter leaked metric into legacy writer: %+v", metric)
+		}
+	}
+}
+
 func TestIMAPISendMessageForceDryRun(t *testing.T) {
 	adapter := &fakeIMAdapter{platform: imcore.PlatformFeishu}
 	host := mcphost.NewHost(zap.NewNop())

@@ -97,12 +97,36 @@ func TestDefaultPermissionRulesMinimalIMAndMixedActions(t *testing.T) {
 	}
 
 	assertRule("send_im_message", "", "allow")
+	assertRule("filesystem", "", "allow")
+	assertRule("multiedit", "", "allow")
 	assertRule("feishu_api", "create_approval", "ask")
 	assertRule("feishu_api", "", "allow")
 	assertRule("memory", "delete", "ask")
 	assertRule("taskboard", "delete", "ask")
 	assertNoRule("send_im_message", "", "ask")
+	assertNoRule("multi_edit", "", "allow")
 	assertNoRule("feishu_api", "", "ask")
+}
+
+func TestToolsFilesystemEnabledDefault(t *testing.T) {
+	cfg := Default()
+	if !cfg.Tools.IsFilesystemEnabled() {
+		t.Fatal("filesystem should be enabled by default")
+	}
+	cfg.CLIDefaults()
+	if cfg.Tools.FilesystemEnabled == nil || !*cfg.Tools.FilesystemEnabled {
+		t.Fatal("CLI defaults should set filesystem_enabled to true")
+	}
+}
+
+func TestToolsFilesystemEnabledExplicitFalse(t *testing.T) {
+	var cfg Config
+	if err := json.Unmarshal([]byte(`{"tools":{"filesystem_enabled":false}}`), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Tools.IsFilesystemEnabled() {
+		t.Fatal("explicit false should disable filesystem")
+	}
 }
 
 func TestLoad_ChannelWechatbotFlag(t *testing.T) {

@@ -492,6 +492,27 @@ func TestBuildRouteDecisionMixedOperationReadConstrainsMemoryAndTaskboard(t *tes
 	}
 }
 
+func TestBuildRouteDecisionFilesystemReadConstrainsActions(t *testing.T) {
+	profile := InferToolProfile(mcphost.ToolDefinition{Name: "filesystem", Core: true}, ProfileHint{})
+
+	decision := BuildRouteDecision(IntentFrame{Kind: IntentRead}, []ToolProfile{profile})
+
+	if !containsString(decision.AllowedTools, "filesystem") {
+		t.Fatalf("filesystem should be callable for read intent: %+v", decision)
+	}
+	actions := decision.AllowedToolInputs["filesystem"]["action"]
+	for _, action := range []string{"list", "glob", "grep", "read"} {
+		if !containsPipeActionForRouteTest(actions, action) {
+			t.Fatalf("filesystem read actions missing %q: %#v", action, decision.AllowedToolInputs)
+		}
+	}
+	for _, action := range []string{"write", "edit", "multiedit", "multi_edit"} {
+		if containsPipeActionForRouteTest(actions, action) {
+			t.Fatalf("filesystem read intent must not allow %q: %q", action, actions)
+		}
+	}
+}
+
 func mustBuiltinToolProfileForTest(t *testing.T, name string) ToolProfile {
 	t.Helper()
 	profile, ok := BuiltinToolProfile(name)
@@ -524,6 +545,29 @@ func TestBuildRouteDecisionMixedOperationLocalWriteConstrainsMemoryAndTaskboard(
 	if strings.Contains(taskboardOps, "delete") {
 		t.Fatalf("taskboard.delete must not be granted as normal local write: %q", taskboardOps)
 	}
+}
+
+func TestBuildRouteDecisionFilesystemLocalWriteAllowsWriteActions(t *testing.T) {
+	profile := InferToolProfile(mcphost.ToolDefinition{Name: "filesystem", Core: true}, ProfileHint{})
+
+	decision := BuildRouteDecision(IntentFrame{Kind: IntentWriteLocal, AllowsSideEffects: true}, []ToolProfile{profile})
+
+	if !containsString(decision.AllowedTools, "filesystem") {
+		t.Fatalf("filesystem should be callable for local-write intent: %+v", decision)
+	}
+	actions := decision.AllowedToolInputs["filesystem"]["action"]
+	for _, action := range []string{"list", "glob", "grep", "read", "write", "edit", "multiedit"} {
+		if !containsPipeActionForRouteTest(actions, action) {
+			t.Fatalf("filesystem local-write actions missing %q: %#v", action, decision.AllowedToolInputs)
+		}
+	}
+	if containsPipeActionForRouteTest(actions, "multi_edit") {
+		t.Fatalf("filesystem local-write actions must not include legacy multi_edit: %q", actions)
+	}
+}
+
+func containsPipeActionForRouteTest(actions, want string) bool {
+	return strings.Contains("|"+actions+"|", "|"+want+"|")
 }
 
 func TestBuildRouteDecisionBrowserInteractReadConstrainsNestedCommandActions(t *testing.T) {

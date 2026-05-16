@@ -147,7 +147,6 @@ export interface NodeClient {
   // 外部资源管理
   listExternalResources(): Promise<ExternalResource[]>;
   upsertExternalResource(resource: ExternalResourceSaveRequest): Promise<{ status: string; name: string }>;
-  saveExternalResource(resource: ExternalResourceSaveRequest): Promise<{ status: string; name: string }>;
   deleteExternalResource(name: string): Promise<{ status: string; name: string }>;
   // WebSocket URL
   getWebSocketUrl(): string;
@@ -425,11 +424,6 @@ export class LocalNodeClient implements NodeClient {
 
   upsertExternalResource(resource: ExternalResourceSaveRequest): Promise<{ status: string; name: string }> {
     return this.rpc<{ status: string; name: string }>('resources.save', resource);
-  }
-
-  /** @deprecated Use upsertExternalResource. */
-  saveExternalResource(resource: ExternalResourceSaveRequest): Promise<{ status: string; name: string }> {
-    return this.upsertExternalResource(resource);
   }
 
   deleteExternalResource(name: string): Promise<{ status: string; name: string }> {

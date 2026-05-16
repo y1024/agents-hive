@@ -191,8 +191,10 @@ func (s *Server) handleAdminUpdateLLMProvider(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	var update store.LLMProviderUpdate
 	if req.ProviderType != nil {
 		existing.ProviderType = *req.ProviderType
+		update.ProviderType = &existing.ProviderType
 	}
 	if req.APIKey != nil {
 		apiKey, err := mergeProviderAPIKeyUpdate(existing.APIKey, *req.APIKey)
@@ -201,6 +203,7 @@ func (s *Server) handleAdminUpdateLLMProvider(w http.ResponseWriter, r *http.Req
 			return
 		}
 		existing.APIKey = apiKey
+		update.APIKey = &existing.APIKey
 	}
 	if req.BaseURL != nil {
 		baseURL, err := normalizeLLMBaseURLInput(*req.BaseURL)
@@ -209,6 +212,7 @@ func (s *Server) handleAdminUpdateLLMProvider(w http.ResponseWriter, r *http.Req
 			return
 		}
 		existing.BaseURL = baseURL
+		update.BaseURL = &existing.BaseURL
 	}
 	if req.IsDefault != nil {
 		if *req.IsDefault {
@@ -219,15 +223,19 @@ func (s *Server) handleAdminUpdateLLMProvider(w http.ResponseWriter, r *http.Req
 			}
 		}
 		existing.IsDefault = *req.IsDefault
+		update.IsDefault = &existing.IsDefault
 	}
 	if req.Enabled != nil {
 		existing.Enabled = *req.Enabled
+		update.Enabled = &existing.Enabled
 	}
 	if req.APIFormat != nil {
 		existing.APIFormat = *req.APIFormat
+		update.APIFormat = &existing.APIFormat
 	}
 	if req.ServiceType != nil && *req.ServiceType != "" {
 		existing.ServiceType = *req.ServiceType
+		update.ServiceType = &existing.ServiceType
 	}
 	if req.ConfigJSON != nil {
 		configJSON, err := mergeConfigJSONStringUpdate(existing.ConfigJSON, *req.ConfigJSON)
@@ -236,9 +244,10 @@ func (s *Server) handleAdminUpdateLLMProvider(w http.ResponseWriter, r *http.Req
 			return
 		}
 		existing.ConfigJSON = configJSON
+		update.ConfigJSON = &existing.ConfigJSON
 	}
 
-	if err := s.store.UpdateLLMProvider(ctx, name, existing); err != nil {
+	if err := s.store.UpdateLLMProvider(ctx, name, update); err != nil {
 		s.logger.Error("更新 LLM Provider 失败", zap.Error(err))
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "更新失败: " + err.Error(), Code: errs.CodeStoreWriteFailed})
 		return
@@ -431,6 +440,7 @@ func (s *Server) handleAdminUpdateLLMModel(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	var update store.LLMModelUpdate
 	if req.Name != nil {
 		newName := strings.TrimSpace(*req.Name)
 		if newName == "" {
@@ -448,9 +458,11 @@ func (s *Server) handleAdminUpdateLLMModel(w http.ResponseWriter, r *http.Reques
 			}
 			existing.Name = newName
 		}
+		update.Name = &existing.Name
 	}
 	if req.ProviderName != nil {
 		existing.ProviderName = *req.ProviderName
+		update.ProviderName = &existing.ProviderName
 	}
 	if req.Model != nil && *req.Model != "" {
 		existing.Model = strings.TrimSpace(*req.Model)
@@ -458,6 +470,7 @@ func (s *Server) handleAdminUpdateLLMModel(w http.ResponseWriter, r *http.Reques
 			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "model 不能为空", Code: errs.CodeBadRequest})
 			return
 		}
+		update.Model = &existing.Model
 	}
 	if req.BaseURL != nil {
 		baseURL, err := normalizeLLMBaseURLInput(*req.BaseURL)
@@ -466,6 +479,7 @@ func (s *Server) handleAdminUpdateLLMModel(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		existing.BaseURL = baseURL
+		update.BaseURL = &existing.BaseURL
 	}
 	if req.APIKey != nil {
 		apiKey, err := mergeModelAPIKeyUpdate(existing.APIKey, *req.APIKey)
@@ -474,12 +488,15 @@ func (s *Server) handleAdminUpdateLLMModel(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		existing.APIKey = apiKey
+		update.APIKey = &existing.APIKey
 	}
 	if req.IsDefault != nil {
 		existing.IsDefault = *req.IsDefault
+		update.IsDefault = &existing.IsDefault
 	}
 	if req.Enabled != nil {
 		existing.Enabled = *req.Enabled
+		update.Enabled = &existing.Enabled
 	}
 	if req.ConfigJSON != nil {
 		configJSON, err := mergeConfigJSONStringUpdate(existing.ConfigJSON, *req.ConfigJSON)
@@ -488,9 +505,10 @@ func (s *Server) handleAdminUpdateLLMModel(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		existing.ConfigJSON = configJSON
+		update.ConfigJSON = &existing.ConfigJSON
 	}
 
-	if err := s.store.UpdateLLMModel(ctx, name, existing); err != nil {
+	if err := s.store.UpdateLLMModel(ctx, name, update); err != nil {
 		s.logger.Error("更新 LLM Model 失败", zap.Error(err))
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "更新失败: " + err.Error(), Code: errs.CodeStoreWriteFailed})
 		return

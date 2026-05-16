@@ -59,9 +59,10 @@ func registerLS(host *mcphost.Host, logger *zap.Logger) {
 
 	host.RegisterTool(
 		mcphost.ToolDefinition{
-			Name:        "ls",
-			Description: "列出目录内容，支持递归列出子目录（最多3层）",
-			InputSchema: schema,
+			Name:              "ls",
+			Description:       "列出目录内容，支持递归列出子目录（最多3层）",
+			InputSchema:       schema,
+			IsConcurrencySafe: true, // 只读无副作用，可并发执行
 		},
 		func(ctx context.Context, input json.RawMessage) (*mcphost.ToolResult, error) {
 			var params lsInput
@@ -69,53 +70,59 @@ func registerLS(host *mcphost.Host, logger *zap.Logger) {
 				return errorResult("输入无效: " + err.Error()), nil
 			}
 
-			// 设置默认路径
-			if params.Path == "" {
-				params.Path = "."
-			}
-
-			resolvedPath, err := resolveToolPath(params.Path)
-			if err != nil {
-				return errorResult(err.Error()), nil
-			}
-			params.Path = resolvedPath
-
-			// 限制递归深度
-			maxDepth := params.MaxDepth
-			if maxDepth <= 0 {
-				maxDepth = defaultMaxDepth
-			}
-			if maxDepth > maxAllowedDepth {
-				maxDepth = maxAllowedDepth
-			}
-
-			// 检查路径是否存在
-			info, err := os.Stat(params.Path)
-			if err != nil {
-				return errorResult("路径不存在: " + err.Error()), nil
-			}
-
-			// 如果是文件，直接返回其信息
-			if !info.IsDir() {
-				return formatSingleFile(params.Path, info), nil
-			}
-
-			// 列出目录内容
-			if params.Recursive {
-				entries, err := listRecursive(params.Path, maxDepth)
-				if err != nil {
-					return errorResult("列出目录失败: " + err.Error()), nil
-				}
-				return formatDirectoryTree(params.Path, entries), nil
-			}
-
-			entries, err := listDirectory(params.Path)
-			if err != nil {
-				return errorResult("列出目录失败: " + err.Error()), nil
-			}
-			return formatDirectoryFlat(params.Path, entries), nil
+			return executeLS(ctx, params)
 		},
 	)
+}
+
+func executeLS(ctx context.Context, params lsInput) (*mcphost.ToolResult, error) {
+	_ = ctx
+
+	// 设置默认路径
+	if params.Path == "" {
+		params.Path = "."
+	}
+
+	resolvedPath, err := resolveToolPath(params.Path)
+	if err != nil {
+		return errorResult(err.Error()), nil
+	}
+	params.Path = resolvedPath
+
+	// 限制递归深度
+	maxDepth := params.MaxDepth
+	if maxDepth <= 0 {
+		maxDepth = defaultMaxDepth
+	}
+	if maxDepth > maxAllowedDepth {
+		maxDepth = maxAllowedDepth
+	}
+
+	// 检查路径是否存在
+	info, err := os.Stat(params.Path)
+	if err != nil {
+		return errorResult("路径不存在: " + err.Error()), nil
+	}
+
+	// 如果是文件，直接返回其信息
+	if !info.IsDir() {
+		return formatSingleFile(params.Path, info), nil
+	}
+
+	// 列出目录内容
+	if params.Recursive {
+		entries, err := listRecursive(params.Path, maxDepth)
+		if err != nil {
+			return errorResult("列出目录失败: " + err.Error()), nil
+		}
+		return formatDirectoryTree(params.Path, entries), nil
+	}
+
+	entries, err := listDirectory(params.Path)
+	if err != nil {
+		return errorResult("列出目录失败: " + err.Error()), nil
+	}
+	return formatDirectoryFlat(params.Path, entries), nil
 }
 
 // listDirectory 列出单个目录的内容（非递归）

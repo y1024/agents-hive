@@ -2,6 +2,7 @@ package skills
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/chef-guo/agents-hive/internal/errs"
@@ -62,6 +63,27 @@ func TestToolFilter_CheckAllowed_EmptyFilter(t *testing.T) {
 	f := NewToolFilter(nil)
 	if err := f.CheckAllowed("any-tool"); err != nil {
 		t.Errorf("empty filter should allow all: %v", err)
+	}
+}
+
+func TestToolFilter_CheckAllowedInput(t *testing.T) {
+	f := NewToolFilterWithDenyAndInputs(nil, nil, map[string]map[string]string{
+		"filesystem": {"action": "list|glob|grep|read"},
+	})
+
+	if err := f.CheckAllowedInput("filesystem", json.RawMessage(`{"action":"read","path":"README.md"}`)); err != nil {
+		t.Fatalf("filesystem read should pass input filter: %v", err)
+	}
+
+	err := f.CheckAllowedInput("filesystem", json.RawMessage(`{"action":"edit","path":"README.md","old_string":"a","new_string":"b"}`))
+	if err == nil {
+		t.Fatal("filesystem edit should be blocked by input filter")
+	}
+	if !errs.IsCode(err, errs.CodeSkillToolBlocked) {
+		t.Fatalf("expected CodeSkillToolBlocked, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "tool_filter_input_denied") {
+		t.Fatalf("expected recoverable input denial marker, got %q", err.Error())
 	}
 }
 

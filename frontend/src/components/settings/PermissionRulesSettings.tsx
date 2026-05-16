@@ -6,10 +6,10 @@ import type { PermissionRule, RuntimeConfig } from '../../types/api';
 
 const DEFAULT_RULES: PermissionRule[] = [
   { tool_name: 'read_file', action: 'allow' },
+  { tool_name: 'filesystem', action: 'allow' },
   { tool_name: 'write_file', action: 'allow' },
   { tool_name: 'edit', action: 'allow' },
   { tool_name: 'multiedit', action: 'allow' },
-  { tool_name: 'multi_edit', action: 'allow' },
   { tool_name: 'apply_patch', action: 'allow' },
   { tool_name: 'glob', action: 'allow' },
   { tool_name: 'grep', action: 'allow' },

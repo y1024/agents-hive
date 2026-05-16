@@ -1,5 +1,5 @@
 import type { CSSProperties } from 'react';
-import type { JournalEvent } from '../../types/journal';
+import { journalToolDisplayName, type JournalEvent } from '../../types/journal';
 import type { TraceQualityEvent, TraceTimelineItem } from '../../types/api';
 
 interface Props {
@@ -30,7 +30,7 @@ export function EventDetailPanel({ event, traceItem, onCreateCandidate, canCreat
           <div style={{ marginBottom: 8 }}>
             <span style={{ color: 'var(--text-secondary, #6C6C70)', fontSize: 12 }}>工具</span>
             <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 13, color: 'var(--accent-600, #2563EB)' }}>
-              {event.tool_name}
+              {journalToolDisplayName(event)}
             </div>
           </div>
           {event.arguments && (

@@ -9,14 +9,14 @@
     },
     "candidates": [
       {
-        "name": "read_file",
+        "name": "filesystem",
         "kind": "builtin_tool",
         "domain": "filesystem",
         "source": "builtin",
         "invocation": "direct_tool",
-        "risk": "read_only",
+        "risk": "local_write",
         "trust": "built_in",
-        "read_only": true
+        "side_effect": true
       },
       {
         "name": "feishu_api",
@@ -32,9 +32,9 @@
     ],
     "want_mode": "none",
     "want_reason": "intent blocked",
-    "want_blocked_tools": ["read_file", "feishu_api"],
+    "want_blocked_tools": ["filesystem", "feishu_api"],
     "want_blocked_reason": {
-      "read_file": "intent blocked",
+      "filesystem": "intent blocked",
       "feishu_api": "intent blocked"
     },
     "want_visible_only": ["tool_search"]
@@ -49,14 +49,14 @@
     },
     "candidates": [
       {
-        "name": "read_file",
+        "name": "filesystem",
         "kind": "builtin_tool",
         "domain": "filesystem",
         "source": "builtin",
         "invocation": "direct_tool",
-        "risk": "read_only",
+        "risk": "local_write",
         "trust": "built_in",
-        "read_only": true
+        "side_effect": true
       },
       {
         "name": "feishu_api",
@@ -72,12 +72,17 @@
     ],
     "want_mode": "allow",
     "want_reason": "matched intent and capability profile",
-    "want_allowed_tools": ["read_file"],
+    "want_preferred_tools": ["filesystem"],
     "want_blocked_tools": ["feishu_api"],
     "want_blocked_reason": {
       "feishu_api": "side effect not allowed by intent"
     },
-    "want_visible_only": ["tool_search"]
+    "want_visible_only": ["tool_search"],
+    "want_allowed_inputs": {
+      "filesystem": {
+        "action": "glob|grep|list|read"
+      }
+    }
   },
   {
     "id": "false_match_create_skill_mentions_mcp_but_routes_to_skill_creator",
@@ -349,7 +354,7 @@
     "want_visible_only": ["tool_search"]
   },
   {
-    "id": "read_intent_allows_read_only_builtin",
+    "id": "read_intent_accepts_legacy_read_file_compat",
     "tags": ["read-only"],
     "intent": {
       "kind": "read",
@@ -368,7 +373,7 @@
       }
     ],
     "want_mode": "allow",
-    "want_allowed_tools": ["read_file"],
+    "want_compat_tools": ["read_file"],
     "want_visible_only": ["tool_search"]
   },
   {

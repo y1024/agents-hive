@@ -55,6 +55,7 @@ const routeEmptyInputValue = "__empty__"
 type toolVisibilityOptions struct {
 	FastPath             bool
 	MaxModelVisibleTools int
+	FilesystemEnabled    *bool
 }
 
 // modelVisibleToolsForSession 收窄模型默认候选集：核心工具和质量杠杆工具默认可见，
@@ -99,7 +100,7 @@ func modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntentWithOptio
 	if len(catalog) == 0 {
 		return nil, toolRecallObservation{Mode: config.NormalizeToolRecallConfig(recallCfg).Mode}
 	}
-	catalog = stableToolDefinitions(catalog)
+	catalog = filterCatalogByVisibilityOptions(stableToolDefinitions(catalog), opts)
 	userID := ""
 	if session != nil {
 		userID = session.UserID
@@ -126,13 +127,35 @@ func modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntentWithOptio
 	if opts.FastPath && opts.MaxModelVisibleTools > 0 {
 		obs.MaxVisibleTools = opts.MaxModelVisibleTools
 	}
-	obs.Entries = buildAdmissionEntries(session, catalog, out, obs.RouteDecision)
+	runtimeAllowedInputs := mergeAllowedToolInputsWithMixedDefaults(obs.RouteDecision.AllowedToolInputs, out, intent)
+	obs.Entries = buildAdmissionEntries(session, catalog, out, obs.RouteDecision, runtimeAllowedInputs)
 	if session != nil {
 		session.SetRouteDecision(obs.RouteDecision)
 		session.SetAllowedTools(allowedToolsForRuntime(obs.RouteDecision, out))
-		session.SetAllowedToolInputs(mergeAllowedToolInputsWithMixedReadDefaults(obs.RouteDecision.AllowedToolInputs, out))
+		session.SetAllowedToolInputs(runtimeAllowedInputs)
 	}
 	return out, obs
+}
+
+func isToolEnabledByVisibilityOptions(name string, opts toolVisibilityOptions) bool {
+	name = strings.TrimSpace(name)
+	if name == "filesystem" {
+		return opts.FilesystemEnabled == nil || *opts.FilesystemEnabled
+	}
+	return true
+}
+
+func filterCatalogByVisibilityOptions(catalog []mcphost.ToolDefinition, opts toolVisibilityOptions) []mcphost.ToolDefinition {
+	if opts.FilesystemEnabled == nil || *opts.FilesystemEnabled {
+		return catalog
+	}
+	out := make([]mcphost.ToolDefinition, 0, len(catalog))
+	for _, tool := range catalog {
+		if isToolEnabledByVisibilityOptions(tool.Name, opts) {
+			out = append(out, tool)
+		}
+	}
+	return out
 }
 
 func stableToolDefinitions(tools []mcphost.ToolDefinition) []mcphost.ToolDefinition {
@@ -168,7 +191,7 @@ func isDefaultVisibleToolWithOptions(tool mcphost.ToolDefinition, opts toolVisib
 
 func isFastPathDefaultVisibleTool(name string) bool {
 	switch strings.TrimSpace(name) {
-	case "ls", "memory", "question", "skill", "tool_search", "read_file", "grep", "glob":
+	case "filesystem", "ls", "memory", "question", "skill", "tool_search", "read_file", "grep", "glob":
 		return true
 	default:
 		return false
@@ -211,7 +234,7 @@ func trimModelVisibleTools(tools []mcphost.ToolDefinition, opts toolVisibilityOp
 		}
 		addSelected(name)
 	}
-	for _, priority := range []string{"question", "memory", "skill", "read_file", "grep", "glob", "ls"} {
+	for _, priority := range []string{"question", "memory", "skill", "filesystem", "read_file", "grep", "glob", "ls"} {
 		for _, tool := range tools {
 			if len(selected) >= opts.MaxModelVisibleTools {
 				break
@@ -490,7 +513,7 @@ func appendDiscoveredToolRecalls(recalls []tools.ToolRecallHit, catalog []mcphos
 	return recalls
 }
 
-func buildAdmissionEntries(session *SessionState, catalog []mcphost.ToolDefinition, visible []mcphost.ToolDefinition, decision router.RouteDecision) map[string]admissionEntry {
+func buildAdmissionEntries(session *SessionState, catalog []mcphost.ToolDefinition, visible []mcphost.ToolDefinition, decision router.RouteDecision, runtimeAllowedInputs map[string]map[string]string) map[string]admissionEntry {
 	entries := make(map[string]admissionEntry, len(catalog))
 	visibleSet := make(map[string]bool, len(visible))
 	for _, tool := range visible {
@@ -521,7 +544,7 @@ func buildAdmissionEntries(session *SessionState, catalog []mcphost.ToolDefiniti
 		case blockReasons[name] != "":
 			primaryReason = blockReasons[name]
 		}
-		allowedInputs := defaultRuntimeAllowedInputsForTool(name, decision.AllowedToolInputs[name], callableSet[name])
+		allowedInputs := defaultRuntimeAllowedInputsForTool(name, runtimeAllowedInputs[name], callableSet[name])
 		entries[name] = admissionEntry{
 			Name:                name,
 			SurvivedPolicy:      true,
@@ -539,6 +562,10 @@ func buildAdmissionEntries(session *SessionState, catalog []mcphost.ToolDefiniti
 }
 
 func mergeAllowedToolInputsWithMixedReadDefaults(inputs map[string]map[string]string, visible []mcphost.ToolDefinition) map[string]map[string]string {
+	return mergeAllowedToolInputsWithMixedDefaults(inputs, visible, router.IntentFrame{Kind: router.IntentRead})
+}
+
+func mergeAllowedToolInputsWithMixedDefaults(inputs map[string]map[string]string, visible []mcphost.ToolDefinition, intent router.IntentFrame) map[string]map[string]string {
 	out := collections.CloneNonEmptyNestedStringMap(inputs)
 	for _, tool := range visible {
 		name := strings.TrimSpace(tool.Name)
@@ -548,7 +575,10 @@ func mergeAllowedToolInputsWithMixedReadDefaults(inputs map[string]map[string]st
 		if len(out[name]) > 0 {
 			continue
 		}
-		defaults := defaultRuntimeAllowedInputsForTool(name, nil, true)
+		defaults := router.MixedAllowedToolInputsForIntent(intent, name)
+		if len(defaults) == 0 {
+			defaults = defaultRuntimeAllowedInputsForTool(name, nil, true)
+		}
 		if len(defaults) == 0 {
 			continue
 		}

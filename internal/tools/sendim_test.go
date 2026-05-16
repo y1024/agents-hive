@@ -6,20 +6,24 @@ import (
 	"errors"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/chef-guo/agents-hive/internal/auth"
 	"github.com/chef-guo/agents-hive/internal/imctx"
 	"github.com/chef-guo/agents-hive/internal/mcphost"
+	"github.com/chef-guo/agents-hive/internal/observability"
 	"github.com/chef-guo/agents-hive/internal/store"
 )
 
 // MockIMRouter 模拟 IM 路由器
 type MockIMRouter struct {
-	sendFunc func(ctx context.Context, req imctx.SendRequest) error
-	sentMsgs []imctx.SendRequest
+	sendFunc      func(ctx context.Context, req imctx.SendRequest) error
+	sentMsgs      []imctx.SendRequest
+	metricsWriter observability.MetricsWriter
 }
 
 func (m *MockIMRouter) SendMessage(ctx context.Context, req imctx.SendRequest) error {
@@ -32,6 +36,42 @@ func (m *MockIMRouter) SendMessage(ctx context.Context, req imctx.SendRequest) e
 	}
 
 	return nil
+}
+
+func (m *MockIMRouter) MetricsWriter() observability.MetricsWriter {
+	return m.metricsWriter
+}
+
+type captureIMMetricsWriter struct {
+	mu      sync.Mutex
+	metrics []observability.Metric
+}
+
+func (w *captureIMMetricsWriter) Record(_ context.Context, metric observability.Metric) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.metrics = append(w.metrics, metric)
+	return nil
+}
+
+func (w *captureIMMetricsWriter) waitMetric(t *testing.T, name, status string) observability.Metric {
+	t.Helper()
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		w.mu.Lock()
+		for _, metric := range w.metrics {
+			if metric.Name == name && metric.Labels["status"] == status {
+				w.mu.Unlock()
+				return metric
+			}
+		}
+		w.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	t.Fatalf("metric %q with status=%q not found, got %+v", name, status, w.metrics)
+	return observability.Metric{}
 }
 
 // TestSendIMMessageSuccess 测试成功发送消息
@@ -74,6 +114,99 @@ func TestSendIMMessageSuccess(t *testing.T) {
 	}
 	if sent.Content != "测试消息" {
 		t.Errorf("预期内容 '测试消息'，实际: %s", sent.Content)
+	}
+}
+
+func TestSendIMMessageRecordsLegacyPathMetrics(t *testing.T) {
+	logger := zap.NewNop()
+	host := mcphost.NewHost(logger)
+	writer := &captureIMMetricsWriter{}
+	mockRouter := &MockIMRouter{metricsWriter: writer}
+
+	RegisterSendIMMessage(host, logger, mockRouter)
+
+	input, _ := json.Marshal(map[string]any{
+		"platform": "feishu",
+		"chat_id":  "oc_chat_123",
+		"content":  "测试消息",
+	})
+	result, err := host.ExecuteTool(context.Background(), "send_im_message", input)
+	if err != nil {
+		t.Fatalf("工具调用失败: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("预期成功，但返回错误: %s", result.DecodeContent())
+	}
+
+	metric := writer.waitMetric(t, metricIMSendLegacyPathTotal, "success")
+	if metric.Value != 1 {
+		t.Fatalf("metric value = %v, want 1", metric.Value)
+	}
+	if metric.Labels["tool_name"] != "send_im_message" {
+		t.Fatalf("tool_name label = %v, want send_im_message", metric.Labels["tool_name"])
+	}
+	if metric.Labels["operation"] != "send_message" {
+		t.Fatalf("operation label = %v, want send_message", metric.Labels["operation"])
+	}
+	if metric.Labels["im"] != "feishu" {
+		t.Fatalf("im label = %v, want feishu", metric.Labels["im"])
+	}
+	if _, exists := metric.Labels["chat_id"]; exists {
+		t.Fatal("metric labels must not include raw chat_id")
+	}
+}
+
+func TestSendIMMessageRecordsLegacyErrorMetrics(t *testing.T) {
+	logger := zap.NewNop()
+	host := mcphost.NewHost(logger)
+	writer := &captureIMMetricsWriter{}
+	mockRouter := &MockIMRouter{
+		metricsWriter: writer,
+		sendFunc: func(ctx context.Context, req imctx.SendRequest) error {
+			return errors.New("网络错误")
+		},
+	}
+
+	RegisterSendIMMessage(host, logger, mockRouter)
+
+	input, _ := json.Marshal(map[string]any{
+		"platform": "feishu",
+		"chat_id":  "oc_chat_123",
+		"content":  "测试消息",
+	})
+	result, err := host.ExecuteTool(context.Background(), "send_im_message", input)
+	if err != nil {
+		t.Fatalf("工具调用失败: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("预期返回错误，但成功了")
+	}
+
+	metric := writer.waitMetric(t, metricIMSendLegacyPathTotal, "error")
+	if metric.Labels["tool_name"] != "send_im_message" || metric.Labels["im"] != "feishu" {
+		t.Fatalf("unexpected metric labels: %+v", metric.Labels)
+	}
+}
+
+func TestSendIMMessageLegacyMapsChatIDToIMAPIConversationID(t *testing.T) {
+	params := sendIMMessageInput{
+		Platform: "feishu",
+		ChatID:   "oc_chat_123",
+		Content:  "测试消息",
+	}
+
+	got := legacySendIMToIMAPIInput(params)
+	if got.Action != "send_message" {
+		t.Fatalf("Action = %q, want send_message", got.Action)
+	}
+	if got.ConversationID != params.ChatID {
+		t.Fatalf("ConversationID = %q, want %q", got.ConversationID, params.ChatID)
+	}
+	if got.RecipientID != "" {
+		t.Fatalf("legacy chat_id 不应映射到 recipient_id，got %q", got.RecipientID)
+	}
+	if got.Platform != params.Platform || got.Content != params.Content {
+		t.Fatalf("legacy mapping mismatch: %+v", got)
 	}
 }
 

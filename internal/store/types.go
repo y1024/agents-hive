@@ -120,7 +120,7 @@ type Store interface {
 	// CreateExternalResource、UpdateExternalResource 或 UpsertExternalResourceFull。
 	SaveExternalResource(ctx context.Context, rec *ExternalResourceRecord) error
 	CreateExternalResource(ctx context.Context, rec *ExternalResourceRecord) error
-	UpdateExternalResource(ctx context.Context, name string, rec *ExternalResourceRecord) error
+	UpdateExternalResource(ctx context.Context, name string, update ExternalResourceUpdate) error
 	UpsertExternalResourceFull(ctx context.Context, rec *ExternalResourceRecord) error
 	DeleteExternalResource(ctx context.Context, name string) error
 	ListExternalResources(ctx context.Context) ([]*ExternalResourceRecord, error)
@@ -131,7 +131,7 @@ type Store interface {
 	// CreateLLMProvider 或 UpdateLLMProvider。
 	SaveLLMProvider(ctx context.Context, rec *LLMProviderRecord) error
 	CreateLLMProvider(ctx context.Context, rec *LLMProviderRecord) error
-	UpdateLLMProvider(ctx context.Context, name string, rec *LLMProviderRecord) error
+	UpdateLLMProvider(ctx context.Context, name string, update LLMProviderUpdate) error
 	DeleteLLMProvider(ctx context.Context, name string) error
 	ListLLMProviders(ctx context.Context) ([]*LLMProviderRecord, error)
 	// SetDefaultLLMProvider 原子化地将指定 Provider 设为默认（事务保证唯一性）
@@ -143,7 +143,7 @@ type Store interface {
 	// CreateLLMModel 或 UpdateLLMModel。
 	SaveLLMModel(ctx context.Context, rec *LLMModelRecord) error
 	CreateLLMModel(ctx context.Context, rec *LLMModelRecord) error
-	UpdateLLMModel(ctx context.Context, oldName string, rec *LLMModelRecord) error
+	UpdateLLMModel(ctx context.Context, oldName string, update LLMModelUpdate) error
 	DeleteLLMModel(ctx context.Context, name string) error
 	ListLLMModels(ctx context.Context) ([]*LLMModelRecord, error)
 	// SetDefaultLLMModel 原子化地将指定 Model 设为默认（事务保证唯一性）
@@ -345,6 +345,19 @@ type LLMProviderRecord struct {
 	UpdatedAt    string `json:"updated_at"`
 }
 
+// LLMProviderUpdate 表达 LLM Provider 的字段级更新。nil 表示保持不变，
+// 非 nil 零值表示显式清空或关闭。
+type LLMProviderUpdate struct {
+	ProviderType *string
+	APIKey       *string
+	BaseURL      *string
+	IsDefault    *bool
+	Enabled      *bool
+	ConfigJSON   *string
+	APIFormat    *string
+	ServiceType  *string
+}
+
 // LLMModelRecord LLM 模型配置记录
 type LLMModelRecord struct {
 	Name         string `json:"name"`
@@ -358,6 +371,20 @@ type LLMModelRecord struct {
 	ConfigJSON   string `json:"config_json"`  // 模型特有配置（reasoning_effort 等）
 	CreatedAt    string `json:"created_at"`
 	UpdatedAt    string `json:"updated_at"`
+}
+
+// LLMModelUpdate 表达 LLM Model 的字段级更新。nil 表示保持不变，
+// 非 nil 零值表示显式清空或关闭。
+type LLMModelUpdate struct {
+	Name         *string
+	ProviderName *string
+	Model        *string
+	BaseURL      *string
+	APIKey       *string
+	IsDefault    *bool
+	Enabled      *bool
+	ServiceType  *string
+	ConfigJSON   *string
 }
 
 // MCPServerRecord MCP 服务端配置记录
@@ -386,6 +413,19 @@ type ExternalResourceRecord struct {
 	ReadOnly    bool      `json:"read_only"`   // 是否只读
 	Enabled     bool      `json:"enabled"`
 	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// ExternalResourceUpdate 表达外部资源的字段级更新。nil 表示保持不变，
+// 非 nil 零值表示显式清空或关闭。
+type ExternalResourceUpdate struct {
+	Type        *string
+	Environment *string
+	Description *string
+	Connection  *string
+	Endpoint    *string
+	Credentials *string
+	ReadOnly    *bool
+	Enabled     *bool
 }
 
 // TaskRecord 是持久化的任务记录

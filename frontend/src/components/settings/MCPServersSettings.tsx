@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNodeClient } from '../../hooks/useNodeClient';
 import { useToastStore } from '../../store/toast';
-import type { MCPServerConfig, MCPToolsListResponse } from '../../types/api';
+import type { MCPServerConfig, MCPServerUpdateRequest, MCPToolsListResponse } from '../../types/api';
 
 /** 带名称的 MCP 服务端条目（前端编辑用） */
 interface MCPServerEntry extends MCPServerConfig {
@@ -99,7 +99,7 @@ export function MCPServersSettings() {
   };
 
   const buildMcpPayload = () => {
-    const servers: Record<string, MCPServerConfig | null> = {};
+    const servers: Record<string, MCPServerUpdateRequest | null> = {};
     const currentNames = new Set(mcpServers.map((srv) => srv.name).filter(Boolean));
     originalServerNames.forEach((name) => {
       if (!currentNames.has(name)) {

@@ -211,7 +211,7 @@ const exploreSystemPrompt = `你是一个高效的代码探索专家。你的任
 }
 
 ## 重要约束
-- **禁止**使用 write_file、edit 等修改文件的工具
+- **禁止**使用 write_file、edit、multiedit 或 filesystem.write/edit/multiedit 等修改文件的工具
 - **禁止**执行破坏性的 bash 命令（rm, mv, git reset 等）
 - **必须**在 15 轮内完成探索
 - **必须**返回有效的 JSON 格式结果`

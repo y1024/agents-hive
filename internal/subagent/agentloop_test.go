@@ -76,6 +76,9 @@ func (m *mockToolBridge) CallTool(ctx context.Context, filter *skills.ToolFilter
 		if err := filter.CheckAllowed(toolName); err != nil {
 			return nil, err
 		}
+		if err := filter.CheckAllowedInput(toolName, input); err != nil {
+			return nil, err
+		}
 	}
 
 	// 检查 permission

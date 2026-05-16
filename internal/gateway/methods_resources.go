@@ -114,20 +114,35 @@ func registerResourceMethods(gw *Gateway, deps Deps) {
 				}
 			}
 
-			rec := &store.ExternalResourceRecord{
-				Name:        req.Name,
-				Type:        req.Type,
-				Environment: req.Environment,
-				Description: req.Description,
-				Connection:  req.Connection,
-				Endpoint:    req.Endpoint,
-				Credentials: credentials,
-				ReadOnly:    req.ReadOnly,
-				Enabled:     req.Enabled,
-			}
-
-			if err := deps.Store.UpsertExternalResourceFull(ctx, rec); err != nil {
-				return nil, errs.Wrap(errs.CodeInternal, "保存外部资源失败", err)
+			if _, err := deps.Store.GetExternalResource(ctx, req.Name); err == nil {
+				update := store.ExternalResourceUpdate{
+					Type:        &req.Type,
+					Environment: &req.Environment,
+					Description: &req.Description,
+					Connection:  &req.Connection,
+					Endpoint:    &req.Endpoint,
+					Credentials: &credentials,
+					ReadOnly:    &req.ReadOnly,
+					Enabled:     &req.Enabled,
+				}
+				if err := deps.Store.UpdateExternalResource(ctx, req.Name, update); err != nil {
+					return nil, errs.Wrap(errs.CodeInternal, "更新外部资源失败", err)
+				}
+			} else {
+				rec := &store.ExternalResourceRecord{
+					Name:        req.Name,
+					Type:        req.Type,
+					Environment: req.Environment,
+					Description: req.Description,
+					Connection:  req.Connection,
+					Endpoint:    req.Endpoint,
+					Credentials: credentials,
+					ReadOnly:    req.ReadOnly,
+					Enabled:     req.Enabled,
+				}
+				if err := deps.Store.CreateExternalResource(ctx, rec); err != nil {
+					return nil, errs.Wrap(errs.CodeInternal, "创建外部资源失败", err)
+				}
 			}
 
 			return json.Marshal(map[string]string{

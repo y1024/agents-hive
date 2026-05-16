@@ -90,6 +90,9 @@ func (b *ToolBridge) CallTool(ctx context.Context, filter *ToolFilter, perm *Per
 		if err := filter.CheckAllowed(toolName); err != nil {
 			return nil, err
 		}
+		if err := filter.CheckAllowedInput(toolName, input); err != nil {
+			return nil, err
+		}
 	}
 
 	// 2. 执行层 gate 检查。必须在权限审批前执行，避免 RouteDecision 已拒绝的
@@ -124,6 +127,11 @@ func (b *ToolBridge) CallTool(ctx context.Context, filter *ToolFilter, perm *Per
 		input = hookInput.Args
 	}
 	if !sameRawJSON(input, checkedInput) {
+		if filter != nil {
+			if err := filter.CheckAllowedInput(toolName, input); err != nil {
+				return nil, err
+			}
+		}
 		if b.executionGate != nil {
 			if err := b.executionGate(ctx, toolName, input); err != nil {
 				return nil, err

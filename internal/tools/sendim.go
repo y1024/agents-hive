@@ -11,6 +11,7 @@ import (
 	"github.com/chef-guo/agents-hive/internal/imcore"
 	"github.com/chef-guo/agents-hive/internal/imctx"
 	"github.com/chef-guo/agents-hive/internal/mcphost"
+	"github.com/chef-guo/agents-hive/internal/observability"
 	"github.com/chef-guo/agents-hive/internal/store"
 )
 
@@ -22,6 +23,10 @@ type IMRouter interface {
 type wechatConversationLookup interface {
 	GetWechatConversationByOwnerPeer(ctx context.Context, ownerUserID, peerWxid string) (*store.WechatConversationRecord, error)
 	ListWechatConversationsByOwner(ctx context.Context, ownerUserID string) ([]*store.WechatConversationRecord, error)
+}
+
+type imMetricsWriterProvider interface {
+	MetricsWriter() observability.MetricsWriter
 }
 
 // sendIMMessageInput send_im_message 工具的输入参数
@@ -38,6 +43,11 @@ func RegisterSendIMMessage(host *mcphost.Host, logger *zap.Logger, router IMRout
 }
 
 func RegisterSendIMMessageWithStore(host *mcphost.Host, logger *zap.Logger, router IMRouter, convStore wechatConversationLookup) {
+	var metricsWriter observability.MetricsWriter
+	if provider, ok := router.(imMetricsWriterProvider); ok {
+		metricsWriter = provider.MetricsWriter()
+	}
+
 	service := imcore.NewService(
 		imcore.NewSendOnlyAdapter(imcore.PlatformDingTalk, router),
 		imcore.NewSendOnlyAdapter(imcore.PlatformFeishu, router),
@@ -79,26 +89,27 @@ func RegisterSendIMMessageWithStore(host *mcphost.Host, logger *zap.Logger, rout
 		func(ctx context.Context, input json.RawMessage) (*mcphost.ToolResult, error) {
 			var params sendIMMessageInput
 			if err := json.Unmarshal(input, &params); err != nil {
+				recordIMSendPathMetric(ctx, metricsWriter, metricIMSendLegacyPathTotal, "send_im_message", params.Platform, "send_message", "error", logger)
 				return errorResult("解析参数失败: " + err.Error()), nil
 			}
 
 			// 验证参数
 			if params.Platform == "" {
+				recordIMSendPathMetric(ctx, metricsWriter, metricIMSendLegacyPathTotal, "send_im_message", params.Platform, "send_message", "error", logger)
 				return errorResult("platform 参数不能为空"), nil
 			}
 			if params.ChatID == "" {
+				recordIMSendPathMetric(ctx, metricsWriter, metricIMSendLegacyPathTotal, "send_im_message", params.Platform, "send_message", "error", logger)
 				return errorResult("chat_id 参数不能为空"), nil
 			}
 			if params.Content == "" {
+				recordIMSendPathMetric(ctx, metricsWriter, metricIMSendLegacyPathTotal, "send_im_message", params.Platform, "send_message", "error", logger)
 				return errorResult("content 参数不能为空"), nil
 			}
 
-			result, err := service.SendMessage(ctx, imcore.SendTarget{
-				Platform:       imcore.Platform(params.Platform),
-				ConversationID: params.ChatID,
-				Content:        params.Content,
-			})
+			result, _, err := executeIMAPISendMessage(ctx, service, legacySendIMToIMAPIInput(params), IMAPIToolOptions{})
 			if err != nil {
+				recordIMSendPathMetric(ctx, metricsWriter, metricIMSendLegacyPathTotal, "send_im_message", params.Platform, "send_message", "error", logger)
 				logger.Error("发送 IM 消息失败",
 					zap.String("platform", params.Platform),
 					zap.String("chat_id_hash", imctx.SafeSenderID(params.ChatID)),
@@ -106,6 +117,7 @@ func RegisterSendIMMessageWithStore(host *mcphost.Host, logger *zap.Logger, rout
 
 				return errorResult(legacySendIMError(params.Platform, err)), nil
 			}
+			recordIMSendPathMetric(ctx, metricsWriter, metricIMSendLegacyPathTotal, "send_im_message", params.Platform, "send_message", "success", logger)
 
 			logger.Info("IM 消息发送成功",
 				zap.String("platform", params.Platform),
@@ -119,6 +131,15 @@ func RegisterSendIMMessageWithStore(host *mcphost.Host, logger *zap.Logger, rout
 			return textResult(fmt.Sprintf("✅ 消息已发送到 %s (chat: %s)", params.Platform, targetID)), nil
 		},
 	)
+}
+
+func legacySendIMToIMAPIInput(params sendIMMessageInput) imAPIInput {
+	return imAPIInput{
+		Action:         "send_message",
+		Platform:       params.Platform,
+		ConversationID: params.ChatID,
+		Content:        params.Content,
+	}
 }
 
 func legacySendIMError(platform string, err error) string {

@@ -853,6 +853,14 @@
   "tools": {
     "bash": "Run Command",
     "edit": "Edit File",
+    "filesystem": "Filesystem",
+    "filesystem.actions.list": "List Files",
+    "filesystem.actions.glob": "Glob Files",
+    "filesystem.actions.grep": "Search Contents",
+    "filesystem.actions.read": "Read File",
+    "filesystem.actions.write": "Write File",
+    "filesystem.actions.edit": "Edit File",
+    "filesystem.actions.multiedit": "Batch Edit",
     "write": "Write File",
     "write_file": "Write File",
     "read": "Read File",
@@ -907,6 +915,17 @@
     "clickToExpand": "Click to expand",
     "clickToCollapse": "Click to collapse",
     "invoked": "Called tool"
+  },
+  "filesystem": {
+    "actions": {
+      "list": "List Files",
+      "glob": "Glob Files",
+      "grep": "Search Contents",
+      "read": "Read File",
+      "write": "Write File",
+      "edit": "Edit File",
+      "multiedit": "Batch Edit"
+    }
   },
   "externalResources": {
     "title": "External Resources",

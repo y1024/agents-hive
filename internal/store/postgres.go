@@ -1113,11 +1113,64 @@ func (s *PostgresStore) CreateLLMProvider(ctx context.Context, rec *LLMProviderR
 	return s.SaveLLMProvider(ctx, rec)
 }
 
-func (s *PostgresStore) UpdateLLMProvider(ctx context.Context, name string, rec *LLMProviderRecord) error {
-	if rec != nil && rec.Name == "" {
-		rec.Name = name
+func (s *PostgresStore) UpdateLLMProvider(ctx context.Context, name string, update LLMProviderUpdate) error {
+	existing, err := s.GetLLMProvider(ctx, name)
+	if err != nil {
+		return err
 	}
-	return s.SaveLLMProvider(ctx, rec)
+	if update.ProviderType != nil {
+		existing.ProviderType = *update.ProviderType
+	}
+	if update.APIKey != nil {
+		existing.APIKey = *update.APIKey
+	}
+	if update.BaseURL != nil {
+		existing.BaseURL = *update.BaseURL
+	}
+	if update.IsDefault != nil {
+		existing.IsDefault = *update.IsDefault
+	}
+	if update.Enabled != nil {
+		existing.Enabled = *update.Enabled
+	}
+	if update.ConfigJSON != nil {
+		existing.ConfigJSON = ensureValidJSON(*update.ConfigJSON, "{}")
+	}
+	if update.APIFormat != nil {
+		existing.APIFormat = *update.APIFormat
+	}
+	if update.ServiceType != nil {
+		existing.ServiceType = *update.ServiceType
+	}
+	if existing.APIFormat == "" {
+		existing.APIFormat = "chat"
+	}
+	if existing.ServiceType == "" {
+		existing.ServiceType = "llm"
+	}
+	if existing.IsDefault {
+		if err := s.SetDefaultLLMProvider(ctx, name); err != nil {
+			return err
+		}
+	}
+	ct, err := s.pool.Exec(ctx,
+		`UPDATE llm_providers
+		SET provider_type=$2, api_key=$3, base_url=$4, is_default=$5, enabled=$6,
+			config_json=$7, api_format=$8, service_type=$9, updated_at=NOW()
+		WHERE name=$1`,
+		name, existing.ProviderType, existing.APIKey, existing.BaseURL, existing.IsDefault,
+		existing.Enabled, existing.ConfigJSON, existing.APIFormat, existing.ServiceType,
+	)
+	if err != nil {
+		return errs.Wrap(errs.CodeStoreWriteFailed, "更新 LLM 提供商失败", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return errs.New(errs.CodeNotFound, "LLM 提供商未找到: "+name)
+	}
+	if _, err := s.pool.Exec(ctx, "SELECT pg_notify('config_change', $1)", "llm_provider:"+name); err != nil {
+		s.logger.Warn("发送 LLM 提供商配置变更通知失败", zap.String("name", name), zap.Error(err))
+	}
+	return nil
 }
 
 func (s *PostgresStore) DeleteLLMProvider(ctx context.Context, name string) error {
@@ -1214,24 +1267,54 @@ func (s *PostgresStore) CreateLLMModel(ctx context.Context, rec *LLMModelRecord)
 	return s.SaveLLMModel(ctx, rec)
 }
 
-func (s *PostgresStore) UpdateLLMModel(ctx context.Context, oldName string, rec *LLMModelRecord) error {
-	rec.ConfigJSON = ensureValidJSON(rec.ConfigJSON, "{}")
+func (s *PostgresStore) UpdateLLMModel(ctx context.Context, oldName string, update LLMModelUpdate) error {
+	existing, err := s.GetLLMModel(ctx, oldName)
+	if err != nil {
+		return err
+	}
+	if update.Name != nil {
+		existing.Name = *update.Name
+	}
+	if update.ProviderName != nil {
+		existing.ProviderName = *update.ProviderName
+	}
+	if update.Model != nil {
+		existing.Model = *update.Model
+	}
+	if update.BaseURL != nil {
+		existing.BaseURL = *update.BaseURL
+	}
+	if update.APIKey != nil {
+		existing.APIKey = *update.APIKey
+	}
+	if update.IsDefault != nil {
+		existing.IsDefault = *update.IsDefault
+	}
+	if update.Enabled != nil {
+		existing.Enabled = *update.Enabled
+	}
+	if update.ServiceType != nil {
+		existing.ServiceType = *update.ServiceType
+	}
+	if update.ConfigJSON != nil {
+		existing.ConfigJSON = ensureValidJSON(*update.ConfigJSON, "{}")
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return errs.Wrap(errs.CodeStoreWriteFailed, "开启事务失败", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	if oldName != rec.Name {
+	if oldName != existing.Name {
 		var exists bool
-		if err := tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM llm_models WHERE name = $1)", rec.Name).Scan(&exists); err != nil {
+		if err := tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM llm_models WHERE name = $1)", existing.Name).Scan(&exists); err != nil {
 			return errs.Wrap(errs.CodeStoreReadFailed, "检查 LLM 模型名称失败", err)
 		}
 		if exists {
-			return errs.New(errs.CodeInvalidInput, "LLM 模型已存在: "+rec.Name)
+			return errs.New(errs.CodeInvalidInput, "LLM 模型已存在: "+existing.Name)
 		}
 	}
-	if rec.IsDefault {
+	if existing.IsDefault {
 		if _, err := tx.Exec(ctx, "UPDATE llm_models SET is_default=false, updated_at=NOW() WHERE is_default=true AND name != $1", oldName); err != nil {
 			return errs.Wrap(errs.CodeStoreWriteFailed, "清除 LLM Model 默认标记失败", err)
 		}
@@ -1242,8 +1325,8 @@ func (s *PostgresStore) UpdateLLMModel(ctx context.Context, oldName string, rec 
 		SET name=$2, provider_name=$3, model=$4, base_url=$5, api_key=$6,
 			is_default=$7, enabled=$8, service_type=$9, config_json=$10, updated_at=NOW()
 		WHERE name=$1`,
-		oldName, rec.Name, rec.ProviderName, rec.Model, rec.BaseURL, rec.APIKey,
-		rec.IsDefault, rec.Enabled, rec.ServiceType, rec.ConfigJSON,
+		oldName, existing.Name, existing.ProviderName, existing.Model, existing.BaseURL, existing.APIKey,
+		existing.IsDefault, existing.Enabled, existing.ServiceType, existing.ConfigJSON,
 	)
 	if err != nil {
 		return errs.Wrap(errs.CodeStoreWriteFailed, "更新 LLM 模型失败", err)
@@ -1251,8 +1334,8 @@ func (s *PostgresStore) UpdateLLMModel(ctx context.Context, oldName string, rec 
 	if ct.RowsAffected() == 0 {
 		return errs.New(errs.CodeNotFound, "LLM 模型未找到: "+oldName)
 	}
-	if _, err := tx.Exec(ctx, "SELECT pg_notify('config_change', $1)", "llm_model:"+rec.Name); err != nil {
-		s.logger.Warn("发送 LLM 模型配置变更通知失败", zap.String("name", rec.Name), zap.Error(err))
+	if _, err := tx.Exec(ctx, "SELECT pg_notify('config_change', $1)", "llm_model:"+existing.Name); err != nil {
+		s.logger.Warn("发送 LLM 模型配置变更通知失败", zap.String("name", existing.Name), zap.Error(err))
 	}
 	return tx.Commit(ctx)
 }
@@ -2372,11 +2455,53 @@ func (s *PostgresStore) CreateExternalResource(ctx context.Context, rec *Externa
 	return s.SaveExternalResource(ctx, rec)
 }
 
-func (s *PostgresStore) UpdateExternalResource(ctx context.Context, name string, rec *ExternalResourceRecord) error {
-	if rec != nil && rec.Name == "" {
-		rec.Name = name
+func (s *PostgresStore) UpdateExternalResource(ctx context.Context, name string, update ExternalResourceUpdate) error {
+	existing, err := s.GetExternalResource(ctx, name)
+	if err != nil {
+		return err
 	}
-	return s.SaveExternalResource(ctx, rec)
+	if update.Type != nil {
+		existing.Type = *update.Type
+	}
+	if update.Environment != nil {
+		existing.Environment = *update.Environment
+	}
+	if update.Description != nil {
+		existing.Description = *update.Description
+	}
+	if update.Connection != nil {
+		existing.Connection = *update.Connection
+	}
+	if update.Endpoint != nil {
+		existing.Endpoint = *update.Endpoint
+	}
+	if update.Credentials != nil {
+		existing.Credentials = ensureValidJSON(*update.Credentials, "{}")
+	}
+	if update.ReadOnly != nil {
+		existing.ReadOnly = *update.ReadOnly
+	}
+	if update.Enabled != nil {
+		existing.Enabled = *update.Enabled
+	}
+	ct, err := s.pool.Exec(ctx,
+		`UPDATE external_resources
+		SET type=$2, environment=$3, description=$4, connection=$5, endpoint=$6,
+			credentials=$7, read_only=$8, enabled=$9, updated_at=NOW()
+		WHERE name=$1`,
+		name, existing.Type, existing.Environment, existing.Description, existing.Connection,
+		existing.Endpoint, existing.Credentials, existing.ReadOnly, existing.Enabled,
+	)
+	if err != nil {
+		return errs.Wrap(errs.CodeStoreWriteFailed, "更新外部资源配置失败", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return errs.New(errs.CodeStoreReadFailed, "外部资源配置未找到: "+name)
+	}
+	if _, err := s.pool.Exec(ctx, "SELECT pg_notify('config_change', $1)", "resource:"+name); err != nil {
+		s.logger.Warn("发送外部资源配置变更通知失败", zap.String("name", name), zap.Error(err))
+	}
+	return nil
 }
 
 func (s *PostgresStore) UpsertExternalResourceFull(ctx context.Context, rec *ExternalResourceRecord) error {

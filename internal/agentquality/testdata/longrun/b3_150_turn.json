@@ -10,7 +10,7 @@
   ],
   "seed": 303,
   "steps": [
-    { "turn": 1, "kind": "tool_success", "tool": "read_file", "action": "load plan" },
+    { "turn": 1, "kind": "tool_success", "tool": "filesystem.read", "action": "load plan" },
     { "turn": 35, "kind": "tool_failure", "tool": "go test", "action": "first validation run", "outcome": "test failed and was investigated" },
     { "turn": 36, "kind": "tool_success", "tool": "apply_patch", "action": "fix first validation failure" },
     { "turn": 75, "kind": "compaction", "action": "first full compaction", "compaction": true, "tokens_before_compaction": 130000, "tokens_after_compaction": 52000, "compaction_stage_names": ["tool_budget", "session_memory", "truncate"], "compaction_elapsed_ms": 260 },

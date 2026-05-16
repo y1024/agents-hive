@@ -289,6 +289,7 @@ func NewApp(cfg *config.Config, logger *zap.Logger) *App {
 		PromptCacheKey:      cfg.LLM.PromptCacheKeyEnabled,
 		ServiceTier:         cfg.LLM.InteractiveServiceTier,
 		ToolPolicy:          cfg.Agent.ToolPolicy,
+		Tools:               cfg.Tools,
 		ToolRecall:          cfg.Agent.ToolRecall,
 		QualityGuards:       cfg.Agent.QualityGuards,
 		Reflection:          cfg.Agent.Reflection,

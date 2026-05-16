@@ -3,7 +3,7 @@
   "name": "不相关 memory 不能影响答案",
   "route": "web",
   "input": "根据当前会话附件回答项目名称，不要使用不相关历史偏好",
-  "allowed_tools": ["read_file", "memory"],
+  "allowed_tools": ["filesystem", "read_file", "memory"],
   "expected_status": "pass",
   "failure_type": "context",
   "risk": "safe",

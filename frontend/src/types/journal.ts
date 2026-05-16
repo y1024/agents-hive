@@ -114,6 +114,11 @@ export function getCharacterState(event: JournalEvent): CharacterState {
   if (event.type !== 'tool_call') return 'idle';
 
   const tool = event.tool_name || '';
+  const filesystemAction = filesystemEventAction(event);
+  if (tool === 'filesystem' && filesystemAction) {
+    if (['list', 'glob', 'grep', 'read'].includes(filesystemAction)) return 'reading';
+    if (['write', 'edit', 'multiedit'].includes(filesystemAction)) return 'coding';
+  }
 
   const readTools = [
     'read_file', 'glob', 'grep', 'ls',
@@ -125,7 +130,7 @@ export function getCharacterState(event: JournalEvent): CharacterState {
   if (readTools.includes(tool)) return 'reading';
 
   const writeTools = [
-    'write_file', 'edit', 'multi_edit', 'apply_patch',
+    'write_file', 'edit', 'multi_edit', 'multiedit', 'apply_patch',
     'create_tool', 'remove_tool',
     'lsp_rename', 'lsp_format', 'lsp_actions',
   ];
@@ -141,6 +146,28 @@ export function getCharacterState(event: JournalEvent): CharacterState {
   if (runTools.includes(tool)) return 'running';
 
   return 'running';
+}
+
+export function journalToolDisplayName(event: JournalEvent): string {
+  const tool = event.tool_name || '';
+  if (tool === 'filesystem') {
+    const action = filesystemEventAction(event);
+    if (action) return `${tool}.${action}`;
+  }
+  return tool;
+}
+
+function filesystemEventAction(event: JournalEvent): string {
+  if (event.tool_name !== 'filesystem' || !event.arguments) return '';
+
+  try {
+    const parsed = JSON.parse(event.arguments) as unknown;
+    if (!parsed || typeof parsed !== 'object') return '';
+    const action = (parsed as { action?: unknown }).action;
+    return typeof action === 'string' ? action.trim().toLowerCase() : '';
+  } catch {
+    return '';
+  }
 }
 
 export function attachQualityEvent(event: JournalEvent): JournalEvent {

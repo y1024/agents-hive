@@ -83,6 +83,27 @@ func TestRouteDecisionEventFromRouter(t *testing.T) {
 	}
 }
 
+func TestRouteEvalCasePreferredAndCompatTools(t *testing.T) {
+	casePreferred := RouteEvalCase{
+		ID:                 "preferred",
+		WantPreferredTools: []string{"filesystem"},
+	}
+	if failures := routeDecisionFailures(casePreferred, router.RouteDecision{AllowedTools: []string{"filesystem"}}); len(failures) != 0 {
+		t.Fatalf("preferred route failures = %+v", failures)
+	}
+	if failures := routeDecisionFailures(casePreferred, router.RouteDecision{AllowedTools: []string{"read_file"}}); len(failures) == 0 {
+		t.Fatal("missing preferred filesystem should fail")
+	}
+
+	caseCompat := RouteEvalCase{
+		ID:              "compat",
+		WantCompatTools: []string{"read_file"},
+	}
+	if failures := routeDecisionFailures(caseCompat, router.RouteDecision{AllowedTools: []string{"read_file"}}); len(failures) != 0 {
+		t.Fatalf("compat route failures = %+v", failures)
+	}
+}
+
 func TestRouteDecisionDomainDoesNotUseSubjectFreeText(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

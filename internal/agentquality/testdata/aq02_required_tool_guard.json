@@ -3,10 +3,10 @@
   "name": "需要事实依据时不能零工具回答",
   "route": "web",
   "input": "查看当前仓库 go.mod 的 Go 版本并回答",
-  "expected_tools": ["read_file"],
+  "expected_tools": ["filesystem", "read_file"],
   "expected_status": "pass",
   "failure_type": "tool",
   "risk": "safe",
   "required": true,
-  "notes": "覆盖 required-zero-tool guard"
+  "notes": "Phase 1 迁移期 filesystem.read 为 preferred，legacy read_file 保持 compat；覆盖 required-zero-tool guard"
 }

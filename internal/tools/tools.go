@@ -209,6 +209,11 @@ func RegisterBuiltinTools(host *mcphost.Host, logger *zap.Logger, cfg *config.Co
 	registerEdit(host, logger, globalReadTracker)
 	registerLS(host, logger)
 	registerMultiEdit(host, logger, globalReadTracker)
+	count := 16
+	if cfg == nil || cfg.Tools.IsFilesystemEnabled() {
+		registerFilesystem(host, logger, globalReadTracker)
+		count++
+	}
 	// P0-B：websearch strict 模式受 QualityGuards.WebsearchStrict 控制。
 	// 开关关闭时保持旧行为，开启后零结果会转为 IsError=true 触发 ReAct 重试。
 	websearchStrict := false
@@ -224,8 +229,6 @@ func RegisterBuiltinTools(host *mcphost.Host, logger *zap.Logger, cfg *config.Co
 	registerToolSearch(host, logger)
 	registerCreateTool(host, logger, customToolsDir, cfg, globalApprovalBridge)
 	registerRemoveTool(host, logger, customToolsDir)
-
-	count := 16
 
 	// 如果启用 LSP 且提供了配置，注册 LSP 工具
 	if cfg != nil && cfg.LSP.Enabled {
@@ -420,143 +423,149 @@ func registerReadFile(host *mcphost.Host, logger *zap.Logger, tracker *ReadTrack
 				return errorResult("输入无效: " + err.Error()), nil
 			}
 
-			resolvedPath, err := resolveToolPath(params.Path)
-			if err != nil {
-				return errorResult(err.Error()), nil
-			}
-			params.Path = resolvedPath
-
-			// 检查文件是否存在并获取文件信息
-			fileInfo, err := os.Stat(params.Path)
-			if err != nil {
-				return errorResult("读取失败: " + err.Error()), nil
-			}
-
-			// 图片/PDF 文件检测：转为 base64 data URI 返回给多模态模型
-			mimeType, isImage, isPDF := detectMIMEType(params.Path)
-			if isImage || isPDF {
-				// 文件大小限制: 图片 10MB, PDF 20MB
-				maxSize := 10 * 1024 * 1024 // 10MB
-				if isPDF {
-					maxSize = 20 * 1024 * 1024 // 20MB
-				}
-				if fileInfo.Size() > int64(maxSize) {
-					return errorResult(fmt.Sprintf("文件过大 (%d 字节), 超过 %dMB 限制",
-						fileInfo.Size(), maxSize/(1024*1024))), nil
-				}
-
-				data, err := os.ReadFile(params.Path)
-				if err != nil {
-					return errorResult("读取文件失败: " + err.Error()), nil
-				}
-
-				// 转为 base64 data URI
-				b64 := base64.StdEncoding.EncodeToString(data)
-				dataURI := fmt.Sprintf("data:%s;base64,%s", mimeType, b64)
-
-				// 记录文件读取
-				if tracker != nil {
-					tracker.RecordRead(params.Path)
-				}
-
-				return textResult(dataURI), nil
-			}
-
-			// 二进制扩展名快速检测（非图片/PDF 的二进制文件）
-			if isBinaryByExtension(params.Path) {
-				sizeKB := float64(fileInfo.Size()) / 1024.0
-				ext := strings.ToLower(filepath.Ext(params.Path))
-				return textResult(fmt.Sprintf("这是一个二进制文件 (扩展名: %s)，大小: %.1f KB", ext, sizeKB)), nil
-			}
-
-			// 二进制文件检测：读取前 4KB 进行检查
-			isBinary, detectedType := detectBinaryFile(params.Path)
-			if isBinary {
-				sizeKB := float64(fileInfo.Size()) / 1024.0
-				return textResult(fmt.Sprintf("这是一个二进制文件 (类型: %s)，大小: %.1f KB", detectedType, sizeKB)), nil
-			}
-
-			// 大文件保护：避免全量读入内存导致 OOM
-			var data []byte
-			if fileInfo.Size() > int64(maxReadOutputSize*2) {
-				f, err := os.Open(params.Path)
-				if err != nil {
-					return errorResult("读取失败: " + err.Error()), nil
-				}
-				defer f.Close()
-				limitBytes := int64(maxReadOutputSize + 1024)
-				data, err = io.ReadAll(io.LimitReader(f, limitBytes))
-				if err != nil {
-					return errorResult("读取失败: " + err.Error()), nil
-				}
-			} else {
-				var err error
-				data, err = os.ReadFile(params.Path)
-				if err != nil {
-					return errorResult("读取失败: " + err.Error()), nil
-				}
-			}
-
-			// 编码处理：非 UTF-8 文件尝试 GBK/GB18030 解码
-			var content string
-			if !utf8.Valid(data) {
-				decoder := simplifiedchinese.GB18030.NewDecoder()
-				decoded, _, gbkErr := transform.Bytes(decoder, data)
-				if gbkErr == nil && utf8.Valid(decoded) {
-					content = string(decoded)
-				} else {
-					content = string(data)
-				}
-			} else {
-				content = string(data)
-			}
-
-			// 应用 offset/limit
-			if params.Offset > 0 || params.Limit > 0 {
-				lines := strings.Split(content, "\n")
-				start := params.Offset
-				if start > len(lines) {
-					start = len(lines)
-				}
-				end := len(lines)
-				if params.Limit > 0 && start+params.Limit < end {
-					end = start + params.Limit
-				}
-				content = strings.Join(lines[start:end], "\n")
-			}
-
-			// 输出大小限制
-			if len(content) > maxReadOutputSize {
-				truncPos := maxReadOutputSize
-				for truncPos > 0 && !utf8.RuneStart(content[truncPos]) {
-					truncPos--
-				}
-				content = content[:truncPos] + fmt.Sprintf("\n\n[...输出已截断，原始大小: %.1f KB，限制: %d KB]",
-					float64(len(data))/1024.0, maxReadOutputSize/1024)
-			}
-
-			// 行号：在 offset/limit 处理完成后添加，使用原始文件行号（1-based + offset）
-			if params.ShowLineNumbers {
-				lines := strings.Split(content, "\n")
-				// 过滤末尾空行（strings.Split 在末尾换行符时产生空元素）
-				if len(lines) > 0 && lines[len(lines)-1] == "" {
-					lines = lines[:len(lines)-1]
-				}
-				var sb strings.Builder
-				for i, line := range lines {
-					fmt.Fprintf(&sb, "%6d\t%s\n", params.Offset+i+1, line)
-				}
-				content = sb.String()
-			}
-
-			// 记录文件读取
-			if tracker != nil {
-				tracker.RecordRead(params.Path)
-			}
-
-			return textResult(content), nil
+			return executeReadFile(ctx, params, tracker)
 		},
 	)
+}
+
+func executeReadFile(ctx context.Context, params readFileInput, tracker *ReadTracker) (*mcphost.ToolResult, error) {
+	_ = ctx
+
+	resolvedPath, err := resolveToolPath(params.Path)
+	if err != nil {
+		return errorResult(err.Error()), nil
+	}
+	params.Path = resolvedPath
+
+	// 检查文件是否存在并获取文件信息
+	fileInfo, err := os.Stat(params.Path)
+	if err != nil {
+		return errorResult("读取失败: " + err.Error()), nil
+	}
+
+	// 图片/PDF 文件检测：转为 base64 data URI 返回给多模态模型
+	mimeType, isImage, isPDF := detectMIMEType(params.Path)
+	if isImage || isPDF {
+		// 文件大小限制: 图片 10MB, PDF 20MB
+		maxSize := 10 * 1024 * 1024 // 10MB
+		if isPDF {
+			maxSize = 20 * 1024 * 1024 // 20MB
+		}
+		if fileInfo.Size() > int64(maxSize) {
+			return errorResult(fmt.Sprintf("文件过大 (%d 字节), 超过 %dMB 限制",
+				fileInfo.Size(), maxSize/(1024*1024))), nil
+		}
+
+		data, err := os.ReadFile(params.Path)
+		if err != nil {
+			return errorResult("读取文件失败: " + err.Error()), nil
+		}
+
+		// 转为 base64 data URI
+		b64 := base64.StdEncoding.EncodeToString(data)
+		dataURI := fmt.Sprintf("data:%s;base64,%s", mimeType, b64)
+
+		// 记录文件读取
+		if tracker != nil {
+			tracker.RecordRead(params.Path)
+		}
+
+		return textResult(dataURI), nil
+	}
+
+	// 二进制扩展名快速检测（非图片/PDF 的二进制文件）
+	if isBinaryByExtension(params.Path) {
+		sizeKB := float64(fileInfo.Size()) / 1024.0
+		ext := strings.ToLower(filepath.Ext(params.Path))
+		return textResult(fmt.Sprintf("这是一个二进制文件 (扩展名: %s)，大小: %.1f KB", ext, sizeKB)), nil
+	}
+
+	// 二进制文件检测：读取前 4KB 进行检查
+	isBinary, detectedType := detectBinaryFile(params.Path)
+	if isBinary {
+		sizeKB := float64(fileInfo.Size()) / 1024.0
+		return textResult(fmt.Sprintf("这是一个二进制文件 (类型: %s)，大小: %.1f KB", detectedType, sizeKB)), nil
+	}
+
+	// 大文件保护：避免全量读入内存导致 OOM
+	var data []byte
+	if fileInfo.Size() > int64(maxReadOutputSize*2) {
+		f, err := os.Open(params.Path)
+		if err != nil {
+			return errorResult("读取失败: " + err.Error()), nil
+		}
+		defer f.Close()
+		limitBytes := int64(maxReadOutputSize + 1024)
+		data, err = io.ReadAll(io.LimitReader(f, limitBytes))
+		if err != nil {
+			return errorResult("读取失败: " + err.Error()), nil
+		}
+	} else {
+		var err error
+		data, err = os.ReadFile(params.Path)
+		if err != nil {
+			return errorResult("读取失败: " + err.Error()), nil
+		}
+	}
+
+	// 编码处理：非 UTF-8 文件尝试 GBK/GB18030 解码
+	var content string
+	if !utf8.Valid(data) {
+		decoder := simplifiedchinese.GB18030.NewDecoder()
+		decoded, _, gbkErr := transform.Bytes(decoder, data)
+		if gbkErr == nil && utf8.Valid(decoded) {
+			content = string(decoded)
+		} else {
+			content = string(data)
+		}
+	} else {
+		content = string(data)
+	}
+
+	// 应用 offset/limit
+	if params.Offset > 0 || params.Limit > 0 {
+		lines := strings.Split(content, "\n")
+		start := params.Offset
+		if start > len(lines) {
+			start = len(lines)
+		}
+		end := len(lines)
+		if params.Limit > 0 && start+params.Limit < end {
+			end = start + params.Limit
+		}
+		content = strings.Join(lines[start:end], "\n")
+	}
+
+	// 输出大小限制
+	if len(content) > maxReadOutputSize {
+		truncPos := maxReadOutputSize
+		for truncPos > 0 && !utf8.RuneStart(content[truncPos]) {
+			truncPos--
+		}
+		content = content[:truncPos] + fmt.Sprintf("\n\n[...输出已截断，原始大小: %.1f KB，限制: %d KB]",
+			float64(len(data))/1024.0, maxReadOutputSize/1024)
+	}
+
+	// 行号：在 offset/limit 处理完成后添加，使用原始文件行号（1-based + offset）
+	if params.ShowLineNumbers {
+		lines := strings.Split(content, "\n")
+		// 过滤末尾空行（strings.Split 在末尾换行符时产生空元素）
+		if len(lines) > 0 && lines[len(lines)-1] == "" {
+			lines = lines[:len(lines)-1]
+		}
+		var sb strings.Builder
+		for i, line := range lines {
+			fmt.Fprintf(&sb, "%6d\t%s\n", params.Offset+i+1, line)
+		}
+		content = sb.String()
+	}
+
+	// 记录文件读取
+	if tracker != nil {
+		tracker.RecordRead(params.Path)
+	}
+
+	return textResult(content), nil
 }
 
 // --- write_file ---
@@ -589,61 +598,67 @@ func registerWriteFile(host *mcphost.Host, logger *zap.Logger, tracker *ReadTrac
 				return errorResult("输入无效: " + err.Error()), nil
 			}
 
-			resolvedPath, err := resolveToolPath(params.Path)
-			if err != nil {
-				return errorResult(err.Error()), nil
-			}
-			params.Path = resolvedPath
-
-			// 获取文件锁，序列化对同一文件的并发写入
-			unlock := globalFileLock.Lock(params.Path)
-			defer unlock()
-
-			// 检查文件是否存在
-			_, statErr := os.Stat(params.Path)
-			fileExists := statErr == nil
-
-			// 如果文件已存在，检查是否最近读取过
-			if fileExists && tracker != nil {
-				if err := tracker.CheckRead(params.Path); err != nil {
-					return errorResult(err.Error()), nil
-				}
-			}
-
-			// 创建父目录（权限 0o700：仅拥有者可读写执行，防止目录内容泄漏）
-			if dir := filepath.Dir(params.Path); dir != "" {
-				if err := os.MkdirAll(dir, 0o700); err != nil {
-					return errorResult("创建目录失败: " + err.Error()), nil
-				}
-			}
-
-			// 对新创建的文件使用 0o600（仅拥有者可读写）；
-			// 已存在文件：先写入临时内容再保持原权限
-			fileMode := os.FileMode(0o600)
-			if fileExists {
-				// 获取已有文件的权限位，写入后保持不变
-				if info, err := os.Stat(params.Path); err == nil {
-					fileMode = info.Mode().Perm()
-				}
-			}
-			if err := os.WriteFile(params.Path, []byte(params.Content), fileMode); err != nil {
-				return errorResult("写入失败: " + err.Error()), nil
-			}
-
-			// E4: 写入成功后记录文件 hash，用于后续外部修改检测
-			if globalFileTracker != nil {
-				_ = globalFileTracker.Track(params.Path)
-			}
-
-			// 写入成功后获取 LSP 诊断
-			diagInfo := fetchLSPDiagnostics(params.Path, 2*time.Second)
-			resultMsg := fmt.Sprintf("已写入 %d 字节到 %s", len(params.Content), params.Path)
-			if diagInfo != "" {
-				resultMsg += "\n\n" + diagInfo
-			}
-			return textResult(resultMsg), nil
+			return executeWriteFile(ctx, params, tracker)
 		},
 	)
+}
+
+func executeWriteFile(ctx context.Context, params writeFileInput, tracker *ReadTracker) (*mcphost.ToolResult, error) {
+	_ = ctx
+
+	resolvedPath, err := resolveToolPath(params.Path)
+	if err != nil {
+		return errorResult(err.Error()), nil
+	}
+	params.Path = resolvedPath
+
+	// 获取文件锁，序列化对同一文件的并发写入
+	unlock := globalFileLock.Lock(params.Path)
+	defer unlock()
+
+	// 检查文件是否存在
+	_, statErr := os.Stat(params.Path)
+	fileExists := statErr == nil
+
+	// 如果文件已存在，检查是否最近读取过
+	if fileExists && tracker != nil {
+		if err := tracker.CheckRead(params.Path); err != nil {
+			return errorResult(err.Error()), nil
+		}
+	}
+
+	// 创建父目录（权限 0o700：仅拥有者可读写执行，防止目录内容泄漏）
+	if dir := filepath.Dir(params.Path); dir != "" {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return errorResult("创建目录失败: " + err.Error()), nil
+		}
+	}
+
+	// 对新创建的文件使用 0o600（仅拥有者可读写）；
+	// 已存在文件：先写入临时内容再保持原权限
+	fileMode := os.FileMode(0o600)
+	if fileExists {
+		// 获取已有文件的权限位，写入后保持不变
+		if info, err := os.Stat(params.Path); err == nil {
+			fileMode = info.Mode().Perm()
+		}
+	}
+	if err := os.WriteFile(params.Path, []byte(params.Content), fileMode); err != nil {
+		return errorResult("写入失败: " + err.Error()), nil
+	}
+
+	// E4: 写入成功后记录文件 hash，用于后续外部修改检测
+	if globalFileTracker != nil {
+		_ = globalFileTracker.Track(params.Path)
+	}
+
+	// 写入成功后获取 LSP 诊断
+	diagInfo := fetchLSPDiagnostics(params.Path, 2*time.Second)
+	resultMsg := fmt.Sprintf("已写入 %d 字节到 %s", len(params.Content), params.Path)
+	if diagInfo != "" {
+		resultMsg += "\n\n" + diagInfo
+	}
+	return textResult(resultMsg), nil
 }
 
 // --- glob ---
@@ -677,32 +692,36 @@ func registerGlob(host *mcphost.Host, logger *zap.Logger) {
 				return errorResult("输入无效: " + err.Error()), nil
 			}
 
-			baseDir := params.Path
-			if baseDir == "" {
-				baseDir = "."
-			}
-
-			resolvedBaseDir, err := resolveToolPath(baseDir)
-			if err != nil {
-				return errorResult(err.Error()), nil
-			}
-			baseDir = resolvedBaseDir
-
-			if globalGlobEngine == nil {
-				return errorResult("搜索引擎未初始化"), nil
-			}
-
-			matches, err := globalGlobEngine.Glob(ctx, params.Pattern, baseDir)
-			if err != nil {
-				return errorResult("搜索失败: " + err.Error()), nil
-			}
-
-			if len(matches) == 0 {
-				return textResult("未找到匹配文件"), nil
-			}
-			return textResult(strings.Join(matches, "\n")), nil
+			return executeGlob(ctx, params)
 		},
 	)
+}
+
+func executeGlob(ctx context.Context, params globInput) (*mcphost.ToolResult, error) {
+	baseDir := params.Path
+	if baseDir == "" {
+		baseDir = "."
+	}
+
+	resolvedBaseDir, err := resolveToolPath(baseDir)
+	if err != nil {
+		return errorResult(err.Error()), nil
+	}
+	baseDir = resolvedBaseDir
+
+	if globalGlobEngine == nil {
+		return errorResult("搜索引擎未初始化"), nil
+	}
+
+	matches, err := globalGlobEngine.Glob(ctx, params.Pattern, baseDir)
+	if err != nil {
+		return errorResult("搜索失败: " + err.Error()), nil
+	}
+
+	if len(matches) == 0 {
+		return textResult("未找到匹配文件"), nil
+	}
+	return textResult(strings.Join(matches, "\n")), nil
 }
 
 // --- grep ---
@@ -750,48 +769,61 @@ func registerGrep(host *mcphost.Host, logger *zap.Logger) {
 				return errorResult("输入无效: " + err.Error()), nil
 			}
 
-			searchPath := params.Path
-			if searchPath == "" {
-				searchPath = "."
-			}
-
-			resolvedSearchPath, err := resolveToolPath(searchPath)
-			if err != nil {
-				return errorResult(err.Error()), nil
-			}
-			searchPath = resolvedSearchPath
-
-			if globalGrepEngine == nil {
-				return errorResult("搜索引擎未初始化"), nil
-			}
-
-			result, err := globalGrepEngine.Grep(ctx, search.GrepRequest{
-				Pattern:    params.Pattern,
-				Path:       searchPath,
-				GlobFilter: params.Glob,
-				TypeFilter: params.TypeFilter,
-				Context:    params.Context,
-				Before:     params.Before,
-				After:      params.After,
-				MaxResults: params.MaxResults,
-				Multiline:  params.Multiline,
-			})
-			if err != nil {
-				return errorResult(err.Error()), nil
-			}
-
-			if len(result.Matches) == 0 {
-				return textResult("未找到匹配"), nil
-			}
-
-			// 格式化输出：保持与原 grep -rn 兼容的格式
-			var sb strings.Builder
-			for _, m := range result.Matches {
-				fmt.Fprintf(&sb, "%s:%d:%s\n", m.File, m.Line, m.Content)
-			}
-			return textResult(truncateOutput(sb.String())), nil
+			return executeGrep(ctx, params)
 		},
 	)
+}
+
+func executeGrep(ctx context.Context, params grepInput) (*mcphost.ToolResult, error) {
+	searchPath := params.Path
+	if searchPath == "" {
+		searchPath = "."
+	}
+
+	resolvedSearchPath, err := resolveToolPath(searchPath)
+	if err != nil {
+		return errorResult(err.Error()), nil
+	}
+	searchPath = resolvedSearchPath
+
+	if globalGrepEngine == nil {
+		return errorResult("搜索引擎未初始化"), nil
+	}
+
+	result, err := globalGrepEngine.Grep(ctx, search.GrepRequest{
+		Pattern:    params.Pattern,
+		Path:       searchPath,
+		GlobFilter: params.Glob,
+		TypeFilter: params.TypeFilter,
+		Context:    params.Context,
+		Before:     params.Before,
+		After:      params.After,
+		MaxResults: params.MaxResults,
+		Multiline:  params.Multiline,
+	})
+	if err != nil {
+		return errorResult(err.Error()), nil
+	}
+
+	if len(result.Matches) == 0 {
+		return textResult("未找到匹配"), nil
+	}
+	sort.SliceStable(result.Matches, func(i, j int) bool {
+		if result.Matches[i].File != result.Matches[j].File {
+			return result.Matches[i].File < result.Matches[j].File
+		}
+		if result.Matches[i].Line != result.Matches[j].Line {
+			return result.Matches[i].Line < result.Matches[j].Line
+		}
+		return result.Matches[i].Content < result.Matches[j].Content
+	})
+
+	// 格式化输出：保持与原 grep -rn 兼容的格式
+	var sb strings.Builder
+	for _, m := range result.Matches {
+		fmt.Fprintf(&sb, "%s:%d:%s\n", m.File, m.Line, m.Content)
+	}
+	return textResult(truncateOutput(sb.String())), nil
 }
 
 // --- bash ---
@@ -919,87 +951,93 @@ func registerEdit(host *mcphost.Host, logger *zap.Logger, tracker *ReadTracker) 
 				return errorResult("输入无效: " + err.Error()), nil
 			}
 
-			resolvedPath, err := resolveToolPath(params.Path)
-			if err != nil {
-				return errorResult(err.Error()), nil
-			}
-			params.Path = resolvedPath
-
-			// 获取文件锁，序列化对同一文件的并发编辑
-			unlock := globalFileLock.Lock(params.Path)
-			defer unlock()
-
-			// 检查文件是否最近读取过
-			if tracker != nil {
-				if err := tracker.CheckRead(params.Path); err != nil {
-					return errorResult(err.Error()), nil
-				}
-			}
-
-			// E3: 检测文件自上次编辑后是否被外部修改（仅已追踪的文件才检查）
-			if globalFileTracker != nil {
-				if changed, err := globalFileTracker.HasChanged(params.Path); err == nil && changed {
-					return errorResult("文件自上次编辑后已被外部修改，请重新读取后再编辑"), nil
-				}
-			}
-
-			// 读取文件前先获取原有权限，写回时保持一致（已存在文件不改变权限）
-			fileInfo, err := os.Stat(params.Path)
-			if err != nil {
-				return errorResult("获取文件信息失败: " + err.Error()), nil
-			}
-			origPerm := fileInfo.Mode().Perm()
-
-			data, err := os.ReadFile(params.Path)
-			if err != nil {
-				return errorResult("读取失败: " + err.Error()), nil
-			}
-
-			content := string(data)
-
-			// 确定实际用于替换的 oldString（支持模糊匹配降级）
-			actualOldString := params.OldString
-			fuzzyNote := ""
-			if !strings.Contains(content, params.OldString) {
-				// 精确匹配失败，尝试模糊查找
-				found, level, ok := FuzzyFindString(content, params.OldString, logger)
-				if !ok {
-					return errorResult("未在文件中找到 old_string（精确匹配和模糊匹配均失败）"), nil
-				}
-				actualOldString = found
-				fuzzyNote = fmt.Sprintf("（通过「%s」匹配成功）", matchLevelNames[level])
-			}
-
-			var newContent string
-			if params.ReplaceAll {
-				newContent = strings.ReplaceAll(content, actualOldString, params.NewString)
-			} else {
-				count := strings.Count(content, actualOldString)
-				if count > 1 {
-					return errorResult(fmt.Sprintf("old_string 出现 %d 次——请使用 replace_all 或提供更多上下文", count)), nil
-				}
-				newContent = strings.Replace(content, actualOldString, params.NewString, 1)
-			}
-
-			// 写回时使用原有权限，保持已存在文件的权限位不变
-			if err := os.WriteFile(params.Path, []byte(newContent), origPerm); err != nil {
-				return errorResult("写入失败: " + err.Error()), nil
-			}
-
-			// E4: 编辑成功后记录文件 hash，用于后续外部修改检测
-			if globalFileTracker != nil {
-				_ = globalFileTracker.Track(params.Path) // 忽略错误（非关键路径）
-			}
-
-			// 写入成功后获取 LSP 诊断
-			diagInfo := fetchLSPDiagnostics(params.Path, 2*time.Second)
-			resultMsg := "编辑已成功应用" + fuzzyNote
-			if diagInfo != "" {
-				resultMsg += "\n\n" + diagInfo
-			}
-			return textResult(resultMsg), nil
+			return executeEdit(ctx, params, tracker, logger)
 		},
 	)
+}
+
+func executeEdit(ctx context.Context, params editInput, tracker *ReadTracker, logger *zap.Logger) (*mcphost.ToolResult, error) {
+	_ = ctx
+
+	resolvedPath, err := resolveToolPath(params.Path)
+	if err != nil {
+		return errorResult(err.Error()), nil
+	}
+	params.Path = resolvedPath
+
+	// 获取文件锁，序列化对同一文件的并发编辑
+	unlock := globalFileLock.Lock(params.Path)
+	defer unlock()
+
+	// 检查文件是否最近读取过
+	if tracker != nil {
+		if err := tracker.CheckRead(params.Path); err != nil {
+			return errorResult(err.Error()), nil
+		}
+	}
+
+	// E3: 检测文件自上次编辑后是否被外部修改（仅已追踪的文件才检查）
+	if globalFileTracker != nil {
+		if changed, err := globalFileTracker.HasChanged(params.Path); err == nil && changed {
+			return errorResult("文件自上次编辑后已被外部修改，请重新读取后再编辑"), nil
+		}
+	}
+
+	// 读取文件前先获取原有权限，写回时保持一致（已存在文件不改变权限）
+	fileInfo, err := os.Stat(params.Path)
+	if err != nil {
+		return errorResult("获取文件信息失败: " + err.Error()), nil
+	}
+	origPerm := fileInfo.Mode().Perm()
+
+	data, err := os.ReadFile(params.Path)
+	if err != nil {
+		return errorResult("读取失败: " + err.Error()), nil
+	}
+
+	content := string(data)
+
+	// 确定实际用于替换的 oldString（支持模糊匹配降级）
+	actualOldString := params.OldString
+	fuzzyNote := ""
+	if !strings.Contains(content, params.OldString) {
+		// 精确匹配失败，尝试模糊查找
+		found, level, ok := FuzzyFindString(content, params.OldString, logger)
+		if !ok {
+			return errorResult("未在文件中找到 old_string（精确匹配和模糊匹配均失败）"), nil
+		}
+		actualOldString = found
+		fuzzyNote = fmt.Sprintf("（通过「%s」匹配成功）", matchLevelNames[level])
+	}
+
+	var newContent string
+	if params.ReplaceAll {
+		newContent = strings.ReplaceAll(content, actualOldString, params.NewString)
+	} else {
+		count := strings.Count(content, actualOldString)
+		if count > 1 {
+			return errorResult(fmt.Sprintf("old_string 出现 %d 次——请使用 replace_all 或提供更多上下文", count)), nil
+		}
+		newContent = strings.Replace(content, actualOldString, params.NewString, 1)
+	}
+
+	// 写回时使用原有权限，保持已存在文件的权限位不变
+	if err := os.WriteFile(params.Path, []byte(newContent), origPerm); err != nil {
+		return errorResult("写入失败: " + err.Error()), nil
+	}
+
+	// E4: 编辑成功后记录文件 hash，用于后续外部修改检测
+	if globalFileTracker != nil {
+		_ = globalFileTracker.Track(params.Path) // 忽略错误（非关键路径）
+	}
+
+	// 写入成功后获取 LSP 诊断
+	diagInfo := fetchLSPDiagnostics(params.Path, 2*time.Second)
+	resultMsg := "编辑已成功应用" + fuzzyNote
+	if diagInfo != "" {
+		resultMsg += "\n\n" + diagInfo
+	}
+	return textResult(resultMsg), nil
 }
 
 // --- 辅助函数 ---

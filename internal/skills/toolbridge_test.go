@@ -121,6 +121,92 @@ func TestToolBridge_CallTool(t *testing.T) {
 	}
 }
 
+func TestToolBridge_CallToolAppliesInputFilter(t *testing.T) {
+	logger := zap.NewNop()
+	host := mcphost.NewHost(logger)
+	called := false
+	host.RegisterTool(
+		mcphost.ToolDefinition{
+			Name:        "filesystem",
+			Description: "filesystem",
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+		},
+		func(ctx context.Context, input json.RawMessage) (*mcphost.ToolResult, error) {
+			called = true
+			return &mcphost.ToolResult{Content: json.RawMessage(`"edited"`)}, nil
+		},
+	)
+
+	bridge := NewToolBridge(host, logger)
+	filter := NewToolFilterWithDenyAndInputs(nil, nil, map[string]map[string]string{
+		"filesystem": {"action": "list|glob|grep|read"},
+	})
+	result, err := bridge.CallTool(context.Background(), filter, nil, "filesystem", json.RawMessage(`{"action":"edit","path":"README.md","old_string":"a","new_string":"b"}`))
+	if err == nil {
+		t.Fatal("filesystem edit should be rejected by input filter")
+	}
+	if result != nil {
+		t.Fatalf("blocked call should not return tool result: %+v", result)
+	}
+	if called {
+		t.Fatal("input-filtered filesystem write must not execute underlying tool")
+	}
+	if !errs.IsCode(err, errs.CodeSkillToolBlocked) {
+		t.Fatalf("expected CodeSkillToolBlocked, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "tool_filter_input_denied") {
+		t.Fatalf("expected recoverable input denial, got %q", err.Error())
+	}
+}
+
+func TestToolBridge_CallToolRechecksInputFilterAfterPluginMutatesArgs(t *testing.T) {
+	logger := zap.NewNop()
+	host := mcphost.NewHost(logger)
+	called := false
+	host.RegisterTool(
+		mcphost.ToolDefinition{
+			Name:        "filesystem",
+			Description: "filesystem",
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+		},
+		func(ctx context.Context, input json.RawMessage) (*mcphost.ToolResult, error) {
+			called = true
+			return &mcphost.ToolResult{Content: json.RawMessage(`"edited"`)}, nil
+		},
+	)
+
+	bridge := NewToolBridge(host, logger)
+	pluginMgr := plugin.NewManager(logger)
+	pluginMgr.RegisterHooks(plugin.Hooks{
+		ToolExecuteBefore: func(ctx context.Context, input *plugin.ToolExecuteInput) error {
+			input.Args = json.RawMessage(`{"action":"edit","path":"README.md","old_string":"a","new_string":"b"}`)
+			return nil
+		},
+	})
+	bridge.SetPluginManager(pluginMgr)
+
+	filter := NewToolFilterWithDenyAndInputs(nil, nil, map[string]map[string]string{
+		"filesystem": {"action": "list|glob|grep|read"},
+	})
+	result, err := bridge.CallTool(context.Background(), filter, nil, "filesystem", json.RawMessage(`{"action":"read","path":"README.md"}`))
+
+	if err == nil {
+		t.Fatal("plugin-mutated filesystem edit should be rejected by input filter")
+	}
+	if result != nil {
+		t.Fatalf("blocked call should not return tool result: %+v", result)
+	}
+	if called {
+		t.Fatal("plugin-mutated filesystem write must not execute underlying tool")
+	}
+	if !errs.IsCode(err, errs.CodeSkillToolBlocked) {
+		t.Fatalf("expected CodeSkillToolBlocked, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "tool_filter_input_denied") {
+		t.Fatalf("expected recoverable input denial, got %q", err.Error())
+	}
+}
+
 func TestToolBridge_AvailableTools(t *testing.T) {
 	logger := zap.NewNop()
 	host := mcphost.NewHost(logger)

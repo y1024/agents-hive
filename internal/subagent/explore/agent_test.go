@@ -150,7 +150,7 @@ func TestToolWhitelist(t *testing.T) {
 	}
 
 	// 验证禁止的工具不在白名单中
-	forbiddenTools := []string{"write_file", "edit", "multi_edit"}
+	forbiddenTools := []string{"write_file", "edit", "multiedit", "multi_edit"}
 	for _, tool := range forbiddenTools {
 		assert.False(t, filter.IsAllowed(tool), "工具 %s 不应在白名单中", tool)
 	}

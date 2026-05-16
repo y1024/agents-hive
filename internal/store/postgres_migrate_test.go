@@ -8,6 +8,8 @@ import (
 func TestPostgresDefaultPermissionRulesUseMinimalIMPolicy(t *testing.T) {
 	for _, required := range []string{
 		`"tool_name":"send_im_message","action":"allow"`,
+		`"tool_name":"filesystem","action":"allow"`,
+		`"tool_name":"multiedit","action":"allow"`,
 		`"tool_name":"feishu_api","pattern":"create_approval","action":"ask"`,
 		`"tool_name":"feishu_api","action":"allow"`,
 		`"tool_name":"memory","pattern":"delete","action":"ask"`,
@@ -19,6 +21,7 @@ func TestPostgresDefaultPermissionRulesUseMinimalIMPolicy(t *testing.T) {
 	}
 	for _, forbidden := range []string{
 		`"tool_name":"send_im_message","action":"ask"`,
+		`"tool_name":"multi_edit","action":"allow"`,
 		`"tool_name":"feishu_api","action":"ask"`,
 	} {
 		if strings.Contains(pgDefaultPermissionRulesJSON, forbidden) {

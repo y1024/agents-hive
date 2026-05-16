@@ -1,6 +1,10 @@
 package skills
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/chef-guo/agents-hive/internal/router"
+)
 
 // ToolPolicyInput 是构建 ToolPolicy 所需的纯数据输入，
 // 避免 skills 包直接依赖 config 包（config → skills 已有依赖，反向会循环引用）。
@@ -184,6 +188,7 @@ func (p *ToolPolicy) BuildFilter(profileName string, agentTools []string, isSuba
 
 	// [3-5] 构建 deny 列表
 	var denied []string
+	allowedInputs := map[string]map[string]string{}
 	for t := range p.globalDeny {
 		denied = append(denied, t)
 	}
@@ -196,14 +201,17 @@ func (p *ToolPolicy) BuildFilter(profileName string, agentTools []string, isSuba
 		for t := range p.subagentLeafDeny {
 			denied = append(denied, t)
 		}
+		if inputs := router.MixedAllowedToolInputsForIntent(router.IntentFrame{Kind: router.IntentRead}, "filesystem"); len(inputs) > 0 {
+			allowedInputs["filesystem"] = inputs
+		}
 	}
 
 	// 如果既没有 allow 限制也没有 deny 限制，返回 nil（不过滤）
-	if len(allowed) == 0 && len(denied) == 0 {
+	if len(allowed) == 0 && len(denied) == 0 && len(allowedInputs) == 0 {
 		return nil
 	}
 
-	return NewToolFilterWithDeny(allowed, denied)
+	return NewToolFilterWithDenyAndInputs(allowed, denied, allowedInputs)
 }
 
 // MasterFilter 构建 Master agent 专用的 ToolFilter。

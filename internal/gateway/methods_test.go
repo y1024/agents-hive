@@ -116,6 +116,42 @@ func (s *configChannelStore) SaveExternalResource(_ context.Context, rec *store.
 	return nil
 }
 
+func (s *configChannelStore) CreateExternalResource(ctx context.Context, rec *store.ExternalResourceRecord) error {
+	return s.SaveExternalResource(ctx, rec)
+}
+
+func (s *configChannelStore) UpdateExternalResource(_ context.Context, name string, update store.ExternalResourceUpdate) error {
+	rec, ok := s.resources[name]
+	if !ok {
+		return store.ErrNotFound
+	}
+	if update.Type != nil {
+		rec.Type = *update.Type
+	}
+	if update.Environment != nil {
+		rec.Environment = *update.Environment
+	}
+	if update.Description != nil {
+		rec.Description = *update.Description
+	}
+	if update.Connection != nil {
+		rec.Connection = *update.Connection
+	}
+	if update.Endpoint != nil {
+		rec.Endpoint = *update.Endpoint
+	}
+	if update.Credentials != nil {
+		rec.Credentials = *update.Credentials
+	}
+	if update.ReadOnly != nil {
+		rec.ReadOnly = *update.ReadOnly
+	}
+	if update.Enabled != nil {
+		rec.Enabled = *update.Enabled
+	}
+	return nil
+}
+
 func (s *configChannelStore) UpsertExternalResourceFull(ctx context.Context, rec *store.ExternalResourceRecord) error {
 	return s.SaveExternalResource(ctx, rec)
 }

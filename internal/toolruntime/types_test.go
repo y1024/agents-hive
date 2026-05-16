@@ -166,6 +166,61 @@ func TestDecideExecutionRepairsInputsOutsideRouteDecision(t *testing.T) {
 	}
 }
 
+func TestDecideExecutionRepairsFilesystemWriteActionOutsideReadRouteDecision(t *testing.T) {
+	descriptor := DescriptorFromDefinition(mcphost.ToolDefinition{Name: "filesystem", Core: true})
+	decision := DecideExecution(descriptor, Invocation{
+		Name:      "filesystem",
+		Arguments: json.RawMessage(`{"action":"edit","path":"README.md","old_string":"a","new_string":"b"}`),
+		Route: router.RouteDecision{
+			Intent: router.IntentFrame{Kind: router.IntentRead},
+			AllowedToolInputs: map[string]map[string]string{
+				"filesystem": {"action": "glob|grep|list|read"},
+			},
+		},
+	})
+
+	if decision.Action != ExecutionActionRepair || decision.Source != "route_decision" || decision.Reason != "route_input_denied" {
+		t.Fatalf("decision = %+v, want route input repair", decision)
+	}
+	if decision.RequiresConfirmation || decision.Policy.RequiresApproval {
+		t.Fatalf("filesystem route input repair must not request confirmation: %+v", decision)
+	}
+}
+
+func TestDecideExecutionAllowsFilesystemReadActionInsideReadRouteDecision(t *testing.T) {
+	descriptor := DescriptorFromDefinition(mcphost.ToolDefinition{Name: "filesystem", Core: true})
+	decision := DecideExecution(descriptor, Invocation{
+		Name:      "filesystem",
+		Arguments: json.RawMessage(`{"action":"grep","pattern":"MixedAllowedToolInputsForIntent"}`),
+		Route: router.RouteDecision{
+			Intent: router.IntentFrame{Kind: router.IntentRead},
+			AllowedToolInputs: map[string]map[string]string{
+				"filesystem": {"action": "glob|grep|list|read"},
+			},
+		},
+	})
+
+	if decision.Action != ExecutionActionAllow || decision.Policy.Reason != "mixed_read_action" {
+		t.Fatalf("decision = %+v, want filesystem read action allow", decision)
+	}
+}
+
+func TestRouteInputDenyReasonFilesystemAction(t *testing.T) {
+	reason := RouteInputDenyReason(Invocation{
+		Name:      "filesystem",
+		Arguments: json.RawMessage(`{"action":"write","path":"README.md","content":"x"}`),
+		Route: router.RouteDecision{
+			AllowedToolInputs: map[string]map[string]string{
+				"filesystem": {"action": "glob|grep|list|read"},
+			},
+		},
+	})
+
+	if reason != "route_input_denied" {
+		t.Fatalf("RouteInputDenyReason = %q, want route_input_denied", reason)
+	}
+}
+
 func TestDecideExecutionAllowsInputsInsideRouteDecisionThenAppliesPolicy(t *testing.T) {
 	descriptor := DescriptorFromDefinition(mcphost.ToolDefinition{Name: "feishu_api", Core: true})
 	decision := DecideExecution(descriptor, Invocation{

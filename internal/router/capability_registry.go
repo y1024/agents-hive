@@ -83,6 +83,7 @@ var builtinToolRules = map[string]BuiltinToolRule{
 	"escalate_to_human":          {Domain: "customer_service", Invocation: InvocationDirectTool, Risk: RiskExternalWrite, SideEffect: true, Capabilities: []Capability{CapabilityExternalSend, CapabilityCustomerServiceEscalate}},
 	"exit_plan_mode":             {Domain: "planning", Invocation: InvocationDirectTool, Risk: RiskReadOnly, ReadOnly: true},
 	"feishu_api":                 {Domain: "messaging", Invocation: InvocationDirectTool, Risk: RiskExternalWrite, SideEffect: true, Capabilities: []Capability{CapabilityExternalSend, CapabilityExternalSendFeishu}},
+	"filesystem":                 {Domain: "filesystem", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true},
 	"finish_plan":                {Domain: "planning", Invocation: InvocationDirectTool, Risk: RiskReadOnly, ReadOnly: true},
 	"generate_image":             {Domain: "media", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true},
 	"generate_video":             {Domain: "media", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true},
@@ -92,7 +93,6 @@ var builtinToolRules = map[string]BuiltinToolRule{
 	"kb_search":                  {Domain: "customer_service", Invocation: InvocationDirectTool, Risk: RiskReadOnly, ReadOnly: true, Capabilities: []Capability{CapabilityCustomerServiceKBRead}},
 	"ls":                         {Domain: "filesystem", Invocation: InvocationDirectTool, Risk: RiskReadOnly, ReadOnly: true},
 	"memory":                     {Domain: "agent", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true},
-	"multi_edit":                 {Domain: "filesystem", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true},
 	"multiedit":                  {Domain: "filesystem", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true},
 	"parallel_dispatch":          {Domain: "agent", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true},
 	"promote_todos_to_taskboard": {Domain: "taskboard", Invocation: InvocationDirectTool, Risk: RiskLocalWrite, SideEffect: true},
@@ -213,6 +213,11 @@ var mixedActionRules = map[string]mixedActionRule{
 		ReadOnlyActions:   []string{"navigate", "snapshot", "wait", "screenshot"},
 		LocalWriteActions: []string{"click", "fill", "eval", "close"},
 	},
+	"filesystem": {
+		Field:             "action",
+		ReadOnlyActions:   []string{"list", "glob", "grep", "read"},
+		LocalWriteActions: []string{"write", "edit", "multiedit"},
+	},
 }
 
 var systemDelegationAgents = map[string]bool{
@@ -224,6 +229,7 @@ var systemDelegationAgents = map[string]bool{
 
 var hostToolSets = map[HostToolSet]map[string]bool{
 	HostToolSetDefaultVisible: {
+		"filesystem":  true,
 		"ls":          true,
 		"memory":      true,
 		"question":    true,
@@ -240,6 +246,7 @@ var hostToolSets = map[HostToolSet]map[string]bool{
 	},
 	HostToolSetPlanAllowed: {
 		"exit_plan_mode":             true,
+		"filesystem":                 true,
 		"glob":                       true,
 		"grep":                       true,
 		"ls":                         true,
@@ -262,7 +269,7 @@ var hostToolGroups = map[string][]string{
 	"agent":            {"spawn_agent", "parallel_dispatch", "task"},
 	"customer_service": {"kb_search", "escalate_to_human", "cancel_escalation"},
 	"discovery":        {"tool_search"},
-	"fs":               {"read_file", "write_file", "edit", "glob", "grep", "ls", "multiedit", "multi_edit", "apply_patch"},
+	"fs":               {"filesystem", "read_file", "write_file", "edit", "glob", "grep", "ls", "multiedit", "apply_patch"},
 	"lsp":              {"lsp_definition", "lsp_references", "lsp_hover", "lsp_symbols", "lsp_diagnostics", "lsp_rename", "lsp_code_action", "lsp_format", "lsp_completion"},
 	"runtime":          {"bash"},
 	"web":              {"websearch", "webfetch", "web_search", "web_fetch", "browser_interact"},
@@ -275,7 +282,7 @@ var hostToolPolicyProfiles = map[string][]string{
 	},
 	"full":      {"*"},
 	"messaging": {"send_im_message", "feishu_api", "skill"},
-	"readonly":  {"read_file", "glob", "grep", "ls", "websearch", "webfetch", "web_search", "web_fetch"},
+	"readonly":  {"filesystem", "read_file", "glob", "grep", "ls", "websearch", "webfetch", "web_search", "web_fetch"},
 	"master":    {"skill", "memory", "question", "taskboard", "task", "spawn_agent", "parallel_dispatch"},
 	"master_direct": {
 		"group:fs", "group:runtime", "group:web", "group:lsp", "group:agent", "group:discovery",

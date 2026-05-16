@@ -58,6 +58,51 @@ func TestSanitizeMetricLabels_AllowsMetricSpecificLabels(t *testing.T) {
 	assert.Equal(t, map[string]any{"trigger": "router_intent"}, triggerLabels)
 }
 
+func TestSanitizeMetricLabels_AllowsToolDomainLowCardinalityLabels(t *testing.T) {
+	got := SanitizeMetricLabels("hive_filesystem_action_total", map[string]any{
+		"tool_name":  "filesystem",
+		"action":     "edit",
+		"status":     "error",
+		"reason":     "route_input_denied",
+		"path":       "/Users/example/secret.go",
+		"content":    "secret",
+		"old_string": "old",
+		"new_string": "new",
+	})
+
+	assert.Equal(t, map[string]any{
+		"tool_name": "filesystem",
+		"action":    "edit",
+		"status":    "error",
+		"reason":    "route_input_denied",
+	}, got)
+
+	callLabels := SanitizeMetricLabels("hive_tool_call_total", map[string]any{
+		"tool_name":  "filesystem",
+		"action":     "read",
+		"status":     "success",
+		"path":       "/tmp/secret.go",
+		"old_string": "secret",
+	})
+	assert.Equal(t, map[string]any{
+		"tool_name": "filesystem",
+		"action":    "read",
+		"status":    "success",
+	}, callLabels)
+
+	errorLabels := SanitizeMetricLabels("hive_tool_error_total", map[string]any{
+		"tool_name": "filesystem",
+		"action":    "edit",
+		"reason":    "missing_field",
+		"content":   "secret",
+	})
+	assert.Equal(t, map[string]any{
+		"tool_name": "filesystem",
+		"action":    "edit",
+		"reason":    "missing_field",
+	}, errorLabels)
+}
+
 func TestSanitizeMetricLabels_ReturnsNilWhenEmptyAfterFiltering(t *testing.T) {
 	got := SanitizeMetricLabels("hive.llm.duration_ms", map[string]any{
 		"session_id": "s1",

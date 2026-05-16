@@ -3,7 +3,7 @@
   "name": "最小委派必须可评测可回放",
   "route": "web",
   "input": "并行调查 internal/master 和 internal/tools 中 tool 调用链路，并合并结论",
-  "allowed_tools": ["task", "spawn_agent", "parallel_dispatch", "grep", "read_file"],
+  "allowed_tools": ["task", "spawn_agent", "parallel_dispatch", "filesystem", "grep", "read_file"],
   "expected_agents": ["subagent"],
   "scenario": "delegation",
   "expected_status": "pass",

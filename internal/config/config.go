@@ -564,7 +564,7 @@ func (c *Config) CLIDefaults() {
 	c.PromptLanguage = DefaultPromptLanguage
 	c.Channel = DefaultChannelConfig
 	c.Security = DefaultSecurityConfig
-	c.Tools = ToolsConfig{CreateRequiresApproval: true}
+	c.Tools = ToolsConfig{CreateRequiresApproval: true, FilesystemEnabled: defaultBoolPtr(true)}
 	c.ControlPlane = DefaultControlPlaneConfig
 	c.ACPServer = DefaultACPServerConfig
 	c.Plugin = DefaultPluginConfig
@@ -1543,6 +1543,12 @@ type ExecRuleConfig struct {
 type ToolsConfig struct {
 	CreateRequiresApproval bool     `json:"create_requires_approval"`  // create_tool 是否需要 HITL 审批
 	AllowedDomains         []string `json:"allowed_domains,omitempty"` // HTTP 工具全局域名白名单
+	FilesystemEnabled      *bool    `json:"filesystem_enabled,omitempty"`
+}
+
+// IsFilesystemEnabled 返回 filesystem 统一工具是否启用；未配置时默认启用。
+func (t ToolsConfig) IsFilesystemEnabled() bool {
+	return t.FilesystemEnabled == nil || *t.FilesystemEnabled
 }
 
 // SandboxConfig 配置命令沙箱（可插拔执行器）

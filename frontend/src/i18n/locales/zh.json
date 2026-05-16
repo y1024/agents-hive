@@ -853,6 +853,14 @@
   "tools": {
     "bash": "命令执行",
     "edit": "文件编辑",
+    "filesystem": "文件系统",
+    "filesystem.actions.list": "列出文件",
+    "filesystem.actions.glob": "文件匹配",
+    "filesystem.actions.grep": "内容搜索",
+    "filesystem.actions.read": "读取文件",
+    "filesystem.actions.write": "写入文件",
+    "filesystem.actions.edit": "编辑文件",
+    "filesystem.actions.multiedit": "批量编辑",
     "write": "文件写入",
     "write_file": "文件写入",
     "read": "文件读取",
@@ -907,6 +915,17 @@
     "clickToExpand": "点击展开",
     "clickToCollapse": "点击收起",
     "invoked": "已调用工具"
+  },
+  "filesystem": {
+    "actions": {
+      "list": "列出文件",
+      "glob": "文件匹配",
+      "grep": "内容搜索",
+      "read": "读取文件",
+      "write": "写入文件",
+      "edit": "编辑文件",
+      "multiedit": "批量编辑"
+    }
   },
   "externalResources": {
     "title": "外部资源",

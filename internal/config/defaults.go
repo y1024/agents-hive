@@ -7,6 +7,10 @@ import (
 	"github.com/chef-guo/agents-hive/internal/skills"
 )
 
+func defaultBoolPtr(v bool) *bool {
+	return &v
+}
+
 // 默认配置值
 const (
 	DefaultServerPort          = 8080
@@ -184,10 +188,10 @@ func defaultPermissionRules() []skills.PermissionRule {
 	rules := []skills.PermissionRule{
 		// ── 自动允许 (allow) - 常规开发/规划路径 ──
 		{ToolName: "read_file", Action: skills.PermissionAllow},
+		{ToolName: "filesystem", Action: skills.PermissionAllow},
 		{ToolName: "write_file", Action: skills.PermissionAllow},
 		{ToolName: "edit", Action: skills.PermissionAllow},
 		{ToolName: "multiedit", Action: skills.PermissionAllow},
-		{ToolName: "multi_edit", Action: skills.PermissionAllow},
 		{ToolName: "apply_patch", Action: skills.PermissionAllow},
 		{ToolName: "glob", Action: skills.PermissionAllow},
 		{ToolName: "grep", Action: skills.PermissionAllow},

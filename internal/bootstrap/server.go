@@ -373,6 +373,7 @@ func InitServer(cfg *config.Config, configPath string, logger *zap.Logger) *Serv
 		ServiceTier:                 cfg.LLM.InteractiveServiceTier,
 		Router:                      sc.AIRouter,
 		ToolPolicy:                  cfg.Agent.ToolPolicy,
+		Tools:                       cfg.Tools,
 		ToolRecall:                  cfg.Agent.ToolRecall,
 		FirstToken:                  cfg.Agent.FirstToken,
 		ActionGuardEnabled:          cfg.Agent.ActionGuardEnabled,
@@ -711,8 +712,18 @@ func registerIMAPIService(sc *ServerComponents, cfg *config.Config, logger *zap.
 		service.Register(imcore.NewSendOnlyAdapter(imcore.PlatformWeCom, sc.ChannelRouter))
 		service.Register(imcore.NewSendOnlyAdapter(imcore.PlatformDingTalk, sc.ChannelRouter))
 	}
+	var metricsWriter observability.MetricsWriter
+	if sc.ChannelRouter != nil {
+		metricsWriter = sc.ChannelRouter.MetricsWriter()
+	}
+	if metricsWriter == nil {
+		if pgStore, ok := sc.DB.(*store.PostgresStore); ok && pgStore != nil {
+			metricsWriter = observability.NewPgMetricsWriter(pgStore.Pool(), logger)
+		}
+	}
 	tools.RegisterIMAPIToolWithOptions(sc.MCPHost, logger, service, tools.IMAPIToolOptions{
-		ForceDryRun: cfg.Agent.IMAPI.ForceDryRun,
+		ForceDryRun:   cfg.Agent.IMAPI.ForceDryRun,
+		MetricsWriter: metricsWriter,
 	})
 	logger.Info("im_api 统一 IM 工具已注册",
 		zap.Bool("force_dry_run", cfg.Agent.IMAPI.ForceDryRun),

@@ -466,6 +466,7 @@ func (m *Master) runReActLoop(
 		modelVisibleTools, toolRecallObs := modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntentWithOptions(session, availableTools, skillMetas, latestQuery, m.config.ToolRecall, turnIntent, toolVisibilityOptions{
 			FastPath:             m.config.FirstToken.FastPathEnabled,
 			MaxModelVisibleTools: m.config.MaxModelVisibleTools,
+			FilesystemEnabled:    m.config.Tools.FilesystemEnabled,
 		})
 		toolVisibilityMs := time.Since(toolVisibilityStart).Milliseconds()
 
@@ -1573,6 +1574,178 @@ func routeInputDenyReason(toolName string, args json.RawMessage, allowed map[str
 	return "", actuals, false
 }
 
+func (m *Master) recordRouteInputDeniedMetric(toolName string, args json.RawMessage, source string) {
+	m.enqueueMetric(observability.Metric{
+		Name:  "hive_route_input_denied_total",
+		Value: 1,
+		Labels: map[string]any{
+			"tool_name": emptyAsUnknown(toolName),
+			"action":    normalizedToolActionForMetric(toolName, args),
+			"reason":    "route_input_denied",
+			"source":    emptyAsUnknown(source),
+		},
+		Ts: time.Now(),
+	})
+}
+
+func (m *Master) recordToolCallCounter(toolName string, args json.RawMessage, status string) {
+	m.enqueueMetric(observability.Metric{
+		Name:  "hive_tool_call_total",
+		Value: 1,
+		Labels: map[string]any{
+			"tool_name": emptyAsUnknown(toolName),
+			"action":    normalizedToolActionForMetric(toolName, args),
+			"status":    normalizedToolStatusForMetric(status),
+		},
+		Ts: time.Now(),
+	})
+}
+
+func (m *Master) recordToolErrorCounter(toolName string, args json.RawMessage, reason string) {
+	m.enqueueMetric(observability.Metric{
+		Name:  "hive_tool_error_total",
+		Value: 1,
+		Labels: map[string]any{
+			"tool_name": emptyAsUnknown(toolName),
+			"action":    normalizedToolActionForMetric(toolName, args),
+			"reason":    normalizedToolReasonForMetric(reason),
+		},
+		Ts: time.Now(),
+	})
+}
+
+func (m *Master) recordFilesystemActionObservation(ctx context.Context, sessionID, toolName string, args json.RawMessage, status, reason string, duration time.Duration) {
+	if toolName != "filesystem" {
+		return
+	}
+	action := normalizedToolActionForMetric(toolName, args)
+	status = normalizedToolStatusForMetric(status)
+	reason = normalizedToolReasonForMetric(reason)
+	m.enqueueMetric(observability.Metric{
+		Name:  "hive_filesystem_action_total",
+		Value: 1,
+		Labels: map[string]any{
+			"tool_name": "filesystem",
+			"action":    action,
+			"status":    status,
+			"reason":    reason,
+		},
+		Ts: time.Now(),
+	})
+	attrs := map[string]any{
+		"tool_name":   "filesystem",
+		"action":      action,
+		"status":      status,
+		"reason":      reason,
+		"args_hash":   hashToolArgs(args),
+		"duration_ms": duration.Milliseconds(),
+	}
+	if tc := toolctx.GetToolContext(ctx); tc != nil {
+		if tc.ToolCallID != "" {
+			attrs["tool_call_id"] = tc.ToolCallID
+		}
+		if turnID := tc.TurnIDOrTraceID(); turnID != "" {
+			attrs["turn_id"] = turnID
+		}
+	}
+	m.enqueueLog(observability.LogEntry{
+		Level:      "info",
+		Message:    "filesystem action audit",
+		Attributes: attrs,
+		Ts:         time.Now(),
+	})
+}
+
+func normalizedToolActionForMetric(toolName string, args json.RawMessage) string {
+	switch toolName {
+	case "filesystem", "im_api":
+		var payload struct {
+			Action string `json:"action"`
+		}
+		if err := json.Unmarshal(args, &payload); err == nil {
+			action := strings.ToLower(strings.TrimSpace(payload.Action))
+			if isKnownToolActionForMetric(toolName, action) {
+				return action
+			}
+			if action != "" {
+				return "other"
+			}
+		}
+	case "send_im_message":
+		return "send_message"
+	}
+	return "unknown"
+}
+
+func normalizedToolErrorReason(toolName string, _ json.RawMessage, content string, fallback string) string {
+	if toolName == "filesystem" {
+		if code := filesystemErrorCodeFromContent(content); code != "" {
+			return code
+		}
+	}
+	return fallback
+}
+
+func filesystemErrorCodeFromContent(content string) string {
+	content = strings.TrimSpace(content)
+	if !strings.HasPrefix(content, "filesystem.") {
+		return ""
+	}
+	parts := strings.SplitN(content, ":", 3)
+	if len(parts) < 2 {
+		return ""
+	}
+	code := strings.TrimSpace(parts[1])
+	switch code {
+	case "invalid_input", "missing_field", "unknown_action", "execution_failed":
+		return code
+	default:
+		return ""
+	}
+}
+
+func isKnownToolActionForMetric(toolName, action string) bool {
+	switch toolName {
+	case "filesystem":
+		switch action {
+		case "list", "glob", "grep", "read", "write", "edit", "multiedit":
+			return true
+		}
+	case "im_api":
+		switch action {
+		case "search_recipients", "list_recent_conversations", "resolve_recipient", "send_message":
+			return true
+		}
+	}
+	return false
+}
+
+func normalizedToolStatusForMetric(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "success", "ok":
+		return "success"
+	case "error", "failed", "fail":
+		return "error"
+	case "denied", "blocked":
+		return "denied"
+	default:
+		return "unknown"
+	}
+}
+
+func normalizedToolReasonForMetric(reason string) string {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "":
+		return "none"
+	case "route_input_denied", "executor_error", "tool_error", "nil_result",
+		"invalid_input", "missing_field", "unknown_action", "execution_failed",
+		"route_input_outside_allowed_values", "route_tool_not_allowed":
+		return strings.ToLower(strings.TrimSpace(reason))
+	default:
+		return "other"
+	}
+}
+
 func textToolResult(content string, isError bool) *mcphost.ToolResult {
 	encoded, _ := json.Marshal(content)
 	return &mcphost.ToolResult{Content: encoded, IsError: isError}
@@ -1611,6 +1784,8 @@ func (m *Master) recoverableToolCallErrorResult(ctx context.Context, sessionID, 
 		zap.String("tool", toolName),
 		zap.String("reason", errText),
 	)
+	m.recordToolCallCounter(toolName, args, "error")
+	m.recordToolErrorCounter(toolName, args, errKind)
 	m.emitToolCallEvent(sessionID, ToolCallEvent{
 		ToolCallID:  toolCallID,
 		ToolName:    toolName,
@@ -1677,6 +1852,8 @@ func (m *Master) enforceToolExecutionGate(ctx context.Context, session *SessionS
 				"allowed_tools": allowedTools,
 			},
 		})
+		m.recordToolCallCounter(toolName, args, "error")
+		m.recordToolErrorCounter(toolName, args, "route_tool_not_allowed")
 		m.logToolCall(ctx, sessionID, llm.ToolCall{ID: toolCallID, Name: toolName, Arguments: args}, string(args), content, true, 0)
 		return toolResult{Content: content, IsError: true, Terminal: false, Recoverable: true, ErrorKind: "route_tool_not_allowed"}, false
 	}
@@ -1720,6 +1897,10 @@ func (m *Master) enforceToolExecutionGate(ctx context.Context, session *SessionS
 						"actual_inputs":  actuals,
 					},
 				})
+				m.recordRouteInputDeniedMetric(toolName, args, "direct")
+				m.recordToolCallCounter(toolName, args, "error")
+				m.recordToolErrorCounter(toolName, args, "route_input_outside_allowed_values")
+				m.recordFilesystemActionObservation(ctx, sessionID, toolName, args, "denied", "route_input_denied", 0)
 				m.logToolCall(ctx, sessionID, llm.ToolCall{ID: toolCallID, Name: toolName, Arguments: args}, string(args), content, true, 0)
 				return toolResult{Content: content, IsError: true, Terminal: false, Recoverable: true, ErrorKind: "route_input_outside_allowed_values"}, false
 			}
@@ -2005,6 +2186,9 @@ func (m *Master) executeTool(ctx context.Context, session *SessionState, userID 
 			Value:  1,
 			Labels: map[string]any{"tool_name": executedToolCall.Name, "session_id": sessionID},
 		})
+		m.recordToolCallCounter(executedToolCall.Name, executedArgs, "error")
+		m.recordToolErrorCounter(executedToolCall.Name, executedArgs, "executor_error")
+		m.recordFilesystemActionObservation(ctx, sessionID, executedToolCall.Name, executedArgs, "error", "executor_error", duration)
 		m.logToolCall(ctx, sessionID, executedToolCall, string(executedArgs), err.Error(), true, duration)
 		return toolResult{Content: errMsg, IsError: true, Terminal: terminal, Recoverable: recoverable, ErrorKind: errKind}
 	}
@@ -2044,6 +2228,10 @@ func (m *Master) executeTool(ctx context.Context, session *SessionState, userID 
 			Attributes:   map[string]any{"tool_name": executedToolCall.Name, "is_error": true},
 			Ts:           start,
 		})
+		errorReason := normalizedToolErrorReason(executedToolCall.Name, executedArgs, decoded, "tool_error")
+		m.recordToolCallCounter(executedToolCall.Name, executedArgs, "error")
+		m.recordToolErrorCounter(executedToolCall.Name, executedArgs, errorReason)
+		m.recordFilesystemActionObservation(ctx, sessionID, executedToolCall.Name, executedArgs, "error", errorReason, duration)
 		m.logToolCall(ctx, sessionID, executedToolCall, string(executedArgs), decoded, true, duration)
 		return toolResult{Content: decoded, IsError: true, Terminal: terminal, Recoverable: recoverable, ErrorKind: errKind}
 	}
@@ -2075,6 +2263,9 @@ func (m *Master) executeTool(ctx context.Context, session *SessionState, userID 
 			Attributes:   map[string]any{"tool_name": executedToolCall.Name, "error": "nil result"},
 			Ts:           start,
 		})
+		m.recordToolCallCounter(executedToolCall.Name, executedArgs, "error")
+		m.recordToolErrorCounter(executedToolCall.Name, executedArgs, "nil_result")
+		m.recordFilesystemActionObservation(ctx, sessionID, executedToolCall.Name, executedArgs, "error", "nil_result", duration)
 		m.logToolCall(ctx, sessionID, executedToolCall, string(executedArgs), "[工具返回空结果]", true, duration)
 		return toolResult{Content: "[工具返回空结果]", IsError: true}
 	}
@@ -2115,6 +2306,8 @@ func (m *Master) executeTool(ctx context.Context, session *SessionState, userID 
 		Value:  float64(duration.Milliseconds()),
 		Labels: map[string]any{"tool_name": executedToolCall.Name, "session_id": sessionID},
 	})
+	m.recordToolCallCounter(executedToolCall.Name, executedArgs, "success")
+	m.recordFilesystemActionObservation(ctx, sessionID, executedToolCall.Name, executedArgs, "success", "", duration)
 	m.logToolCall(ctx, sessionID, executedToolCall, string(executedArgs), content, false, duration)
 	m.logFileChangeIfNeeded(ctx, sessionID, executedToolCall.Name, executedArgs, content)
 	m.runTestDrivenShadowForToolChange(ctx, sessionID, sessionTraceID, toolSpanID, executedToolCall.Name, executedArgs)
@@ -2210,6 +2403,24 @@ func changedFilesFromToolCall(toolName string, args json.RawMessage) []string {
 		}
 		if err := json.Unmarshal(args, &p); err == nil {
 			addPath(p.Path)
+		}
+	case "filesystem":
+		var p struct {
+			Action string `json:"action"`
+			Path   string `json:"path"`
+			Edits  []struct {
+				Path string `json:"path"`
+			} `json:"edits"`
+		}
+		if err := json.Unmarshal(args, &p); err == nil {
+			switch strings.ToLower(strings.TrimSpace(p.Action)) {
+			case "write", "edit":
+				addPath(p.Path)
+			case "multiedit":
+				for _, edit := range p.Edits {
+					addPath(edit.Path)
+				}
+			}
 		}
 	case "multiedit", "multi_edit":
 		var p struct {
@@ -2313,26 +2524,12 @@ func (m *Master) logFileChangeIfNeeded(_ context.Context, sessionID, toolName st
 	var filePaths []string
 	switch toolName {
 	case "write_file", "edit", "multiedit":
-		var p struct {
-			Path string `json:"path"`
-		}
-		if err := json.Unmarshal(args, &p); err == nil && p.Path != "" {
-			filePaths = []string{p.Path}
-		}
+		filePaths = changedFilesFromToolCall(toolName, args)
+	case "filesystem":
+		filePaths = changedFilesFromToolCall(toolName, args)
 	case "apply_patch":
 		// apply_patch 的文件路径藏在 patch payload 里，需要解析提取
-		var p struct {
-			Patch string `json:"patch"`
-		}
-		if err := json.Unmarshal(args, &p); err == nil && p.Patch != "" {
-			if parsed, parseErr := tools.ParsePatch(p.Patch); parseErr == nil {
-				for _, fp := range parsed.Files {
-					if fp.NewPath != "" {
-						filePaths = append(filePaths, fp.NewPath)
-					}
-				}
-			}
-		}
+		filePaths = changedFilesFromToolCall(toolName, args)
 	default:
 		return
 	}

@@ -228,6 +228,13 @@ func (m *Master) buildToolPrompt(tools []mcphost.ToolDefinition) string {
 	b.WriteString("## 外部操作\n\n")
 	b.WriteString("直接使用 bash 和 webfetch 工具完成外部操作。\n")
 	b.WriteString("已配置的外部资源连接信息见下方。\n\n")
+	if hasPromptTool(tools, "filesystem") {
+		b.WriteString("### 文件系统工具选择\n")
+		b.WriteString("- 文件系统操作优先使用 filesystem.action。查找、搜索、读取使用 list/glob/grep/read；单处精确替换使用 edit；多处精确替换使用 multiedit。\n")
+		b.WriteString("- 大段补丁、unified diff 或跨结构调整优先使用 apply_patch；测试、构建、git、包管理和任意 shell 命令使用 bash。\n")
+		b.WriteString("- 不要用 bash 执行 cat/less/head/tail 替代 filesystem.read；只在执行真实 shell 命令时使用 bash。\n")
+		b.WriteString("- Plan mode 或只读任务中只能使用 filesystem 的 list/glob/grep/read，不得调用 write/edit/multiedit。\n\n")
+	}
 	if hasPromptTool(tools, "im_api") {
 		b.WriteString("### IM 外发工具选择\n")
 		b.WriteString("- IM 外发统一优先使用 im_api。\n")
@@ -363,6 +370,7 @@ func (m *Master) buildCompactionPipeline() *compaction.Pipeline {
 		ProtectedTurns:  PruneProtectedTurns,
 		OutputThreshold: cfg.ToolOutputMaxTokens,
 		ContextBudget:   cfg.ToolOutputMaxTokens * 2,
+		Observer:        toolsReadTrackerTrimObserver{},
 	}
 
 	// session_memory: 提取会话记忆
@@ -466,6 +474,7 @@ func (m *Master) prepareMessagesWithCompression(ctx context.Context, session *Se
 		ProtectedTurns:  PruneProtectedTurns,
 		OutputThreshold: cfg.ToolOutputMaxTokens,
 		ContextBudget:   cfg.ToolOutputMaxTokens * 2,
+		Observer:        toolsReadTrackerTrimObserver{},
 	}
 	budget0 := cfg.MaxTokens - cfg.ReserveTokens
 	if budget0 <= 0 {

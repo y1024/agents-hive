@@ -49,6 +49,11 @@
     }
   },
 
+  "tools": {
+    "_comment": "工具启动配置。filesystem_enabled 省略时默认启用；显式 false 可关闭统一 filesystem 入口，旧文件工具仍会注册。",
+    "filesystem_enabled": true
+  },
+
   "channel": {
     "_comment": "IM 通道启动配置。运行时通道配置会迁移到数据库；个人微信只保留官方 wechatbot 全局开关。",
     "enabled": false,

@@ -125,6 +125,7 @@ func TestBuiltinCapabilityRegistryCoversCommonHostToolNames(t *testing.T) {
 		"websearch",
 		"webfetch",
 		"browser_interact",
+		"filesystem",
 		"todo_write",
 		"taskboard",
 		"im_api",
@@ -150,6 +151,9 @@ func TestHostToolSets(t *testing.T) {
 	if !IsHostToolInSet(HostToolSetDefaultVisible, "tool_search") {
 		t.Fatal("tool_search should be default-visible as discovery entrypoint")
 	}
+	if !IsHostToolInSet(HostToolSetDefaultVisible, "filesystem") {
+		t.Fatal("filesystem should be default-visible with read-only action constraints")
+	}
 	if IsHostToolInSet(HostToolSetDefaultVisible, "send_im_message") {
 		t.Fatal("side-effect messaging tool must not be default-visible")
 	}
@@ -163,6 +167,9 @@ func TestHostToolSets(t *testing.T) {
 	}
 	if !IsHostToolInSet(HostToolSetPlanAllowed, "read_file") {
 		t.Fatal("read_file should be allowed in plan mode")
+	}
+	if !IsHostToolInSet(HostToolSetPlanAllowed, "filesystem") {
+		t.Fatal("filesystem should be allowed in plan mode with read-only action constraints")
 	}
 	if IsHostToolInSet(HostToolSetPlanAllowed, "bash") {
 		t.Fatal("bash must not be allowed in plan mode")
@@ -252,7 +259,7 @@ func TestCapabilityRegistryFeishuIsMixedActionAware(t *testing.T) {
 }
 
 func TestCapabilityRegistryMixedOperationToolsAreActionAware(t *testing.T) {
-	for _, toolName := range []string{"memory", "taskboard", "browser_interact"} {
+	for _, toolName := range []string{"memory", "taskboard", "browser_interact", "filesystem"} {
 		t.Run(toolName, func(t *testing.T) {
 			profile := InferToolProfile(mcphost.ToolDefinition{Name: toolName, Core: true}, ProfileHint{})
 			if !IsMixedReadWriteTool(toolName) {
@@ -272,9 +279,58 @@ func TestCapabilityRegistryMixedOperationToolsAreActionAware(t *testing.T) {
 	if MixedActionField("browser_interact") != "commands[].action" {
 		t.Fatalf("browser_interact action field = %q, want commands[].action", MixedActionField("browser_interact"))
 	}
+	if MixedActionField("filesystem") != "action" {
+		t.Fatalf("filesystem action field = %q, want action", MixedActionField("filesystem"))
+	}
 	if !StructuredDangerousAction("memory", "delete") || !StructuredDangerousAction("taskboard", "delete") {
 		t.Fatal("delete operations should remain action-level dangerous")
 	}
+}
+
+func TestCapabilityRegistryFilesystemActionsAndProfiles(t *testing.T) {
+	profile := InferToolProfile(mcphost.ToolDefinition{Name: "filesystem", Core: true}, ProfileHint{})
+	if profile.Domain != "filesystem" || profile.Risk != RiskLocalWrite || !profile.SideEffect {
+		t.Fatalf("filesystem builtin profile = %+v, want filesystem local-write mixed entrypoint", profile)
+	}
+
+	readActions := strings.Join(MixedReadOnlyActions("filesystem"), "|")
+	for _, action := range []string{"list", "glob", "grep", "read"} {
+		if !containsPipeAction(readActions, action) {
+			t.Fatalf("filesystem read actions missing %q: %q", action, readActions)
+		}
+	}
+	for _, action := range []string{"write", "edit", "multiedit", "multi_edit"} {
+		if containsPipeAction(readActions, action) {
+			t.Fatalf("filesystem read actions must not include %q: %q", action, readActions)
+		}
+	}
+
+	writeActions := strings.Join(MixedLocalWriteActions("filesystem"), "|")
+	for _, action := range []string{"write", "edit", "multiedit"} {
+		if !containsPipeAction(writeActions, action) {
+			t.Fatalf("filesystem write actions missing %q: %q", action, writeActions)
+		}
+	}
+	if containsPipeAction(writeActions, "multi_edit") {
+		t.Fatalf("filesystem write actions must not include legacy multi_edit: %q", writeActions)
+	}
+
+	groups := HostToolPolicyGroups()
+	fsGroup := strings.Join(groups["fs"], "|")
+	if !strings.Contains(fsGroup, "filesystem") {
+		t.Fatalf("fs group should include filesystem: %q", fsGroup)
+	}
+	if strings.Contains(fsGroup, "multi_edit") {
+		t.Fatalf("fs group must not include legacy multi_edit default: %q", fsGroup)
+	}
+	readonly := strings.Join(HostToolPolicyProfiles()["readonly"], "|")
+	if !strings.Contains(readonly, "filesystem") {
+		t.Fatalf("readonly profile should include filesystem: %q", readonly)
+	}
+}
+
+func containsPipeAction(actions, want string) bool {
+	return strings.Contains("|"+actions+"|", "|"+want+"|")
 }
 
 func TestProfileHasSideEffectUsesRiskAndCapabilityMetadata(t *testing.T) {

@@ -76,6 +76,30 @@ describe('LocalNodeClient admin capability endpoints', () => {
     });
   });
 
+  it('uses the explicit external resource upsert API over the resources.save wire method', async () => {
+    const api = createApiClientMock();
+    api.post.mockResolvedValue({ result: { status: 'ok', name: 'prod-db' } });
+    const client = new LocalNodeClient(api);
+
+    await client.upsertExternalResource({
+      name: 'prod-db',
+      type: 'postgres',
+      credentials: '',
+      enabled: true,
+    });
+
+    expect(api.post).toHaveBeenCalledWith('/api/v1/rpc', {
+      id: expect.any(String),
+      method: 'resources.save',
+      params: {
+        name: 'prod-db',
+        type: 'postgres',
+        credentials: '',
+        enabled: true,
+      },
+    });
+  });
+
   it('calls session trace endpoint with optional limit', async () => {
     const api = createApiClientMock();
     api.get.mockResolvedValue({ session_id: 'sess-1', items: [] });

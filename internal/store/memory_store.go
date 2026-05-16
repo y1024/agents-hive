@@ -22,6 +22,7 @@ type MemoryStore struct {
 	schedules    map[string]*ScheduledPushRecord
 	tasks        map[string]*ScheduledTask
 	taskRuns     map[string]*ScheduledTaskRun
+	resources    map[string]*ExternalResourceRecord
 	externalIDs  map[string]*UserExternalIDRecord
 	wechatConvs  map[string]*WechatConversationRecord
 }
@@ -36,6 +37,7 @@ func NewMemoryStore() *MemoryStore {
 		schedules:   make(map[string]*ScheduledPushRecord),
 		tasks:       make(map[string]*ScheduledTask),
 		taskRuns:    make(map[string]*ScheduledTaskRun),
+		resources:   make(map[string]*ExternalResourceRecord),
 		externalIDs: make(map[string]*UserExternalIDRecord),
 		wechatConvs: make(map[string]*WechatConversationRecord),
 	}
@@ -430,11 +432,43 @@ func (m *MemoryStore) SaveLLMProvider(_ context.Context, rec *LLMProviderRecord)
 func (m *MemoryStore) CreateLLMProvider(ctx context.Context, rec *LLMProviderRecord) error {
 	return m.SaveLLMProvider(ctx, rec)
 }
-func (m *MemoryStore) UpdateLLMProvider(ctx context.Context, name string, rec *LLMProviderRecord) error {
-	if rec != nil && rec.Name == "" {
-		rec.Name = name
+func (m *MemoryStore) UpdateLLMProvider(_ context.Context, name string, update LLMProviderUpdate) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec, ok := m.llmProviders[name]
+	if !ok {
+		return errs.New(errs.CodeNotFound, "llm provider not found: "+name)
 	}
-	return m.SaveLLMProvider(ctx, rec)
+	if update.ProviderType != nil {
+		rec.ProviderType = *update.ProviderType
+	}
+	if update.APIKey != nil {
+		rec.APIKey = *update.APIKey
+	}
+	if update.BaseURL != nil {
+		rec.BaseURL = *update.BaseURL
+	}
+	if update.IsDefault != nil {
+		rec.IsDefault = *update.IsDefault
+	}
+	if update.Enabled != nil {
+		rec.Enabled = *update.Enabled
+	}
+	if update.ConfigJSON != nil {
+		rec.ConfigJSON = *update.ConfigJSON
+	}
+	if update.APIFormat != nil {
+		rec.APIFormat = *update.APIFormat
+	}
+	if update.ServiceType != nil {
+		rec.ServiceType = *update.ServiceType
+	}
+	if rec.IsDefault {
+		for providerName, provider := range m.llmProviders {
+			provider.IsDefault = providerName == name
+		}
+	}
+	return nil
 }
 func (m *MemoryStore) DeleteLLMProvider(_ context.Context, name string) error {
 	m.mu.Lock()
@@ -493,28 +527,56 @@ func (m *MemoryStore) SaveLLMModel(_ context.Context, rec *LLMModelRecord) error
 func (m *MemoryStore) CreateLLMModel(ctx context.Context, rec *LLMModelRecord) error {
 	return m.SaveLLMModel(ctx, rec)
 }
-func (m *MemoryStore) UpdateLLMModel(_ context.Context, oldName string, rec *LLMModelRecord) error {
+func (m *MemoryStore) UpdateLLMModel(_ context.Context, oldName string, update LLMModelUpdate) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.llmModels == nil {
 		m.llmModels = map[string]*LLMModelRecord{}
 	}
-	if _, ok := m.llmModels[oldName]; !ok {
+	rec, ok := m.llmModels[oldName]
+	if !ok {
 		return errs.New(errs.CodeNotFound, "llm model not found: "+oldName)
 	}
-	if oldName != rec.Name {
-		if _, ok := m.llmModels[rec.Name]; ok {
-			return errs.New(errs.CodeInvalidInput, "llm model already exists: "+rec.Name)
+	next := *rec
+	if update.Name != nil {
+		next.Name = *update.Name
+	}
+	if update.ProviderName != nil {
+		next.ProviderName = *update.ProviderName
+	}
+	if update.Model != nil {
+		next.Model = *update.Model
+	}
+	if update.BaseURL != nil {
+		next.BaseURL = *update.BaseURL
+	}
+	if update.APIKey != nil {
+		next.APIKey = *update.APIKey
+	}
+	if update.IsDefault != nil {
+		next.IsDefault = *update.IsDefault
+	}
+	if update.Enabled != nil {
+		next.Enabled = *update.Enabled
+	}
+	if update.ServiceType != nil {
+		next.ServiceType = *update.ServiceType
+	}
+	if update.ConfigJSON != nil {
+		next.ConfigJSON = *update.ConfigJSON
+	}
+	if oldName != next.Name {
+		if _, ok := m.llmModels[next.Name]; ok {
+			return errs.New(errs.CodeInvalidInput, "llm model already exists: "+next.Name)
 		}
 		delete(m.llmModels, oldName)
 	}
-	if rec.IsDefault {
+	if next.IsDefault {
 		for _, mod := range m.llmModels {
 			mod.IsDefault = false
 		}
 	}
-	cp := *rec
-	m.llmModels[rec.Name] = &cp
+	m.llmModels[next.Name] = &next
 	return nil
 }
 func (m *MemoryStore) DeleteLLMModel(_ context.Context, name string) error {
@@ -1099,24 +1161,80 @@ func (m *MemoryStore) DeleteMCPServer(_ context.Context, _ string) error { retur
 func (m *MemoryStore) ListMCPServers(_ context.Context) ([]*MCPServerRecord, error) {
 	return nil, nil
 }
-func (m *MemoryStore) GetExternalResource(_ context.Context, _ string) (*ExternalResourceRecord, error) {
-	return nil, ErrNotFound
+func (m *MemoryStore) GetExternalResource(_ context.Context, name string) (*ExternalResourceRecord, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	rec, ok := m.resources[name]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	cp := *rec
+	return &cp, nil
 }
-func (m *MemoryStore) SaveExternalResource(_ context.Context, _ *ExternalResourceRecord) error {
+func (m *MemoryStore) SaveExternalResource(_ context.Context, rec *ExternalResourceRecord) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.resources == nil {
+		m.resources = map[string]*ExternalResourceRecord{}
+	}
+	cp := *rec
+	m.resources[rec.Name] = &cp
 	return nil
 }
 func (m *MemoryStore) CreateExternalResource(ctx context.Context, rec *ExternalResourceRecord) error {
 	return m.SaveExternalResource(ctx, rec)
 }
-func (m *MemoryStore) UpdateExternalResource(ctx context.Context, _ string, rec *ExternalResourceRecord) error {
-	return m.SaveExternalResource(ctx, rec)
+func (m *MemoryStore) UpdateExternalResource(_ context.Context, name string, update ExternalResourceUpdate) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec, ok := m.resources[name]
+	if !ok {
+		return errs.New(errs.CodeNotFound, "external resource not found: "+name)
+	}
+	if update.Type != nil {
+		rec.Type = *update.Type
+	}
+	if update.Environment != nil {
+		rec.Environment = *update.Environment
+	}
+	if update.Description != nil {
+		rec.Description = *update.Description
+	}
+	if update.Connection != nil {
+		rec.Connection = *update.Connection
+	}
+	if update.Endpoint != nil {
+		rec.Endpoint = *update.Endpoint
+	}
+	if update.Credentials != nil {
+		rec.Credentials = *update.Credentials
+	}
+	if update.ReadOnly != nil {
+		rec.ReadOnly = *update.ReadOnly
+	}
+	if update.Enabled != nil {
+		rec.Enabled = *update.Enabled
+	}
+	return nil
 }
 func (m *MemoryStore) UpsertExternalResourceFull(ctx context.Context, rec *ExternalResourceRecord) error {
 	return m.SaveExternalResource(ctx, rec)
 }
-func (m *MemoryStore) DeleteExternalResource(_ context.Context, _ string) error { return nil }
+func (m *MemoryStore) DeleteExternalResource(_ context.Context, name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.resources, name)
+	return nil
+}
 func (m *MemoryStore) ListExternalResources(_ context.Context) ([]*ExternalResourceRecord, error) {
-	return nil, nil
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]*ExternalResourceRecord, 0, len(m.resources))
+	for _, rec := range m.resources {
+		cp := *rec
+		out = append(out, &cp)
+	}
+	return out, nil
 }
 func (m *MemoryStore) SaveGrant(_ context.Context, _ *PermissionGrantRecord) error { return nil }
 func (m *MemoryStore) LoadGrants(_ context.Context) ([]PermissionGrantRecord, error) {

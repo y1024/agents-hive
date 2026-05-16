@@ -177,6 +177,14 @@ func (s *channelConfigMemoryStore) SaveChannelConfig(_ context.Context, rec *sto
 	return nil
 }
 
+func (s *channelConfigMemoryStore) UpsertChannelConfigFull(ctx context.Context, rec *store.ChannelConfigRecord) error {
+	return s.SaveChannelConfig(ctx, rec)
+}
+
+func (s *channelConfigMemoryStore) UpsertMCPServerFull(context.Context, *store.MCPServerRecord) error {
+	return nil
+}
+
 func TestMigrateConfigToDB_IncludesWechatbotOfficialFlag(t *testing.T) {
 	cfg := config.Default()
 	cfg.Channel.WeChatBot.Enabled = true

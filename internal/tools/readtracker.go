@@ -75,3 +75,11 @@ func (t *ReadTracker) RemoveRead(path string) {
 	defer t.mu.Unlock()
 	delete(t.reads, path)
 }
+
+// RemoveReadTrackerPath 删除全局读记录；用于上下文压缩丢弃 read 结果后强制后续写入重新读取。
+func RemoveReadTrackerPath(path string) {
+	if globalReadTracker == nil {
+		return
+	}
+	globalReadTracker.RemoveRead(path)
+}

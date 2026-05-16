@@ -69,45 +69,51 @@ func registerMultiEdit(host *mcphost.Host, logger *zap.Logger, tracker *ReadTrac
 				return errorResult("输入无效: " + err.Error()), nil
 			}
 
-			// 验证输入
-			if len(params.Edits) == 0 {
-				return errorResult("编辑列表不能为空"), nil
-			}
-
-			if len(params.Edits) > 100 {
-				return errorResult("编辑操作数量不能超过 100 个"), nil
-			}
-
-			// 路径安全校验
-			resolvedPaths := make([]string, len(params.Edits))
-			for i, e := range params.Edits {
-				resolvedPath, err := resolveToolPath(e.Path)
-				if err != nil {
-					return errorResult(err.Error()), nil
-				}
-				resolvedPaths[i] = resolvedPath
-			}
-
-			// 转换为内部操作结构
-			operations := make([]editOperation, 0, len(params.Edits))
-			for i, e := range params.Edits {
-				operations = append(operations, editOperation{
-					path:       resolvedPaths[i],
-					oldString:  e.OldString,
-					newString:  e.NewString,
-					replaceAll: e.ReplaceAll,
-				})
-			}
-
-			// 执行多文件编辑
-			result, err := executeMultiEdit(operations, tracker, logger)
-			if err != nil {
-				return errorResult(err.Error()), nil
-			}
-
-			return textResult(result), nil
+			return executeMultiEditInput(ctx, params, tracker, logger)
 		},
 	)
+}
+
+func executeMultiEditInput(ctx context.Context, params multieditInput, tracker *ReadTracker, logger *zap.Logger) (*mcphost.ToolResult, error) {
+	_ = ctx
+
+	// 验证输入
+	if len(params.Edits) == 0 {
+		return errorResult("编辑列表不能为空"), nil
+	}
+
+	if len(params.Edits) > 100 {
+		return errorResult("编辑操作数量不能超过 100 个"), nil
+	}
+
+	// 路径安全校验
+	resolvedPaths := make([]string, len(params.Edits))
+	for i, e := range params.Edits {
+		resolvedPath, err := resolveToolPath(e.Path)
+		if err != nil {
+			return errorResult(err.Error()), nil
+		}
+		resolvedPaths[i] = resolvedPath
+	}
+
+	// 转换为内部操作结构
+	operations := make([]editOperation, 0, len(params.Edits))
+	for i, e := range params.Edits {
+		operations = append(operations, editOperation{
+			path:       resolvedPaths[i],
+			oldString:  e.OldString,
+			newString:  e.NewString,
+			replaceAll: e.ReplaceAll,
+		})
+	}
+
+	// 执行多文件编辑
+	result, err := executeMultiEdit(operations, tracker, logger)
+	if err != nil {
+		return errorResult(err.Error()), nil
+	}
+
+	return textResult(result), nil
 }
 
 // executeMultiEdit 执行多文件编辑，确保原子性

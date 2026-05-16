@@ -2,6 +2,7 @@ package compaction
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -10,6 +11,14 @@ import (
 
 	"github.com/chef-guo/agents-hive/internal/llm"
 )
+
+type captureTrimObserver struct {
+	events []ToolResultTrimEvent
+}
+
+func (o *captureTrimObserver) OnToolResultTrimmed(event ToolResultTrimEvent) {
+	o.events = append(o.events, event)
+}
 
 // --- Pipeline 测试 ---
 
@@ -240,6 +249,41 @@ func TestToolBudget_DoesNotMutateOriginal(t *testing.T) {
 	_, err := c.Compact(context.Background(), msgs, 0)
 	assert.NoError(t, err)
 	assert.Equal(t, bigOutput, msgs[1].Content.Text(), "不应修改原始消息")
+}
+
+func TestToolBudget_NotifiesTrimmedToolResultWithCallArguments(t *testing.T) {
+	observer := &captureTrimObserver{}
+	c := &ToolResultBudgetCompactor{
+		ProtectedTurns:  1,
+		OutputThreshold: 100,
+		ContextBudget:   10000,
+		Observer:        observer,
+	}
+	args := json.RawMessage(`{"path":"/tmp/read.go"}`)
+	msgs := []llm.MessageWithTools{
+		{Role: "user", Content: llm.NewTextContent("read file")},
+		{
+			Role: "assistant",
+			ToolCalls: []llm.ToolCall{
+				{ID: "call-read", Name: "read_file", Arguments: args},
+			},
+		},
+		{
+			Role:       "tool",
+			ToolCallID: "call-read",
+			ToolName:   "read_file",
+			Content:    llm.NewTextContent(strings.Repeat("x", 512)),
+		},
+		{Role: "user", Content: llm.NewTextContent("latest")},
+	}
+
+	result, err := c.Compact(context.Background(), msgs, 0)
+	assert.NoError(t, err)
+	assert.Contains(t, result[2].Content.Text(), "[输出已裁剪")
+	require.Len(t, observer.events, 1)
+	assert.Equal(t, "call-read", observer.events[0].ToolCallID)
+	assert.Equal(t, "read_file", observer.events[0].ToolName)
+	assert.JSONEq(t, string(args), string(observer.events[0].Arguments))
 }
 
 // --- SessionMemoryCompactor 测试 ---

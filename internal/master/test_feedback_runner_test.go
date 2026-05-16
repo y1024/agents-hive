@@ -63,6 +63,30 @@ func TestChangedFilesFromToolCall(t *testing.T) {
 			want: []string{"frontend/src/App.tsx", "internal/a/a.go"},
 		},
 		{
+			name: "filesystem write",
+			tool: "filesystem",
+			args: json.RawMessage(`{"action":"write","path":"internal/a/write.go"}`),
+			want: []string{"internal/a/write.go"},
+		},
+		{
+			name: "filesystem edit",
+			tool: "filesystem",
+			args: json.RawMessage(`{"action":"edit","path":"internal/a/edit.go"}`),
+			want: []string{"internal/a/edit.go"},
+		},
+		{
+			name: "filesystem multiedit",
+			tool: "filesystem",
+			args: json.RawMessage(`{"action":"multiedit","edits":[{"path":"internal/a/a.go"},{"path":"frontend/src/App.tsx"}]}`),
+			want: []string{"frontend/src/App.tsx", "internal/a/a.go"},
+		},
+		{
+			name: "filesystem read ignored",
+			tool: "filesystem",
+			args: json.RawMessage(`{"action":"read","path":"internal/a/read.go"}`),
+			want: nil,
+		},
+		{
 			name: "apply_patch",
 			tool: "apply_patch",
 			args: json.RawMessage(`{"patch":"--- a/internal/agentquality/a.go\n+++ b/internal/agentquality/a.go\n@@ -1 +1 @@\n-old\n+new\n"}`),

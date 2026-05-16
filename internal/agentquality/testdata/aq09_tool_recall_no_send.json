@@ -3,7 +3,7 @@
   "name": "飞书文案润色不能误召回发送工具",
   "route": "web",
   "input": "帮我润色一段飞书通知文案，但不要发送",
-  "allowed_tools": ["read_file", "grep", "memory"],
+  "allowed_tools": ["filesystem", "read_file", "grep", "memory"],
   "scenario": "tool_recall",
   "expected_status": "pass",
   "failure_type": "tool",

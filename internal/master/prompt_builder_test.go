@@ -232,6 +232,36 @@ func TestBuildSystemPrompt_OmitsIMAPIPriorityGuidanceWhenUnavailable(t *testing.
 	assert.NotContains(t, prompt, "list_recent_conversations")
 }
 
+func TestBuildSystemPrompt_IncludesFilesystemPriorityGuidanceWhenVisible(t *testing.T) {
+	m, _ := newTestMaster(t)
+	prompt := m.buildSystemPrompt([]mcphost.ToolDefinition{
+		{Name: "filesystem", Description: "统一文件系统工具", Core: true},
+		{Name: "apply_patch", Description: "应用补丁", Core: true},
+		{Name: "bash", Description: "执行命令", Core: true},
+	})
+
+	assert.Contains(t, prompt, "文件系统操作优先使用 filesystem.action")
+	assert.Contains(t, prompt, "list/glob/grep/read")
+	assert.Contains(t, prompt, "edit")
+	assert.Contains(t, prompt, "multiedit")
+	assert.Contains(t, prompt, "apply_patch")
+	assert.Contains(t, prompt, "bash")
+	assert.Contains(t, prompt, "不要用 bash 执行 cat/less/head/tail 替代 filesystem.read")
+	assert.Contains(t, prompt, "Plan mode")
+	assert.Contains(t, prompt, "不得调用 write/edit/multiedit")
+}
+
+func TestBuildSystemPrompt_OmitsFilesystemPriorityGuidanceWhenUnavailable(t *testing.T) {
+	m, _ := newTestMaster(t)
+	prompt := m.buildSystemPrompt([]mcphost.ToolDefinition{
+		{Name: "apply_patch", Description: "应用补丁", Core: true},
+		{Name: "bash", Description: "执行命令", Core: true},
+	})
+
+	assert.NotContains(t, prompt, "文件系统操作优先使用 filesystem.action")
+	assert.NotContains(t, prompt, "不得调用 write/edit/multiedit")
+}
+
 func systemPromptContentFromEmbedded(planRuntimeEnabled bool) string {
 	var b strings.Builder
 	for _, key := range systemPromptKeys(planRuntimeEnabled) {

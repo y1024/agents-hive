@@ -117,3 +117,13 @@ func TestNormalizeEvalGateInput_DerivesMapsFromFlatEvalSummary(t *testing.T) {
 	assert.True(t, input.CandidateByCaseID["aq06"])
 	assert.Equal(t, "replay://session/aq06", input.ReplayRefByCaseID["aq06"])
 }
+
+func TestToolsMatchFilesystemMigrationCompat(t *testing.T) {
+	expected := []string{"filesystem", "grep"}
+	allowed := []string{"filesystem", "read_file", "grep", "memory"}
+
+	assert.True(t, toolsMatch([]string{"filesystem"}, expected, nil), "filesystem is the preferred Phase 1 tool")
+	assert.True(t, toolsMatch([]string{"grep"}, expected, nil), "legacy grep remains compatible during migration")
+	assert.True(t, toolsMatch([]string{"read_file", "memory"}, nil, allowed), "legacy file reads remain allowed during migration")
+	assert.False(t, toolsMatch([]string{"bash"}, nil, allowed), "unrelated tools must not be accepted as filesystem compat")
+}

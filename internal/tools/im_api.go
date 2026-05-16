@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -11,6 +12,7 @@ import (
 	"github.com/chef-guo/agents-hive/internal/imcore"
 	"github.com/chef-guo/agents-hive/internal/imctx"
 	"github.com/chef-guo/agents-hive/internal/mcphost"
+	"github.com/chef-guo/agents-hive/internal/observability"
 	"github.com/chef-guo/agents-hive/internal/toolctx"
 )
 
@@ -27,8 +29,14 @@ type imAPIInput struct {
 }
 
 type IMAPIToolOptions struct {
-	ForceDryRun bool
+	ForceDryRun   bool
+	MetricsWriter observability.MetricsWriter
 }
+
+const (
+	metricIMSendLegacyPathTotal  = "im_send_legacy_path_total"
+	metricIMSendUnifiedPathTotal = "im_send_unified_path_total"
+)
 
 func RegisterIMAPITool(host *mcphost.Host, logger *zap.Logger, service *imcore.Service) {
 	RegisterIMAPIToolWithOptions(host, logger, service, IMAPIToolOptions{})
@@ -88,6 +96,7 @@ func RegisterIMAPIToolWithOptions(host *mcphost.Host, logger *zap.Logger, servic
 				ContentLen: len(params.Content),
 				TargetHash: imAPITargetHash(params, ""),
 			})
+			recordIMSendPathMetric(ctx, options.MetricsWriter, metricIMSendUnifiedPathTotal, "im_api", params.Platform, params.Action, "error", logger)
 			return errorResult("im_api 未配置 IM service"), nil
 		}
 		platform := imcore.Platform(params.Platform)
@@ -173,37 +182,12 @@ func RegisterIMAPIToolWithOptions(host *mcphost.Host, logger *zap.Logger, servic
 			})
 			return jsonToolResult(item), nil
 		case "send_message":
-			dryRun := params.DryRun || options.ForceDryRun
-			result, err := service.SendMessage(ctx, imcore.SendTarget{
-				Platform:       platform,
-				RecipientID:    params.RecipientID,
-				ConversationID: params.ConversationID,
-				ExternalIDType: params.ExternalIDType,
-				Content:        params.Content,
-				DryRun:         dryRun,
-			})
+			result, audit, err := executeIMAPISendMessage(ctx, service, params, options)
+			writeAudit(audit)
+			recordIMSendPathMetric(ctx, options.MetricsWriter, metricIMSendUnifiedPathTotal, "im_api", params.Platform, params.Action, audit.Status, logger)
 			if err != nil {
-				writeAudit(imAPIAuditFields{
-					Action:     params.Action,
-					Platform:   params.Platform,
-					Status:     "error",
-					DryRun:     dryRun,
-					TargetKind: imAPITargetKind(params, ""),
-					ContentLen: len(params.Content),
-					TargetHash: imAPITargetHash(params, ""),
-				})
 				return errorResult(err.Error()), nil
 			}
-			writeAudit(imAPIAuditFields{
-				Action:      params.Action,
-				Platform:    params.Platform,
-				Status:      "success",
-				DryRun:      dryRun,
-				TargetKind:  imAPITargetKind(params, result.TargetKind),
-				ContentLen:  len(params.Content),
-				ResultCount: 1,
-				TargetHash:  imAPITargetHash(params, result.TargetID),
-			})
 			return jsonToolResult(result), nil
 		default:
 			writeAudit(imAPIAuditFields{
@@ -218,6 +202,75 @@ func RegisterIMAPIToolWithOptions(host *mcphost.Host, logger *zap.Logger, servic
 			return errorResult(fmt.Sprintf("不支持的 im_api action: %s", params.Action)), nil
 		}
 	})
+}
+
+func executeIMAPISendMessage(ctx context.Context, service *imcore.Service, params imAPIInput, options IMAPIToolOptions) (imcore.SendResult, imAPIAuditFields, error) {
+	dryRun := params.DryRun || options.ForceDryRun
+	audit := imAPIAuditFields{
+		Action:     "send_message",
+		Platform:   params.Platform,
+		Status:     "error",
+		DryRun:     dryRun,
+		TargetKind: imAPITargetKind(params, ""),
+		ContentLen: len(params.Content),
+		TargetHash: imAPITargetHash(params, ""),
+	}
+	if service == nil {
+		return imcore.SendResult{}, audit, fmt.Errorf("im_api 未配置 IM service")
+	}
+	result, err := service.SendMessage(ctx, imcore.SendTarget{
+		Platform:       imcore.Platform(params.Platform),
+		RecipientID:    params.RecipientID,
+		ConversationID: params.ConversationID,
+		ExternalIDType: params.ExternalIDType,
+		Content:        params.Content,
+		DryRun:         dryRun,
+	})
+	if err != nil {
+		return imcore.SendResult{}, audit, err
+	}
+	audit.Status = "success"
+	audit.TargetKind = imAPITargetKind(params, result.TargetKind)
+	audit.ResultCount = 1
+	audit.TargetHash = imAPITargetHash(params, result.TargetID)
+	return result, audit, nil
+}
+
+func recordIMSendPathMetric(ctx context.Context, writer observability.MetricsWriter, name, toolName, platform, operation, status string, logger *zap.Logger) {
+	if writer == nil || strings.TrimSpace(name) == "" {
+		return
+	}
+	if strings.TrimSpace(operation) == "" {
+		operation = "send_message"
+	}
+	if operation != "send_message" {
+		return
+	}
+	if strings.TrimSpace(platform) == "" {
+		platform = "unknown"
+	}
+	if strings.TrimSpace(status) == "" {
+		status = "unknown"
+	}
+
+	metric := observability.Metric{
+		Name:  name,
+		Value: 1,
+		Labels: map[string]any{
+			"tool_name": toolName,
+			"operation": operation,
+			"im":        platform,
+			"status":    status,
+		},
+		Ts: time.Now(),
+	}
+	go func() {
+		if err := writer.Record(context.Background(), metric); err != nil && logger != nil {
+			logger.Debug("IM send metric write failed",
+				zap.String("metric", name),
+				zap.Error(err))
+		}
+	}()
 }
 
 type imAPIAuditFields struct {

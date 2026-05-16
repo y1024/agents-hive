@@ -142,6 +142,8 @@ func (m *Master) actionGuardErrorResult(ctx context.Context, sessionID, toolCall
 		zap.String("tool", toolName),
 		zap.String("reason", errText),
 	)
+	m.recordToolCallCounter(toolName, args, "error")
+	m.recordToolErrorCounter(toolName, args, errText)
 	m.emitToolCallEvent(sessionID, ToolCallEvent{
 		ToolCallID: toolCallID,
 		ToolName:   toolName,

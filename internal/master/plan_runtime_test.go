@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/chef-guo/agents-hive/internal/config"
 	"github.com/chef-guo/agents-hive/internal/llm"
 	"github.com/chef-guo/agents-hive/internal/mcphost"
+	"github.com/chef-guo/agents-hive/internal/router"
 	"github.com/chef-guo/agents-hive/internal/sessiontodo"
 	"github.com/chef-guo/agents-hive/internal/store"
 	"github.com/chef-guo/agents-hive/internal/toolctx"
@@ -207,6 +210,97 @@ func TestExecuteToolGate_BlocksPlanModeWriteTools(t *testing.T) {
 	assert.False(t, called, "gate 必须在工具执行前拒绝")
 	assert.Contains(t, result.Content, "plan mode")
 	assertPlanModeAuditLog(t, m, "tool_blocked", "plan-gate", "", "write_file")
+}
+
+func TestExecuteToolGate_BlocksPlanModeFilesystemWriteActionViaRouteInput(t *testing.T) {
+	m := newPhase6MasterWithMCPHost(t)
+	m.config.ActionGuardEnabled = true
+	m.hitlBroker = NewHITLBroker(config.HITLConfig{Enabled: true}, m.eventBus, m.stopCh, m.logger)
+	m.obsCh = make(chan observabilityEntry, 16)
+
+	called := false
+	m.mcpHost.RegisterTool(
+		mcphost.ToolDefinition{Name: "filesystem", Description: "test"},
+		func(ctx context.Context, input json.RawMessage) (*mcphost.ToolResult, error) {
+			called = true
+			return &mcphost.ToolResult{Content: jsonTestText("edited")}, nil
+		},
+	)
+
+	session := newTestSession("plan-filesystem-route-input")
+	session.PlanMode = true
+	session.PlanStatus = sessiontodo.PlanStatusPlanning
+	session.SetAllowedTools([]string{"filesystem"})
+	session.SetAllowedToolInputs(map[string]map[string]string{
+		"filesystem": router.MixedAllowedToolInputsForIntent(router.IntentFrame{Kind: router.IntentPlan}, "filesystem"),
+	})
+
+	result := m.executeTool(context.Background(), session, "", llm.ToolCall{
+		ID:        "fs-edit-1",
+		Name:      "filesystem",
+		Arguments: json.RawMessage(`{"action":"edit","path":"README.md","old_string":"a","new_string":"b"}`),
+	}, "trace", "span")
+
+	assert.True(t, result.IsError)
+	assert.False(t, result.Terminal)
+	assert.True(t, result.Recoverable)
+	assert.Equal(t, "route_input_outside_allowed_values", result.ErrorKind)
+	assert.False(t, called, "route input gate 必须在工具执行和 ActionGuard/HITL 前拒绝")
+	assert.Contains(t, result.Content, "allowed action")
+	assertObsMetric(t, m, "hive_route_input_denied_total", map[string]any{"tool_name": "filesystem", "action": "edit", "reason": "route_input_denied", "source": "direct"})
+	assertObsMetric(t, m, "hive_filesystem_action_total", map[string]any{"tool_name": "filesystem", "action": "edit", "status": "denied", "reason": "route_input_denied"})
+}
+
+func TestExecuteToolGate_AllowsPlanModeFilesystemReadAction(t *testing.T) {
+	m := newPhase6MasterWithMCPHost(t)
+	m.obsCh = make(chan observabilityEntry, 16)
+
+	called := false
+	m.mcpHost.RegisterTool(
+		mcphost.ToolDefinition{Name: "filesystem", Description: "test"},
+		func(ctx context.Context, input json.RawMessage) (*mcphost.ToolResult, error) {
+			called = true
+			return &mcphost.ToolResult{Content: jsonTestText("read")}, nil
+		},
+	)
+
+	session := newTestSession("plan-filesystem-read")
+	session.PlanMode = true
+	session.PlanStatus = sessiontodo.PlanStatusPlanning
+	session.SetAllowedTools([]string{"filesystem"})
+	session.SetAllowedToolInputs(map[string]map[string]string{
+		"filesystem": router.MixedAllowedToolInputsForIntent(router.IntentFrame{Kind: router.IntentPlan}, "filesystem"),
+	})
+
+	result := m.executeTool(context.Background(), session, "", llm.ToolCall{
+		ID:        "fs-read-1",
+		Name:      "filesystem",
+		Arguments: json.RawMessage(`{"action":"read","path":"README.md"}`),
+	}, "trace", "span")
+
+	assert.False(t, result.IsError)
+	assert.True(t, called)
+	assertObsMetric(t, m, "hive_filesystem_action_total", map[string]any{"tool_name": "filesystem", "action": "read", "status": "success", "reason": "none"})
+	assertFilesystemAuditLogNoRawArgs(t, m)
+}
+
+func TestPlanRuntimeFilesystemAllowedInputsAreReadOnly(t *testing.T) {
+	allowed := router.MixedAllowedToolInputsForIntent(router.IntentFrame{Kind: router.IntentPlan}, "filesystem")
+	actions := allowed["action"]
+	for _, action := range []string{"list", "glob", "grep", "read"} {
+		if !containsPipeActionForMasterTest(actions, action) {
+			t.Fatalf("plan filesystem actions missing %q: %#v", action, allowed)
+		}
+	}
+	for _, action := range []string{"write", "edit", "multiedit", "multi_edit"} {
+		if containsPipeActionForMasterTest(actions, action) {
+			t.Fatalf("plan filesystem actions must not include %q: %q", action, actions)
+		}
+	}
+}
+
+func containsPipeActionForMasterTest(actions, want string) bool {
+	return strings.Contains("|"+actions+"|", "|"+want+"|")
 }
 
 func TestExecuteToolGate_BlocksPlanModeParallelDispatch(t *testing.T) {
@@ -602,6 +696,34 @@ func assertObsLog(t *testing.T, m *Master, message string) {
 			}
 		case <-deadline:
 			t.Fatalf("expected log %q", message)
+		}
+	}
+}
+
+func assertFilesystemAuditLogNoRawArgs(t *testing.T, m *Master) {
+	t.Helper()
+	deadline := time.After(200 * time.Millisecond)
+	for {
+		select {
+		case e := <-m.obsCh:
+			if e.log == nil || e.log.Message != "filesystem action audit" {
+				continue
+			}
+			attrs := e.log.Attributes
+			require.Equal(t, "filesystem", attrs["tool_name"])
+			require.Equal(t, "read", attrs["action"])
+			require.Empty(t, e.log.SessionID)
+			require.NotContains(t, attrs, "path")
+			require.NotContains(t, attrs, "content")
+			require.NotContains(t, attrs, "old_string")
+			require.NotContains(t, attrs, "new_string")
+			require.NotContains(t, attrs, "args")
+			require.NotContains(t, attrs, "session_id")
+			require.NotContains(t, attrs, "user_id")
+			require.Contains(t, attrs, "args_hash")
+			return
+		case <-deadline:
+			t.Fatal("expected filesystem action audit log")
 		}
 	}
 }

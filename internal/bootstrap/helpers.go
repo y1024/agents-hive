@@ -160,7 +160,7 @@ func MigrateConfigToDB(db store.Store, cfg *config.Config, logger *zap.Logger) {
 		if err != nil {
 			continue
 		}
-		_ = db.SaveChannelConfig(ctx, &store.ChannelConfigRecord{
+		_ = db.UpsertChannelConfigFull(ctx, &store.ChannelConfigRecord{
 			Platform:   m.platform,
 			Enabled:    m.enabled,
 			ConfigJSON: string(data),
@@ -180,7 +180,7 @@ func MigrateConfigToDB(db store.Store, cfg *config.Config, logger *zap.Logger) {
 		if transport == "" {
 			transport = "stdio"
 		}
-		_ = db.SaveMCPServer(ctx, &store.MCPServerRecord{
+		_ = db.UpsertMCPServerFull(ctx, &store.MCPServerRecord{
 			Name:      name,
 			Transport: transport,
 			Command:   srv.Command,

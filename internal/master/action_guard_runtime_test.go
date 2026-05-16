@@ -437,20 +437,48 @@ func TestExecuteTool_RouteDeniedExternalSendDoesNotRequestHITL(t *testing.T) {
 	assert.False(t, called, "RouteDecision 参数不匹配必须先交回模型修复，不能进入 HITL/ActionGuard 审批")
 	assert.Contains(t, result.Content, recoverableToolCallErrorMarker)
 	assert.Contains(t, result.Content, "send_message")
-	deadline := time.After(100 * time.Millisecond)
-	for {
-		select {
-		case msg := <-ch:
-			if msg.Type != EventTypeInputRequest {
-				continue
-			}
-			if inputReq, ok := msg.Payload.(*InputRequest); ok && inputReq.Type == InputPermission {
-				t.Fatalf("RouteDecision 可恢复参数错误时不应产生 HITL 审批请求: %+v", msg)
-			}
-		case <-deadline:
-			return
-		}
-	}
+	assertActionGuardNoPermissionRequest(t, ch)
+}
+
+func TestExecuteTool_RouteDeniedFilesystemWriteDoesNotRequestHITL(t *testing.T) {
+	m, cancel := setupHITLMaster(t, config.HITLConfig{Enabled: true})
+	defer cancel()
+	defer m.Stop()
+	m.config.ActionGuardEnabled = true
+	m.obsCh = make(chan observabilityEntry, 16)
+	m.mcpHost = mcphost.NewHost(zap.NewNop())
+	called := false
+	m.mcpHost.RegisterTool(
+		mcphost.ToolDefinition{Name: "filesystem", Description: "filesystem", Core: true},
+		func(context.Context, json.RawMessage) (*mcphost.ToolResult, error) {
+			called = true
+			return &mcphost.ToolResult{Content: jsonTestText("edited")}, nil
+		},
+	)
+	session := newTestSession("ag-route-deny-filesystem")
+	session.SetAllowedTools([]string{"filesystem"})
+	session.SetAllowedToolInputs(map[string]map[string]string{
+		"filesystem": {"action": "list|glob|grep|read"},
+	})
+	subID, ch := m.SubscribeWSBroadcast()
+	defer m.UnsubscribeWSBroadcast(subID)
+
+	result := m.executeTool(context.Background(), session, "user-1", llm.ToolCall{
+		ID:        "ag-route-deny-filesystem-1",
+		Name:      "filesystem",
+		Arguments: json.RawMessage(`{"action":"edit","path":"README.md","old_string":"a","new_string":"b"}`),
+	}, "trace-ag-route-deny-filesystem", "span-parent")
+
+	require.True(t, result.IsError)
+	require.False(t, result.Terminal)
+	require.True(t, result.Recoverable)
+	assert.False(t, called, "filesystem 写 action 被 RouteDecision 拒绝时不能进入工具执行或 HITL/ActionGuard 审批")
+	assert.Equal(t, "route_input_outside_allowed_values", result.ErrorKind)
+	assert.Contains(t, result.Content, recoverableToolCallErrorMarker)
+	assert.Contains(t, result.Content, "edit")
+	assertActionGuardNoPermissionRequest(t, ch)
+	assertObsMetric(t, m, "hive_tool_call_total", map[string]any{"tool_name": "filesystem", "action": "edit", "status": "error"})
+	assertObsMetric(t, m, "hive_tool_error_total", map[string]any{"tool_name": "filesystem", "action": "edit", "reason": "route_input_outside_allowed_values"})
 }
 
 func TestExecuteTool_StrictModeWithHITLDisabledFailsClosed(t *testing.T) {
@@ -545,6 +573,24 @@ func approvePermissionRequest(t *testing.T, m *Master, ch <-chan BroadcastMessag
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("未收到 ActionGuard 审批请求")
+	}
+}
+
+func assertActionGuardNoPermissionRequest(t *testing.T, ch <-chan BroadcastMessage) {
+	t.Helper()
+	deadline := time.After(100 * time.Millisecond)
+	for {
+		select {
+		case msg := <-ch:
+			if msg.Type != EventTypeInputRequest {
+				continue
+			}
+			if inputReq, ok := msg.Payload.(*InputRequest); ok && inputReq.Type == InputPermission {
+				t.Fatalf("RouteDecision 可恢复参数错误时不应产生 HITL 审批请求: %+v", msg)
+			}
+		case <-deadline:
+			return
+		}
 	}
 }
 

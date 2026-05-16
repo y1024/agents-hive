@@ -93,17 +93,19 @@ func cloneCapabilityEntries(in []router.CapabilityEntry) []router.CapabilityEntr
 
 // RouteEvalCase 是 route eval 的最小内存用例格式。
 type RouteEvalCase struct {
-	ID                string                       `json:"id"`
-	Tags              []string                     `json:"tags,omitempty"`
-	Intent            router.IntentFrame           `json:"intent"`
-	Candidates        []router.ToolProfile         `json:"candidates"`
-	WantMode          router.DecisionMode          `json:"want_mode,omitempty"`
-	WantReason        string                       `json:"want_reason,omitempty"`
-	WantAllowedTools  []string                     `json:"want_allowed_tools,omitempty"`
-	WantBlockedTools  []string                     `json:"want_blocked_tools,omitempty"`
-	WantBlockedReason map[string]string            `json:"want_blocked_reason,omitempty"`
-	WantVisibleOnly   []string                     `json:"want_visible_only,omitempty"`
-	WantAllowedInputs map[string]map[string]string `json:"want_allowed_inputs,omitempty"`
+	ID                 string                       `json:"id"`
+	Tags               []string                     `json:"tags,omitempty"`
+	Intent             router.IntentFrame           `json:"intent"`
+	Candidates         []router.ToolProfile         `json:"candidates"`
+	WantMode           router.DecisionMode          `json:"want_mode,omitempty"`
+	WantReason         string                       `json:"want_reason,omitempty"`
+	WantAllowedTools   []string                     `json:"want_allowed_tools,omitempty"`
+	WantPreferredTools []string                     `json:"want_preferred_tools,omitempty"`
+	WantCompatTools    []string                     `json:"want_compat_tools,omitempty"`
+	WantBlockedTools   []string                     `json:"want_blocked_tools,omitempty"`
+	WantBlockedReason  map[string]string            `json:"want_blocked_reason,omitempty"`
+	WantVisibleOnly    []string                     `json:"want_visible_only,omitempty"`
+	WantAllowedInputs  map[string]map[string]string `json:"want_allowed_inputs,omitempty"`
 }
 
 // RouteEvalResult 是单条 route eval 的结果。
@@ -254,7 +256,7 @@ func EvaluateRouteEvalGate(cases []RouteEvalCase, results []RouteEvalResult, thr
 		}
 		if hasRouteEvalTag(c, "false-match") {
 			metrics.FalseMatchCases++
-			if !sameStringSet(result.Decision.AllowedTools, c.WantAllowedTools) {
+			if !sameStringSet(result.Decision.AllowedTools, routeEvalWantAllowedTools(c)) {
 				metrics.FalsePositiveCallableCount++
 			}
 		}
@@ -317,8 +319,15 @@ func routeDecisionFailures(c RouteEvalCase, decision router.RouteDecision) []str
 	if c.WantReason != "" && decision.Reason != c.WantReason {
 		failures = append(failures, fmt.Sprintf("reason mismatch: got %q want %q", decision.Reason, c.WantReason))
 	}
-	if !sameStringSet(decision.AllowedTools, c.WantAllowedTools) {
-		failures = append(failures, fmt.Sprintf("allowed_tools mismatch: got %+v want %+v", decision.AllowedTools, c.WantAllowedTools))
+	wantAllowed := routeEvalWantAllowedTools(c)
+	if !sameStringSet(decision.AllowedTools, wantAllowed) {
+		failures = append(failures, fmt.Sprintf("allowed_tools mismatch: got %+v want %+v", decision.AllowedTools, wantAllowed))
+	}
+	if len(c.WantPreferredTools) > 0 && !containsAllStrings(decision.AllowedTools, c.WantPreferredTools) {
+		failures = append(failures, fmt.Sprintf("preferred_tools mismatch: got %+v want preferred %+v", decision.AllowedTools, c.WantPreferredTools))
+	}
+	if len(c.WantCompatTools) > 0 && !containsAllStrings(decision.AllowedTools, c.WantCompatTools) {
+		failures = append(failures, fmt.Sprintf("compat_tools mismatch: got %+v want compat %+v", decision.AllowedTools, c.WantCompatTools))
 	}
 	if !sameBlockedToolSet(decision.BlockedTools, c.WantBlockedTools) {
 		failures = append(failures, fmt.Sprintf("blocked_tools mismatch: got %+v want %+v", blockedToolNames(decision.BlockedTools), c.WantBlockedTools))
@@ -342,6 +351,14 @@ func routeDecisionFailures(c RouteEvalCase, decision router.RouteDecision) []str
 		}
 	}
 	return failures
+}
+
+func routeEvalWantAllowedTools(c RouteEvalCase) []string {
+	if len(c.WantAllowedTools) > 0 || (len(c.WantPreferredTools) == 0 && len(c.WantCompatTools) == 0) {
+		return c.WantAllowedTools
+	}
+	wantAllowed := append([]string(nil), c.WantPreferredTools...)
+	return append(wantAllowed, c.WantCompatTools...)
 }
 
 func sameBlockedToolSet(got []router.BlockedTool, want []string) bool {
@@ -375,6 +392,22 @@ func sameStringSet(got, want []string) bool {
 	for _, item := range want {
 		counts[item]--
 		if counts[item] < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func containsAllStrings(got, want []string) bool {
+	if len(want) == 0 {
+		return true
+	}
+	set := map[string]bool{}
+	for _, item := range got {
+		set[item] = true
+	}
+	for _, item := range want {
+		if !set[item] {
 			return false
 		}
 	}

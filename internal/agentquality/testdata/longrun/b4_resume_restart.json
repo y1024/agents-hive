@@ -10,7 +10,7 @@
   ],
   "seed": 404,
   "steps": [
-    { "turn": 1, "kind": "tool_success", "tool": "read_file", "action": "start task with pending todos" },
+    { "turn": 1, "kind": "tool_success", "tool": "filesystem.read", "action": "start task with pending todos" },
     { "turn": 35, "kind": "budget", "action": "write handoff summary before budget exit", "budget_exit_mode": "graceful_yield", "final_status": "paused" },
     { "turn": 36, "kind": "resume", "action": "reload session snapshot with todos and constraints" },
     { "turn": 60, "kind": "tool_success", "tool": "go test", "action": "continue and validate remaining todos", "final_status": "completed" }

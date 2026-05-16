@@ -151,6 +151,27 @@ func TestBuildFilter_SubagentDeny(t *testing.T) {
 	}
 }
 
+func TestBuildFilter_LeafConstrainsFilesystemToReadActions(t *testing.T) {
+	p := NewToolPolicy(testPolicyInput())
+
+	filter := p.BuildFilter("", nil, true, true)
+	if filter == nil {
+		t.Fatal("leaf subagent filter 不应为 nil")
+	}
+	inputs := filter.AllowedToolInputsSnapshot()
+	actions := inputs["filesystem"]["action"]
+	for _, action := range []string{"list", "glob", "grep", "read"} {
+		if !containsPipeAction(actions, action) {
+			t.Fatalf("leaf filesystem input constraints missing %q: %#v", action, inputs)
+		}
+	}
+	for _, action := range []string{"write", "edit", "multiedit"} {
+		if containsPipeAction(actions, action) {
+			t.Fatalf("leaf filesystem input constraints must not allow %q: %q", action, actions)
+		}
+	}
+}
+
 func TestBuildFilter_NilPolicy(t *testing.T) {
 	var p *ToolPolicy
 	filter := p.BuildFilter("coding", nil, false, false)
@@ -327,4 +348,13 @@ func TestBuildFilter_ThreeLayerCombo(t *testing.T) {
 	if filter.IsAllowed("remove_tool") {
 		t.Error("remove_tool 不应被允许（在 global deny 中）")
 	}
+}
+
+func containsPipeAction(actions, want string) bool {
+	for _, action := range strings.Split(actions, "|") {
+		if strings.TrimSpace(action) == want {
+			return true
+		}
+	}
+	return false
 }

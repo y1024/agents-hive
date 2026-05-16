@@ -75,6 +75,7 @@ type Config struct {
 	APIFormat                   string                     // API 格式: "chat" 或 "responses"，默认 "chat"
 	Router                      *airouter.Router           // AI 服务路由器（可选，设置后替代直接 llmClient）
 	ToolPolicy                  config.ToolPolicyConfig    // 工具过滤策略配置
+	Tools                       config.ToolsConfig         // 工具能力配置
 	ToolRecall                  config.ToolRecallConfig    // 每轮隐藏工具召回配置
 	FirstToken                  config.FirstTokenConfig    // 首 token 快路径配置
 	ActionGuardEnabled          bool                       // ActionGuard 防护开关

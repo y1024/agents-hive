@@ -284,181 +284,29 @@ func registerConfigMethods(gw *Gateway, deps Deps) {
 			deps.ConfigMu.Lock()
 			defer deps.ConfigMu.Unlock()
 
-			// 更新 HITL 配置（DB + 内存）
 			if req.HITL != nil {
-				if req.HITL.Enabled != nil {
-					enabled := *req.HITL.Enabled
-					if deps.Store != nil {
-						val := "false"
-						if enabled {
-							val = "true"
-						}
-						if err := deps.Store.SetConfig(ctx, "hitl.enabled", val); err != nil {
-							zap.L().Error("持久化 hitl.enabled 失败", zap.Error(err))
-						}
-					}
-					deps.Config.HITL.Enabled = enabled
-					if deps.Master != nil {
-						deps.Master.SetHITLEnabled(enabled)
-					}
-				}
-				if req.HITL.PermissionRules != nil {
-					// 先写 DB
-					if deps.Store != nil {
-						rulesJSON, _ := json.Marshal(*req.HITL.PermissionRules)
-						if err := deps.Store.SetConfig(ctx, "hitl.permission_rules", string(rulesJSON)); err != nil {
-							zap.L().Error("持久化 hitl.permission_rules 失败", zap.Error(err))
-						}
-					}
-					deps.Config.HITL.PermissionRules = *req.HITL.PermissionRules
-					// 热更新到运行时 PermissionManager
-					if deps.Master != nil {
-						deps.Master.UpdatePermissionRules(*req.HITL.PermissionRules)
-					}
+				if err := applyHITLPatch(ctx, deps, req.HITL); err != nil {
+					return nil, err
 				}
 			}
-
-			// 更新 Agent 配置（DB + 内存）
 			if req.Agent != nil {
-				if req.Agent.Timeout != nil {
-					if d, err := parseDurationStr(*req.Agent.Timeout); err == nil {
-						if deps.Store != nil {
-							if err := deps.Store.SetConfig(ctx, "agent.timeout", *req.Agent.Timeout); err != nil {
-								zap.L().Error("持久化 agent.timeout 失败", zap.Error(err))
-							}
-						}
-						deps.Config.Agent.Timeout = d
-					} else {
-						return nil, errs.Wrap(errs.CodeInvalidArgument, "无效的超时时间格式", err)
-					}
-				}
-				if req.Agent.ShellTimeout != nil {
-					if d, err := parseDurationStr(*req.Agent.ShellTimeout); err == nil {
-						if deps.Store != nil {
-							if err := deps.Store.SetConfig(ctx, "agent.shell_timeout", *req.Agent.ShellTimeout); err != nil {
-								zap.L().Error("持久化 agent.shell_timeout 失败", zap.Error(err))
-							}
-						}
-						deps.Config.Agent.ShellTimeout = d
-					} else {
-						return nil, errs.Wrap(errs.CodeInvalidArgument, "无效的 Shell 超时时间格式", err)
-					}
+				if err := applyAgentPatch(ctx, deps, req.Agent); err != nil {
+					return nil, err
 				}
 			}
-
-			// 更新 Channel 配置（同时写入数据库）
-			// channel.enabled 父开关已改为从各通道 Enabled 状态自动推导，无需单独管理
 			if req.Channel != nil {
-				if req.Channel.DingTalk != nil {
-					next := applyDingTalkChannelPatch(deps.Config.Channel.DingTalk, req.Channel.DingTalk)
-					deps.Config.Channel.DingTalk = next
-					saveChannelToDB(ctx, deps.Store, "dingtalk", next)
-				}
-				if req.Channel.Feishu != nil {
-					next := applyFeishuChannelPatch(deps.Config.Channel.Feishu, req.Channel.Feishu)
-					deps.Config.Channel.Feishu = next
-					saveChannelToDB(ctx, deps.Store, "feishu", next)
-				}
-				if req.Channel.WeCom != nil {
-					next := applyWeComChannelPatch(deps.Config.Channel.WeCom, req.Channel.WeCom)
-					deps.Config.Channel.WeCom = next
-					saveChannelToDB(ctx, deps.Store, "wecom", next)
-				}
-				if req.Channel.WeChatBot != nil {
-					next := applyWeChatBotChannelPatch(deps.Config.Channel.WeChatBot, req.Channel.WeChatBot)
-					deps.Config.Channel.WeChatBot = next
-					saveChannelToDB(ctx, deps.Store, "wechatbot", next)
+				if err := applyChannelPatch(ctx, deps, req.Channel); err != nil {
+					return nil, err
 				}
 			}
-
-			// 更新 MCP 配置（同时写入数据库）
 			if req.MCP != nil {
-				if req.MCP.Timeout != nil {
-					if d, err := parseDurationStr(*req.MCP.Timeout); err == nil {
-						if deps.Store != nil {
-							if err := deps.Store.SetConfig(ctx, "mcp.timeout", *req.MCP.Timeout); err != nil {
-								zap.L().Error("持久化 mcp.timeout 失败", zap.Error(err))
-							}
-						}
-						deps.Config.MCP.Timeout = d
-					} else {
-						return nil, errs.Wrap(errs.CodeInvalidArgument, "无效的 MCP 超时时间格式", err)
-					}
-				}
-				if req.MCP.Servers != nil {
-					if deps.Config.MCP.Servers == nil {
-						deps.Config.MCP.Servers = make(map[string]config.MCPServerConfig)
-					}
-					for name, srv := range req.MCP.Servers {
-						if srv == nil {
-							// nil 表示删除该服务端
-							delete(deps.Config.MCP.Servers, name)
-							if deps.Store != nil {
-								if err := deps.Store.DeleteMCPServer(ctx, name); err != nil {
-									zap.L().Error("删除 MCP 服务端记录失败", zap.String("name", name), zap.Error(err))
-								}
-							}
-							continue
-						}
-						existing := deps.Config.MCP.Servers[name]
-						next := mergeMCPServerUpdate(existing, srv)
-						deps.Config.MCP.Servers[name] = next
-						zap.L().Info("收到 MCP 服务端配置更新",
-							zap.String("name", name),
-							zap.String("transport", next.Transport),
-							zap.String("url", safeURLForLog(next.URL)),
-							zap.Strings("header_keys", sortedStringMapKeys(next.Headers)),
-							zap.Bool("has_x_api_key", next.Headers["X-API-Key"] != ""),
-							zap.Bool("has_authorization", next.Headers["Authorization"] != ""),
-						)
-						saveMCPServerToDB(ctx, deps.Store, name, next)
-					}
+				if err := applyMCPPatch(ctx, deps, req.MCP); err != nil {
+					return nil, err
 				}
 			}
-
-			// 更新 Security 配置（DB + 热更新运行时）
 			if req.Security != nil {
-				if req.Security.DefaultPolicy != nil {
-					p := *req.Security.DefaultPolicy
-					if p != "allow" && p != "ask" && p != "deny" {
-						return nil, errs.New(errs.CodeInvalidArgument, "default_policy 必须为 allow、ask 或 deny")
-					}
-					if deps.Store != nil {
-						if err := deps.Store.SetConfig(ctx, "security.default_policy", p); err != nil {
-							zap.L().Error("持久化 security.default_policy 失败", zap.Error(err))
-						}
-					}
-					deps.Config.Security.DefaultPolicy = p
-				}
-				if req.Security.ExecRules != nil {
-					if deps.Store != nil {
-						rulesJSON, _ := json.Marshal(*req.Security.ExecRules)
-						if err := deps.Store.SetConfig(ctx, "security.exec_rules", string(rulesJSON)); err != nil {
-							zap.L().Error("持久化 security.exec_rules 失败", zap.Error(err))
-						}
-					}
-					deps.Config.Security.ExecRules = *req.Security.ExecRules
-				}
-				if req.Security.PermissionMode != nil {
-					mode := *req.Security.PermissionMode
-					if mode == "" {
-						mode = "minimal"
-					}
-					if mode != "minimal" && mode != "strict" {
-						return nil, errs.New(errs.CodeInvalidArgument, "permission_mode 必须为 minimal 或 strict")
-					}
-					if deps.Store != nil {
-						if err := deps.Store.SetConfig(ctx, "security.permission_mode", mode); err != nil {
-							zap.L().Error("持久化 security.permission_mode 失败", zap.Error(err))
-						}
-					}
-					deps.Config.Security.PermissionMode = mode
-					if deps.Master != nil {
-						deps.Master.UpdatePermissionMode(mode)
-					}
-				}
-				if deps.Master != nil && (req.Security.ExecRules != nil || req.Security.DefaultPolicy != nil) {
-					deps.Master.UpdateSecurityConfig(deps.Config.Security.ExecRules, deps.Config.Security.DefaultPolicy)
+				if err := applySecurityPatch(ctx, deps, req.Security); err != nil {
+					return nil, err
 				}
 			}
 
@@ -555,6 +403,196 @@ func registerConfigMethods(gw *Gateway, deps Deps) {
 			})
 		},
 	})
+}
+
+func applyHITLPatch(ctx context.Context, deps Deps, patch *HITLUpdateRequest) error {
+	if patch == nil {
+		return nil
+	}
+	if patch.Enabled != nil {
+		enabled := *patch.Enabled
+		if deps.Store != nil {
+			val := "false"
+			if enabled {
+				val = "true"
+			}
+			if err := deps.Store.SetConfig(ctx, "hitl.enabled", val); err != nil {
+				zap.L().Error("持久化 hitl.enabled 失败", zap.Error(err))
+			}
+		}
+		deps.Config.HITL.Enabled = enabled
+		if deps.Master != nil {
+			deps.Master.SetHITLEnabled(enabled)
+		}
+	}
+	if patch.PermissionRules != nil {
+		if deps.Store != nil {
+			rulesJSON, _ := json.Marshal(*patch.PermissionRules)
+			if err := deps.Store.SetConfig(ctx, "hitl.permission_rules", string(rulesJSON)); err != nil {
+				zap.L().Error("持久化 hitl.permission_rules 失败", zap.Error(err))
+			}
+		}
+		deps.Config.HITL.PermissionRules = *patch.PermissionRules
+		if deps.Master != nil {
+			deps.Master.UpdatePermissionRules(*patch.PermissionRules)
+		}
+	}
+	return nil
+}
+
+func applyAgentPatch(ctx context.Context, deps Deps, patch *AgentUpdateRequest) error {
+	if patch == nil {
+		return nil
+	}
+	if patch.Timeout != nil {
+		d, err := parseDurationStr(*patch.Timeout)
+		if err != nil {
+			return errs.Wrap(errs.CodeInvalidArgument, "无效的超时时间格式", err)
+		}
+		if deps.Store != nil {
+			if err := deps.Store.SetConfig(ctx, "agent.timeout", *patch.Timeout); err != nil {
+				zap.L().Error("持久化 agent.timeout 失败", zap.Error(err))
+			}
+		}
+		deps.Config.Agent.Timeout = d
+	}
+	if patch.ShellTimeout != nil {
+		d, err := parseDurationStr(*patch.ShellTimeout)
+		if err != nil {
+			return errs.Wrap(errs.CodeInvalidArgument, "无效的 Shell 超时时间格式", err)
+		}
+		if deps.Store != nil {
+			if err := deps.Store.SetConfig(ctx, "agent.shell_timeout", *patch.ShellTimeout); err != nil {
+				zap.L().Error("持久化 agent.shell_timeout 失败", zap.Error(err))
+			}
+		}
+		deps.Config.Agent.ShellTimeout = d
+	}
+	return nil
+}
+
+func applyChannelPatch(ctx context.Context, deps Deps, patch *ChannelUpdateRequest) error {
+	if patch == nil {
+		return nil
+	}
+	if patch.DingTalk != nil {
+		next := applyDingTalkChannelPatch(deps.Config.Channel.DingTalk, patch.DingTalk)
+		deps.Config.Channel.DingTalk = next
+		saveChannelToDB(ctx, deps.Store, "dingtalk", next)
+	}
+	if patch.Feishu != nil {
+		next := applyFeishuChannelPatch(deps.Config.Channel.Feishu, patch.Feishu)
+		deps.Config.Channel.Feishu = next
+		saveChannelToDB(ctx, deps.Store, "feishu", next)
+	}
+	if patch.WeCom != nil {
+		next := applyWeComChannelPatch(deps.Config.Channel.WeCom, patch.WeCom)
+		deps.Config.Channel.WeCom = next
+		saveChannelToDB(ctx, deps.Store, "wecom", next)
+	}
+	if patch.WeChatBot != nil {
+		next := applyWeChatBotChannelPatch(deps.Config.Channel.WeChatBot, patch.WeChatBot)
+		deps.Config.Channel.WeChatBot = next
+		saveChannelToDB(ctx, deps.Store, "wechatbot", next)
+	}
+	return nil
+}
+
+func applyMCPPatch(ctx context.Context, deps Deps, patch *MCPUpdateRequest) error {
+	if patch == nil {
+		return nil
+	}
+	if patch.Timeout != nil {
+		d, err := parseDurationStr(*patch.Timeout)
+		if err != nil {
+			return errs.Wrap(errs.CodeInvalidArgument, "无效的 MCP 超时时间格式", err)
+		}
+		if deps.Store != nil {
+			if err := deps.Store.SetConfig(ctx, "mcp.timeout", *patch.Timeout); err != nil {
+				zap.L().Error("持久化 mcp.timeout 失败", zap.Error(err))
+			}
+		}
+		deps.Config.MCP.Timeout = d
+	}
+	if patch.Servers == nil {
+		return nil
+	}
+	if deps.Config.MCP.Servers == nil {
+		deps.Config.MCP.Servers = make(map[string]config.MCPServerConfig)
+	}
+	for name, srv := range patch.Servers {
+		if srv == nil {
+			delete(deps.Config.MCP.Servers, name)
+			if deps.Store != nil {
+				if err := deps.Store.DeleteMCPServer(ctx, name); err != nil {
+					zap.L().Error("删除 MCP 服务端记录失败", zap.String("name", name), zap.Error(err))
+				}
+			}
+			continue
+		}
+		existing := deps.Config.MCP.Servers[name]
+		next := mergeMCPServerUpdate(existing, srv)
+		deps.Config.MCP.Servers[name] = next
+		zap.L().Info("收到 MCP 服务端配置更新",
+			zap.String("name", name),
+			zap.String("transport", next.Transport),
+			zap.String("url", safeURLForLog(next.URL)),
+			zap.Strings("header_keys", sortedStringMapKeys(next.Headers)),
+			zap.Bool("has_x_api_key", next.Headers["X-API-Key"] != ""),
+			zap.Bool("has_authorization", next.Headers["Authorization"] != ""),
+		)
+		saveMCPServerToDB(ctx, deps.Store, name, next)
+	}
+	return nil
+}
+
+func applySecurityPatch(ctx context.Context, deps Deps, patch *SecurityUpdateRequest) error {
+	if patch == nil {
+		return nil
+	}
+	if patch.DefaultPolicy != nil {
+		p := *patch.DefaultPolicy
+		if p != "allow" && p != "ask" && p != "deny" {
+			return errs.New(errs.CodeInvalidArgument, "default_policy 必须为 allow、ask 或 deny")
+		}
+		if deps.Store != nil {
+			if err := deps.Store.SetConfig(ctx, "security.default_policy", p); err != nil {
+				zap.L().Error("持久化 security.default_policy 失败", zap.Error(err))
+			}
+		}
+		deps.Config.Security.DefaultPolicy = p
+	}
+	if patch.ExecRules != nil {
+		if deps.Store != nil {
+			rulesJSON, _ := json.Marshal(*patch.ExecRules)
+			if err := deps.Store.SetConfig(ctx, "security.exec_rules", string(rulesJSON)); err != nil {
+				zap.L().Error("持久化 security.exec_rules 失败", zap.Error(err))
+			}
+		}
+		deps.Config.Security.ExecRules = *patch.ExecRules
+	}
+	if patch.PermissionMode != nil {
+		mode := *patch.PermissionMode
+		if mode == "" {
+			mode = "minimal"
+		}
+		if mode != "minimal" && mode != "strict" {
+			return errs.New(errs.CodeInvalidArgument, "permission_mode 必须为 minimal 或 strict")
+		}
+		if deps.Store != nil {
+			if err := deps.Store.SetConfig(ctx, "security.permission_mode", mode); err != nil {
+				zap.L().Error("持久化 security.permission_mode 失败", zap.Error(err))
+			}
+		}
+		deps.Config.Security.PermissionMode = mode
+		if deps.Master != nil {
+			deps.Master.UpdatePermissionMode(mode)
+		}
+	}
+	if deps.Master != nil && (patch.ExecRules != nil || patch.DefaultPolicy != nil) {
+		deps.Master.UpdateSecurityConfig(deps.Config.Security.ExecRules, deps.Config.Security.DefaultPolicy)
+	}
+	return nil
 }
 
 // saveChannelToDB 将 IM 通道配置写入数据库

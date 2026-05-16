@@ -1350,6 +1350,55 @@ export interface WeChatBotConfig {
   log_level?: string;
 }
 
+export interface MCPServerUpdateRequest {
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  transport?: string;
+  url?: string;
+  headers?: Record<string, string>;
+  timeout?: string;
+}
+
+export interface DingTalkConfigPatch {
+  enabled?: boolean;
+  app_key?: string;
+  app_secret?: string;
+  token?: string;
+  aes_key?: string;
+  agent_id?: number;
+}
+
+export interface FeishuConfigPatch {
+  enabled?: boolean;
+  app_id?: string;
+  app_secret?: string;
+  verification_token?: string;
+  encrypt_key?: string;
+  ack_emoji?: string;
+  renderer?: FeishuRendererConfig;
+  ingress_mode?: FeishuIngressMode;
+  webhook_url?: string;
+  region?: string;
+  reliability?: FeishuReliabilityConfig;
+}
+
+export interface WeComConfigPatch {
+  enabled?: boolean;
+  corp_id?: string;
+  agent_id?: number;
+  secret?: string;
+  token?: string;
+  encoding_aes_key?: string;
+}
+
+export interface WeChatBotConfigPatch {
+  enabled?: boolean;
+  base_url?: string;
+  cred_root?: string;
+  log_level?: string;
+}
+
 export interface ConfigUpdateRequest {
   hitl?: {
     enabled?: boolean;
@@ -1361,14 +1410,14 @@ export interface ConfigUpdateRequest {
   };
   mcp?: {
     timeout?: string;
-    servers?: Record<string, MCPServerConfig | null>;
+    servers?: Record<string, MCPServerUpdateRequest | null>;
   };
   channel?: {
     enabled?: boolean;
-    dingtalk?: DingTalkConfig;
-    feishu?: FeishuConfig;
-    wecom?: WeComConfig;
-    wechatbot?: WeChatBotConfig;
+    dingtalk?: DingTalkConfigPatch;
+    feishu?: FeishuConfigPatch;
+    wecom?: WeComConfigPatch;
+    wechatbot?: WeChatBotConfigPatch;
   };
   security?: {
     default_policy?: 'allow' | 'ask' | 'deny';

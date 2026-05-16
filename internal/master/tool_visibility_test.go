@@ -99,6 +99,7 @@ func TestModelVisibleTools_ReturnsStableOrderWithRecalledTool(t *testing.T) {
 func TestModelVisibleTools_FastPathIgnoresCoreAndAppliesBudget(t *testing.T) {
 	session := &SessionState{ID: "s-fast-path-budget"}
 	catalog := []mcphost.ToolDefinition{
+		{Name: "filesystem", Core: true},
 		{Name: "write_file", Core: true},
 		{Name: "bash", Core: true},
 		{Name: "read_file", Core: true},
@@ -123,7 +124,7 @@ func TestModelVisibleTools_FastPathIgnoresCoreAndAppliesBudget(t *testing.T) {
 	)
 
 	got := toolNamesForTest(visible)
-	want := []string{"glob", "grep", "memory", "question", "read_file", "skill", "tool_search"}
+	want := []string{"filesystem", "glob", "grep", "memory", "question", "read_file", "skill", "tool_search"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("fast path visible tools = %v, want %v", got, want)
 	}
@@ -144,6 +145,7 @@ func TestModelVisibleTools_FastPathMaxVisibleToolsTrimsWithStablePriority(t *tes
 	session := &SessionState{ID: "s-fast-path-trim"}
 	catalog := []mcphost.ToolDefinition{
 		{Name: "websearch", Description: "网络搜索"},
+		{Name: "filesystem", Core: true},
 		{Name: "read_file", Core: true},
 		{Name: "grep", Core: true},
 		{Name: "glob", Core: true},
@@ -168,14 +170,75 @@ func TestModelVisibleTools_FastPathMaxVisibleToolsTrimsWithStablePriority(t *tes
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("trimmed visible tools = %v, want %v", got, want)
 	}
-	if obs.VisibleTrimmedCount != 3 {
-		t.Fatalf("VisibleTrimmedCount = %d, want 3", obs.VisibleTrimmedCount)
+	if obs.VisibleTrimmedCount != 4 {
+		t.Fatalf("VisibleTrimmedCount = %d, want 4", obs.VisibleTrimmedCount)
 	}
 	if obs.VisibleAfterCount > 5 {
 		t.Fatalf("VisibleAfterCount = %d, want <= 5", obs.VisibleAfterCount)
 	}
 	if !hasTool(visible, "tool_search") {
 		t.Fatalf("tool_search must survive trimming, visible=%v", got)
+	}
+}
+
+func TestModelVisibleTools_FastPathKeepsFilesystemBeforeLegacyReadTools(t *testing.T) {
+	session := &SessionState{ID: "s-fast-path-filesystem-priority"}
+	catalog := []mcphost.ToolDefinition{
+		{Name: "filesystem", Core: true},
+		{Name: "read_file", Core: true},
+		{Name: "grep", Core: true},
+		{Name: "glob", Core: true},
+		{Name: "ls", Core: true},
+		{Name: "tool_search", Core: true},
+		{Name: "question", Core: true},
+		{Name: "memory"},
+		{Name: "skill"},
+	}
+
+	visible, obs := modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntentWithOptions(
+		session,
+		catalog,
+		nil,
+		"读取项目文件",
+		config.DefaultToolRecallConfig(),
+		router.IntentFrame{Kind: router.IntentRead},
+		toolVisibilityOptions{FastPath: true, MaxModelVisibleTools: 4},
+	)
+
+	got := toolNamesForTest(visible)
+	want := []string{"memory", "question", "skill", "tool_search"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("default fast path priority changed unexpectedly: got %v want %v", got, want)
+	}
+
+	visible, obs = modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntentWithOptions(
+		session,
+		catalog,
+		nil,
+		"读取项目文件",
+		config.DefaultToolRecallConfig(),
+		router.IntentFrame{Kind: router.IntentRead},
+		toolVisibilityOptions{FastPath: true, MaxModelVisibleTools: 5},
+	)
+
+	got = toolNamesForTest(visible)
+	want = []string{"filesystem", "memory", "question", "skill", "tool_search"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("filesystem should be the first filesystem-family survivor under fast path: got %v want %v", got, want)
+	}
+	for _, legacy := range []string{"read_file", "grep", "glob", "ls"} {
+		if hasTool(visible, legacy) {
+			t.Fatalf("legacy read tool %q should be trimmed before filesystem when budget is tight: %v", legacy, got)
+		}
+	}
+	if obs.VisibleTrimmedCount != 4 {
+		t.Fatalf("VisibleTrimmedCount = %d, want 4", obs.VisibleTrimmedCount)
+	}
+	actions := session.AllowedToolInputsSnapshot()["filesystem"]["action"]
+	for _, action := range []string{"list", "glob", "grep", "read"} {
+		if !containsPipeActionForMasterTest(actions, action) {
+			t.Fatalf("filesystem fast-path constraints missing %q: %q", action, actions)
+		}
 	}
 }
 
@@ -1369,6 +1432,110 @@ func TestToolVisibility_LocalWriteIntentWidensMemoryOperationConstraints(t *test
 	}
 	if obs.Entries["memory"].AllowedInputs["operation"] != memoryOps {
 		t.Fatalf("admission entry and runtime constraints diverged: entry=%#v runtime=%#v", obs.Entries["memory"].AllowedInputs, memoryOps)
+	}
+}
+
+func TestToolVisibility_FilesystemDefaultVisibleGetsReadOnlyConstraints(t *testing.T) {
+	session := &SessionState{ID: "s-filesystem-read-defaults"}
+	catalog := []mcphost.ToolDefinition{
+		{Name: "filesystem", Core: true},
+		{Name: "tool_search", Core: true},
+	}
+
+	visible, obs := modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntent(
+		session,
+		catalog,
+		nil,
+		"读取仓库文件",
+		config.DefaultToolRecallConfig(),
+		router.IntentFrame{Kind: router.IntentRead},
+	)
+
+	if !hasTool(visible, "filesystem") {
+		t.Fatalf("filesystem should be default-visible for read intent: %v", toolNamesForTest(visible))
+	}
+	actions := session.AllowedToolInputsSnapshot()["filesystem"]["action"]
+	for _, action := range []string{"list", "glob", "grep", "read"} {
+		if !containsPipeActionForMasterTest(actions, action) {
+			t.Fatalf("filesystem read constraints missing %q: %q", action, actions)
+		}
+	}
+	for _, action := range []string{"write", "edit", "multiedit", "multi_edit"} {
+		if containsPipeActionForMasterTest(actions, action) {
+			t.Fatalf("filesystem read constraints must not include %q: %q", action, actions)
+		}
+	}
+	if obs.Entries["filesystem"].AllowedInputs["action"] != actions {
+		t.Fatalf("admission entry and runtime constraints diverged: entry=%#v runtime=%#v", obs.Entries["filesystem"].AllowedInputs, actions)
+	}
+}
+
+func TestToolVisibility_FilesystemFeatureFlagDisablesRuntimeExposure(t *testing.T) {
+	session := &SessionState{ID: "s-filesystem-disabled"}
+	catalog := []mcphost.ToolDefinition{
+		{Name: "filesystem", Core: true},
+		{Name: "read_file", Core: true},
+		{Name: "tool_search", Core: true},
+	}
+	disabled := false
+
+	visible, obs := modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntentWithOptions(
+		session,
+		catalog,
+		nil,
+		"读取仓库文件",
+		config.DefaultToolRecallConfig(),
+		router.IntentFrame{Kind: router.IntentRead},
+		toolVisibilityOptions{FilesystemEnabled: &disabled},
+	)
+
+	if hasTool(visible, "filesystem") {
+		t.Fatalf("filesystem must not be visible when feature flag is disabled: %v", toolNamesForTest(visible))
+	}
+	if session.IsAllowedTool("filesystem") {
+		t.Fatalf("filesystem must not be runtime-allowed when feature flag is disabled: %v", session.AllowedToolsSnapshot())
+	}
+	if _, ok := session.AllowedToolInputsSnapshot()["filesystem"]; ok {
+		t.Fatalf("filesystem inputs must not be installed when feature flag is disabled: %#v", session.AllowedToolInputsSnapshot())
+	}
+	if _, ok := obs.Entries["filesystem"]; ok {
+		t.Fatalf("filesystem admission entry must not be emitted when feature flag is disabled: %#v", obs.Entries["filesystem"])
+	}
+	if !hasTool(visible, "read_file") {
+		t.Fatalf("legacy read_file must remain available when filesystem is disabled: %v", toolNamesForTest(visible))
+	}
+}
+
+func TestToolVisibility_LocalWriteIntentWidensFilesystemActionConstraints(t *testing.T) {
+	session := &SessionState{ID: "s-filesystem-local-write"}
+	catalog := []mcphost.ToolDefinition{
+		{Name: "filesystem", Core: true},
+		{Name: "tool_search", Core: true},
+	}
+
+	visible, obs := modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntent(
+		session,
+		catalog,
+		nil,
+		"修改 README",
+		config.DefaultToolRecallConfig(),
+		router.IntentFrame{Kind: router.IntentWriteLocal, AllowsSideEffects: true},
+	)
+
+	if !hasTool(visible, "filesystem") {
+		t.Fatalf("filesystem should remain visible for local write intent: %v", toolNamesForTest(visible))
+	}
+	actions := session.AllowedToolInputsSnapshot()["filesystem"]["action"]
+	for _, action := range []string{"write", "edit", "multiedit"} {
+		if !containsPipeActionForMasterTest(actions, action) {
+			t.Fatalf("filesystem local-write constraints missing %q: %q", action, actions)
+		}
+	}
+	if containsPipeActionForMasterTest(actions, "multi_edit") {
+		t.Fatalf("filesystem local-write constraints must not include legacy multi_edit: %q", actions)
+	}
+	if obs.Entries["filesystem"].AllowedInputs["action"] != actions {
+		t.Fatalf("admission entry and runtime constraints diverged: entry=%#v runtime=%#v", obs.Entries["filesystem"].AllowedInputs, actions)
 	}
 }
 

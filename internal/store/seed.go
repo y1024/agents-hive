@@ -79,7 +79,7 @@ func SeedLLMFromConfig(ctx context.Context, db Store, cfg SeedLLMConfig, logger 
 		Enabled:      true,
 		ConfigJSON:   configJSON,
 	}
-	if err := db.SaveLLMProvider(ctx, provider); err != nil {
+	if err := db.CreateLLMProvider(ctx, provider); err != nil {
 		return err
 	}
 	logger.Info("已种子 LLM 提供商", zap.String("name", providerName))
@@ -102,7 +102,7 @@ func SeedLLMFromConfig(ctx context.Context, db Store, cfg SeedLLMConfig, logger 
 			Enabled:      true,
 			ConfigJSON:   "{}",
 		}
-		if err := db.SaveLLMModel(ctx, model); err != nil {
+		if err := db.CreateLLMModel(ctx, model); err != nil {
 			logger.Warn("种子 LLM 模型失败", zap.String("name", sm.Name), zap.Error(err))
 			continue
 		}
@@ -119,7 +119,7 @@ func SeedLLMFromConfig(ctx context.Context, db Store, cfg SeedLLMConfig, logger 
 			Enabled:      true,
 			ConfigJSON:   "{}",
 		}
-		if err := db.SaveLLMModel(ctx, model); err != nil {
+		if err := db.CreateLLMModel(ctx, model); err != nil {
 			logger.Warn("种子默认 LLM 模型失败", zap.String("model", cfg.DefaultModel), zap.Error(err))
 		} else {
 			seededCount++

@@ -1,5 +1,5 @@
 import { useReplayStore } from '../../store/replay';
-import type { JournalEvent, JournalEventType } from '../../types/journal';
+import { journalToolDisplayName, type JournalEvent, type JournalEventType } from '../../types/journal';
 import type { SessionTraceResponse, TraceTimelineItem } from '../../types/api';
 import { traceItemKey } from './traceItemKey';
 
@@ -18,7 +18,7 @@ const typeIcons: Record<JournalEventType, string> = {
 function eventLabel(e: JournalEvent): string {
   if (e.type === 'decision') return e.decision?.slice(0, 40) || '决策';
   if (e.type === 'file_change') return `${e.action} ${e.file_path?.split('/').pop() || ''}`;
-  return e.tool_name || 'tool_call';
+  return journalToolDisplayName(e) || 'tool_call';
 }
 
 interface ReplayTimelineProps {

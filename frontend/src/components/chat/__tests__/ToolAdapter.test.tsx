@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { waitFor, render, screen } from '@testing-library/react';
 import { ToolAdapter } from '../ToolAdapter';
 
 type ToolCallStatus = { status: 'running' | 'success' | 'error'; duration?: number };
@@ -39,6 +39,14 @@ vi.mock('../../../utils/toolName', () => ({
   getToolDisplayName: (name: string) => (name === 'bash_exec' ? 'Shell' : name),
 }));
 
+const resolveAssetMock = vi.hoisted(() => vi.fn());
+
+vi.mock('../../../api/node-client', () => ({
+  LocalNodeClient: vi.fn().mockImplementation(() => ({
+    resolveAsset: resolveAssetMock,
+  })),
+}));
+
 const baseProps = {
   id: 'tc-1',
   name: 'bash_exec',
@@ -49,6 +57,7 @@ const baseProps = {
 describe('ToolAdapter status mapping', () => {
   beforeEach(() => {
     storeState.toolCallStatuses = {};
+    resolveAssetMock.mockReset();
   });
 
   // 三状态 × live / replay 两 mode = 6 用例
@@ -152,5 +161,44 @@ describe('ToolAdapter status mapping', () => {
     expect(list).toBeTruthy();
     expect(list?.className).not.toContain('rounded-xl');
     expect(list?.className).not.toContain('border');
+  });
+
+  it('kb tool result resolves asset refs with runtime KB context', async () => {
+    storeState.toolCallStatuses = { 'tc-kb': { status: 'success' } };
+    resolveAssetMock.mockResolvedValue({
+      url: '/api/v1/assets/proxy?x=1',
+      expires_in: 300,
+      mime_type: 'image/png',
+      size: 3,
+    });
+    const result = JSON.stringify({
+      sections: [{ node_id: '0001', title: 'Policy', text: 'text' }],
+      asset_refs: [{
+        asset_uri: 'asset://kb/user/u1/ns/doc/hash.png',
+        mime_type: 'image/png',
+        content_hash: 'hash',
+      }],
+    });
+
+    render(
+      <ToolAdapter
+        id="tc-kb"
+        name="kb.section.text"
+        args='{"doc_id":"doc","node_ids":["0001"]}'
+        result={result}
+        hasError={false}
+        sessionId="sess-1"
+        kbDomainId="support"
+      />,
+    );
+
+    await waitFor(() => expect(resolveAssetMock).toHaveBeenCalledWith(
+      'asset://kb/user/u1/ns/doc/hash.png',
+      {
+        purpose: 'kb_section_text',
+        sessionId: 'sess-1',
+        domainId: 'support',
+      },
+    ));
   });
 });

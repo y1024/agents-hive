@@ -8,9 +8,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chef-guo/agents-hive/internal/agentquality"
 	"github.com/chef-guo/agents-hive/internal/config"
+	"github.com/chef-guo/agents-hive/internal/kb"
 	"github.com/chef-guo/agents-hive/internal/llm"
 	"github.com/chef-guo/agents-hive/internal/mcphost"
+	"github.com/chef-guo/agents-hive/internal/observability"
 	"github.com/chef-guo/agents-hive/internal/router"
 	"github.com/chef-guo/agents-hive/internal/sessiontodo"
 	"github.com/chef-guo/agents-hive/internal/store"
@@ -183,6 +186,116 @@ func TestExecuteTool_InjectsTraceContextBeforeExecution(t *testing.T) {
 	assert.Equal(t, captured.ParentSpanID, capturedToolContext.ParentSpanID)
 	assert.Equal(t, captured.TurnID, capturedToolContext.TurnIDOrTraceID())
 	assert.Equal(t, captured.ToolCallID, capturedToolContext.ToolCallID)
+}
+
+func TestKBRuntimeContextForToolUsesServerDerivedFacts(t *testing.T) {
+	session := newTestSession("kb-runtime")
+	session.UserID = "session-user"
+	session.SetRouteDecision(router.RouteDecision{
+		Intent: router.IntentFrame{DomainID: "support"},
+	})
+
+	runtime := kbRuntimeContextForTool(session, "auth-user")
+
+	assert.Equal(t, "support", runtime.DomainID)
+	assert.Equal(t, "user", string(runtime.OwnerScope))
+	assert.Equal(t, "session-user", runtime.OwnerID)
+	assert.Equal(t, "master", runtime.AgentID)
+	assert.Equal(t, "kb-runtime", runtime.SessionID)
+}
+
+func TestKBRuntimeContextForToolPrefersExplicitSessionKBDomain(t *testing.T) {
+	session := newTestSession("kb-runtime-explicit")
+	session.UserID = "session-user"
+	session.SetRouteDecision(router.RouteDecision{
+		Intent: router.IntentFrame{DomainID: "generic"},
+	})
+	session.SetKBDomainID("support")
+
+	runtime := kbRuntimeContextForTool(session, "auth-user")
+
+	assert.Equal(t, "support", runtime.DomainID)
+	assert.Equal(t, "kb-runtime-explicit", runtime.SessionID)
+}
+
+func TestExecuteToolInjectsKBRuntimeContext(t *testing.T) {
+	m := newPhase6MasterWithMCPHost(t)
+
+	var captured tools.KBRuntimeContext
+	m.mcpHost.RegisterTool(
+		mcphost.ToolDefinition{Name: "capture_kb_runtime", Description: "test"},
+		func(ctx context.Context, input json.RawMessage) (*mcphost.ToolResult, error) {
+			captured, _ = tools.KBRuntimeContextFromContext(ctx)
+			return &mcphost.ToolResult{Content: jsonTestText("ok")}, nil
+		},
+	)
+
+	session := newTestSession("kb-runtime-exec")
+	session.UserID = "session-user"
+	session.SetRouteDecision(router.RouteDecision{Intent: router.IntentFrame{DomainID: "support"}})
+	result := m.executeTool(context.Background(), session, "auth-user", llm.ToolCall{
+		ID:        "call-kb-runtime",
+		Name:      "capture_kb_runtime",
+		Arguments: json.RawMessage(`{}`),
+	}, "trace-kb", "parent-kb")
+
+	require.False(t, result.IsError, result.Content)
+	assert.Equal(t, "support", captured.DomainID)
+	assert.Equal(t, "session-user", captured.OwnerID)
+	assert.Equal(t, "master", captured.AgentID)
+}
+
+func TestKBCitationsForCurrentTurnReadsEvidenceLedger(t *testing.T) {
+	m := newPhase6MasterWithMCPHost(t)
+	reader := &fakeKBEvidenceReader{refs: []kb.EvidenceRef{{
+		Token:           "kbref-token",
+		NamespaceID:     "ns-1",
+		DocumentID:      "doc-1",
+		DocumentVersion: "v1",
+		NodeID:          "0000",
+		Verified:        true,
+	}}}
+	m.kbEvidenceReader = reader
+	session := newTestSession("citation-session")
+	session.UserID = "user-1"
+	session.SetRouteDecision(router.RouteDecision{Intent: router.IntentFrame{DomainID: "support"}})
+
+	citations := m.kbCitationsForCurrentTurn(context.Background(), session, "auth-user", "trace-1")
+
+	require.Contains(t, citations, "kbref-token")
+	assert.Equal(t, "support", reader.lastScope.DomainID)
+}
+
+func TestKBCitationsForCurrentTurnRecordsMissingSummaryEvent(t *testing.T) {
+	m := newPhase6MasterWithMCPHost(t)
+	m.obsCh = make(chan observabilityEntry, 8)
+	m.kbEvidenceReader = &fakeKBEvidenceReader{}
+	session := newTestSession("citation-missing-session")
+	session.UserID = "user-1"
+	session.SetRouteDecision(router.RouteDecision{Intent: router.IntentFrame{DomainID: "support"}})
+
+	citations := m.kbCitationsForCurrentTurn(context.Background(), session, "auth-user", "trace-1")
+
+	assert.Empty(t, citations)
+	var metric observability.Metric
+	for i := 0; i < 2; i++ {
+		entry := <-m.obsCh
+		if entry.metric != nil {
+			metric = *entry.metric
+		}
+	}
+	assert.Equal(t, string(agentquality.EventKBEvidence), metric.Name)
+	assert.Equal(t, string(agentquality.FailureKBEvidence), metric.Labels["failure_type"])
+}
+
+type fakeKBEvidenceReader struct {
+	refs      []kb.EvidenceRef
+	lastScope kb.EvidenceScope
+}
+
+func (f *fakeKBEvidenceReader) CurrentTurnEvidence(ctx context.Context, scope kb.EvidenceScope) ([]kb.EvidenceRef, error) {
+	f.lastScope = scope
+	return f.refs, nil
 }
 
 func TestExecuteToolGate_BlocksPlanModeWriteTools(t *testing.T) {

@@ -154,6 +154,13 @@ func (m *Master) emitQualityEvent(traceID, spanID, sessionID string, ev agentqua
 	m.enqueueQualityJournalDecision(sessionID, ev, redactedRaw)
 }
 
+func (m *Master) RecordKBQualityEvent(sessionID string, ev agentquality.Event) {
+	if m == nil {
+		return
+	}
+	m.emitQualityEvent(ev.TraceID, ev.SpanID, sessionID, ev)
+}
+
 func (m *Master) runQualityShadowEval(ev agentquality.Event) {
 	if m == nil {
 		return

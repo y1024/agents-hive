@@ -75,6 +75,10 @@ func incompleteIntermediateToolCallNeedsCorrection(calls []llm.ToolCall) bool {
 		case externalSendCallQuestion:
 			return true
 		case externalSendCallSend:
+			if fact.BusinessWrite {
+				hasContent, hasRecipient := businessWritePayloadFacts(call)
+				return !hasContent || !hasRecipient
+			}
 			return !sendCallHasContentAndRecipient(call)
 		}
 	}

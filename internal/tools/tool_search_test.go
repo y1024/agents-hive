@@ -14,6 +14,16 @@ import (
 	"github.com/chef-guo/agents-hive/internal/toolruntime"
 )
 
+type toolSearchParameterHintForTest struct {
+	Name        string   `json:"name"`
+	Type        string   `json:"type"`
+	Required    bool     `json:"required"`
+	Source      string   `json:"source"`
+	Format      string   `json:"format"`
+	Description string   `json:"description"`
+	Enum        []string `json:"enum"`
+}
+
 func TestRegisterBuiltinToolsRegistersToolSearch(t *testing.T) {
 	logger := zap.NewNop()
 	host := mcphost.NewHost(logger)
@@ -123,8 +133,8 @@ func TestToolSearchFindsRegisteredToolsWithoutMutatingRegistry(t *testing.T) {
 	if got.Invocation != "direct_tool" {
 		t.Fatalf("invocation = %q, want direct_tool", got.Invocation)
 	}
-	if got.RouteStatus != "callable_read_only" {
-		t.Fatalf("route_status = %q, want callable_read_only", got.RouteStatus)
+	if got.RouteStatus != "discovery_only" {
+		t.Fatalf("route_status = %q, want discovery_only", got.RouteStatus)
 	}
 	if got.Score <= 0 {
 		t.Fatalf("expected positive score, got %f", got.Score)
@@ -281,14 +291,14 @@ func TestToolSearchResultsAreDiscoveryOnly(t *testing.T) {
 	if len(out.Results) != 1 || out.Results[0].Name != "feishu_api" {
 		t.Fatalf("expected one feishu_api result, got %#v", out.Results)
 	}
-	if out.Results[0].RouteStatus != "callable_with_action_constraints" {
-		t.Fatalf("route_status = %q, want callable_with_action_constraints", out.Results[0].RouteStatus)
+	if out.Results[0].RouteStatus != "discovery_only" {
+		t.Fatalf("route_status = %q, want discovery_only", out.Results[0].RouteStatus)
 	}
-	if !out.Results[0].CallableNow {
-		t.Fatal("mixed read-capable tool should report callable_now for constrained read actions")
+	if out.Results[0].CallableNow {
+		t.Fatal("tool_search result must not claim the matched tool is callable now")
 	}
-	if !strings.Contains(out.Results[0].ExecutionNote, "只读动作") {
-		t.Fatalf("execution_note should explain action constraints, got %q", out.Results[0].ExecutionNote)
+	if !strings.Contains(out.Results[0].ExecutionNote, "不授权执行") || !strings.Contains(out.Results[0].ExecutionNote, "RouteDecision") {
+		t.Fatalf("execution_note should explain discovery is not authorization, got %q", out.Results[0].ExecutionNote)
 	}
 }
 
@@ -305,15 +315,32 @@ func TestToolSearchFeishuApprovalMetadataIsActionAware(t *testing.T) {
 
 	var out struct {
 		Results []struct {
-			Name                string   `json:"name"`
-			DangerLevel         string   `json:"danger_level"`
-			RequiresApproval    bool     `json:"requires_approval"`
-			MayRequireApproval  bool     `json:"may_require_approval"`
-			DangerousActions    []string `json:"dangerous_actions"`
-			ActionField         string   `json:"action_field"`
-			ReadOnlyActions     []string `json:"read_only_actions"`
-			LocalWriteActions   []string `json:"local_write_actions"`
-			ExternalSendActions []string `json:"external_send_actions"`
+			Name                 string   `json:"name"`
+			DangerLevel          string   `json:"danger_level"`
+			RequiresApproval     bool     `json:"requires_approval"`
+			MayRequireApproval   bool     `json:"may_require_approval"`
+			DangerousActions     []string `json:"dangerous_actions"`
+			ActionField          string   `json:"action_field"`
+			ReadOnlyActions      []string `json:"read_only_actions"`
+			LocalWriteActions    []string `json:"local_write_actions"`
+			ExternalSendActions  []string `json:"external_send_actions"`
+			ExternalWriteActions []string `json:"external_write_actions"`
+			ActionCapabilities   []struct {
+				ToolName           string                           `json:"tool_name"`
+				Action             string                           `json:"action"`
+				ActionField        string                           `json:"action_field"`
+				CapabilityID       string                           `json:"capability_id"`
+				RequiredFields     []string                         `json:"required_fields"`
+				ParameterHints     []toolSearchParameterHintForTest `json:"parameter_hints"`
+				PreparatoryActions []string                         `json:"preparatory_actions"`
+				ExampleArgs        map[string]any                   `json:"example_args"`
+				ExampleToolCall    struct {
+					Name      string         `json:"name"`
+					Arguments map[string]any `json:"arguments"`
+				} `json:"example_tool_call"`
+				InvocationHint string `json:"invocation_hint"`
+				RepairHint     string `json:"repair_hint"`
+			} `json:"action_capabilities"`
 		} `json:"results"`
 	}
 	if err := json.Unmarshal([]byte(result.DecodeContent()), &out); err != nil {
@@ -338,6 +365,73 @@ func TestToolSearchFeishuApprovalMetadataIsActionAware(t *testing.T) {
 	if !containsStringForToolTest(got.DangerousActions, "create_task") || !containsStringForToolTest(got.ReadOnlyActions, "get_doc_content") || !containsStringForToolTest(got.ExternalSendActions, "send_message") {
 		t.Fatalf("missing action-aware metadata: %+v", got)
 	}
+	if !containsStringForToolTest(got.ExternalWriteActions, "create_task") || !containsStringForToolTest(got.ExternalWriteActions, "write_sheet") {
+		t.Fatalf("missing external write metadata: %+v", got)
+	}
+	var createTask *struct {
+		ToolName           string                           `json:"tool_name"`
+		Action             string                           `json:"action"`
+		ActionField        string                           `json:"action_field"`
+		CapabilityID       string                           `json:"capability_id"`
+		RequiredFields     []string                         `json:"required_fields"`
+		ParameterHints     []toolSearchParameterHintForTest `json:"parameter_hints"`
+		PreparatoryActions []string                         `json:"preparatory_actions"`
+		ExampleArgs        map[string]any                   `json:"example_args"`
+		ExampleToolCall    struct {
+			Name      string         `json:"name"`
+			Arguments map[string]any `json:"arguments"`
+		} `json:"example_tool_call"`
+		InvocationHint string `json:"invocation_hint"`
+		RepairHint     string `json:"repair_hint"`
+	}
+	for i := range got.ActionCapabilities {
+		if got.ActionCapabilities[i].Action == "create_task" {
+			createTask = &got.ActionCapabilities[i]
+			break
+		}
+	}
+	if createTask == nil {
+		t.Fatalf("tool_search should expose create_task action capability hints: %+v", got.ActionCapabilities)
+	}
+	if createTask.ToolName != "feishu_api" || createTask.ActionField != "action" {
+		t.Fatalf("create_task should declare concrete tool/action field, got %+v", createTask)
+	}
+	if createTask.CapabilityID != router.ActionCapabilityExternalTaskCreate {
+		t.Fatalf("create_task capability = %q", createTask.CapabilityID)
+	}
+	if !containsStringForToolTest(createTask.RequiredFields, "summary") {
+		t.Fatalf("create_task required fields = %+v", createTask.RequiredFields)
+	}
+	if !hasParameterHintForToolTest(createTask.ParameterHints, "summary", true, "user_text") {
+		t.Fatalf("create_task should expose required summary parameter hint from user_text: %+v", createTask.ParameterHints)
+	}
+	if !hasParameterHintForToolTest(createTask.ParameterHints, "due_time", false, "user_text") {
+		t.Fatalf("create_task should expose optional due_time parameter hint from user_text: %+v", createTask.ParameterHints)
+	}
+	if createTask.ExampleArgs["action"] != "create_task" || createTask.ExampleArgs["summary"] == "" {
+		t.Fatalf("create_task example args missing executable hint: %+v", createTask.ExampleArgs)
+	}
+	if createTask.ExampleToolCall.Name != "feishu_api" {
+		t.Fatalf("create_task example tool call should use feishu_api, got %+v", createTask.ExampleToolCall)
+	}
+	if createTask.ExampleToolCall.Arguments["action"] != "create_task" || createTask.ExampleToolCall.Arguments["summary"] == "" {
+		t.Fatalf("create_task example tool call should set arguments.action, got %+v", createTask.ExampleToolCall)
+	}
+	if !strings.Contains(createTask.InvocationHint, "调用工具 feishu_api") || !strings.Contains(createTask.InvocationHint, "arguments.action") || !strings.Contains(createTask.InvocationHint, "不是独立工具名") {
+		t.Fatalf("create_task invocation hint should prevent feishu_api.create_task confusion, got %q", createTask.InvocationHint)
+	}
+	if createTask.RepairHint == "" {
+		t.Fatal("create_task repair hint should be present")
+	}
+}
+
+func hasParameterHintForToolTest(hints []toolSearchParameterHintForTest, name string, required bool, source string) bool {
+	for _, hint := range hints {
+		if hint.Name == name && hint.Required == required && hint.Source == source {
+			return true
+		}
+	}
+	return false
 }
 
 func TestToolSearchMixedOperationApprovalMetadataIsActionAware(t *testing.T) {
@@ -425,13 +519,13 @@ func TestToolSearchUsesUnifiedPolicyForCustomAndBuiltinTools(t *testing.T) {
 		}{hit.RouteStatus, hit.CallableNow, hit.RequiresApproval, hit.MayRequireApproval}
 	}
 
-	if got := byName["read_file"]; got.RouteStatus != "callable_read_only" || !got.CallableNow || got.RequiresApproval || got.MayRequireApproval {
+	if got := byName["read_file"]; got.RouteStatus != "discovery_only" || got.CallableNow || got.RequiresApproval || got.MayRequireApproval {
 		t.Fatalf("read_file metadata = %+v", got)
 	}
-	if got := byName["project_status"]; got.RouteStatus != "callable_read_only" || !got.CallableNow || got.RequiresApproval || got.MayRequireApproval {
+	if got := byName["project_status"]; got.RouteStatus != "discovery_only" || got.CallableNow || got.RequiresApproval || got.MayRequireApproval {
 		t.Fatalf("project_status metadata = %+v", got)
 	}
-	if got := byName["opaque_candidate"]; (got.RouteStatus != "blocked_unknown" && got.RouteStatus != "blocked_dangerous") || got.CallableNow || got.RequiresApproval || !got.MayRequireApproval {
+	if got := byName["opaque_candidate"]; got.RouteStatus != "discovery_only" || got.CallableNow || got.RequiresApproval || !got.MayRequireApproval {
 		t.Fatalf("opaque_candidate metadata = %+v", got)
 	}
 }
@@ -547,9 +641,9 @@ func TestToolSearchTypedMetadataPhase0Kinds(t *testing.T) {
 	}
 
 	assertToolSearchMeta(t, byName, "tool_search", "builtin_tool", "discovery", "builtin", "read_only", "system", "discovery_only", "discovery_only")
-	assertToolSearchMeta(t, byName, "mcp-builder", "skill_workflow", "mcp_server_building", "local_skill", "local_write", "system", "skill_tool", "requires_matching_intent")
-	assertToolSearchMeta(t, byName, "github__create_issue", "mcp_tool", "github", "mcp_server", "destructive", "workspace", "direct_tool", "blocked_dangerous")
-	assertToolSearchMeta(t, byName, "project_status", "custom_tool", "custom", "custom_dir", "unknown", "system", "direct_tool", "blocked_unknown")
+	assertToolSearchMeta(t, byName, "mcp-builder", "skill_workflow", "mcp_server_building", "local_skill", "local_write", "system", "skill_tool", "discovery_only")
+	assertToolSearchMeta(t, byName, "github__create_issue", "mcp_tool", "github", "mcp_server", "destructive", "workspace", "direct_tool", "discovery_only")
+	assertToolSearchMeta(t, byName, "project_status", "custom_tool", "custom", "custom_dir", "unknown", "system", "direct_tool", "discovery_only")
 	assertToolSearchMeta(t, byName, "opaque_candidate", "unknown", "unknown", "unknown", "unknown", "system", "discovery_only", "discovery_only")
 }
 

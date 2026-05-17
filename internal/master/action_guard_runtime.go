@@ -25,7 +25,9 @@ func actionGuardFingerprint(toolName string, args json.RawMessage) string {
 func (m *Master) guardToolExecution(ctx context.Context, session *SessionState, sessionID, userID, toolCallID, toolName string, args json.RawMessage, sessionTraceID, sessionSpanID string, approved map[string]bool) (toolResult, bool) {
 	if m.config.SecurityPermissionMode == "strict" {
 		if m.hitlBroker == nil || !m.hitlBroker.Enabled() {
-			content := recoverableToolCallErrorContent("strict_hitl_disabled", "strict 权限模式需要 HITL，但当前审批通道未启用。请先启用 HITL 后重试。")
+			content := recoverableToolCallErrorContentWithHint(recoverableToolCallErrorHint(session, toolName, "strict_hitl_disabled",
+				"strict 权限模式需要 HITL，但当前审批通道未启用。请先启用 HITL 后重试。",
+				"enable_approval_or_retry"))
 			m.recordStrictPermissionBlocked(session, sessionID, userID, toolCallID, toolName, args, sessionTraceID, sessionSpanID, "strict_hitl_disabled")
 			return m.recoverableToolCallErrorResult(ctx, sessionID, toolCallID, toolName, args, sessionTraceID, content, "strict_hitl_disabled"), false
 		}
@@ -80,7 +82,9 @@ func (m *Master) guardToolExecution(ctx context.Context, session *SessionState, 
 	case ActionGuardAsk:
 		m.recordActionGuardDecision(session, sessionID, userID, toolCallID, toolName, args, sessionTraceID, sessionSpanID, decision, agentquality.StatusNeedsUser, latency, "")
 		if m.hitlBroker == nil || !m.hitlBroker.Enabled() {
-			content := recoverableToolCallErrorContent("action_guard_hitl_disabled", fmt.Sprintf("当前工具调用需要人工确认（reason=%s），但审批通道未启用。请先启用 HITL，或在恢复后重新发起审批。", decision.Reason))
+			content := recoverableToolCallErrorContentWithHint(recoverableToolCallErrorHint(session, toolName, "action_guard_hitl_disabled",
+				fmt.Sprintf("当前工具调用需要人工确认（reason=%s），但审批通道未启用。请先启用 HITL，或在恢复后重新发起审批。", decision.Reason),
+				"enable_approval_or_retry"))
 			m.emitActionGuardOutcomeEvent(session, sessionID, userID, toolCallID, toolName, args, sessionTraceID, sessionSpanID, decision, agentquality.StatusBlocked, latency, "action_guard_hitl_disabled")
 			return m.recoverableToolCallErrorResult(ctx, sessionID, toolCallID, toolName, args, sessionTraceID, content, "action_guard_hitl_disabled"), false
 		}
@@ -90,15 +94,18 @@ func (m *Master) guardToolExecution(ctx context.Context, session *SessionState, 
 			Input:       args,
 		}, sessionID)
 		if err != nil {
-			content := recoverableToolCallErrorContent("action_guard_approval_request_failed",
-				fmt.Sprintf("当前工具调用需要人工确认，但权限确认请求失败，工具未执行。error=%v。请恢复审批通道后重新发起审批。", err))
+			content := recoverableToolCallErrorContentWithHint(recoverableToolCallErrorHint(session, toolName, "action_guard_approval_request_failed",
+				fmt.Sprintf("当前工具调用需要人工确认，但权限确认请求失败，工具未执行。error=%v。请恢复审批通道后重新发起审批。", err),
+				"retry_approval_request"))
 			m.emitActionGuardOutcomeEvent(session, sessionID, userID, toolCallID, toolName, args, sessionTraceID, sessionSpanID, decision, agentquality.StatusBlocked, latency, err.Error())
 			return m.recoverableToolCallErrorResult(ctx, sessionID, toolCallID, toolName, args, sessionTraceID, content, err.Error()), false
 		}
 		if !resp.Granted {
-			content := fmt.Sprintf("[用户未批准，工具未执行: %s]", toolName)
+			content := recoverableToolCallErrorContentWithHint(recoverableToolCallErrorHint(session, toolName, "user_denied_tool_approval",
+				fmt.Sprintf("用户没有批准工具 %q，本次调用未执行。请不要重复同一调用；应向用户说明未执行，或根据用户新指令选择替代工具/参数。", toolName),
+				"ask_user_or_choose_alternative"))
 			m.emitActionGuardOutcomeEvent(session, sessionID, userID, toolCallID, toolName, args, sessionTraceID, sessionSpanID, decision, agentquality.StatusBlocked, latency, "user_denied")
-			return m.actionGuardErrorResult(ctx, sessionID, toolCallID, toolName, args, sessionTraceID, content, "user_denied"), false
+			return m.recoverableToolCallErrorResult(ctx, sessionID, toolCallID, toolName, args, sessionTraceID, content, "user_denied"), false
 		}
 		if approved != nil {
 			approved[fingerprint] = true
@@ -106,11 +113,15 @@ func (m *Master) guardToolExecution(ctx context.Context, session *SessionState, 
 		m.emitActionGuardOutcomeEvent(session, sessionID, userID, toolCallID, toolName, args, sessionTraceID, sessionSpanID, decision, agentquality.StatusPass, latency, "")
 		return toolResult{}, true
 	case ActionGuardDeny:
-		content := fmt.Sprintf("[工具调用无法执行: %s]", decision.Reason)
+		content := recoverableToolCallErrorContentWithHint(recoverableToolCallErrorHint(session, toolName, decision.Reason,
+			fmt.Sprintf("ActionGuard 未放行当前工具调用（reason=%s），本次调用未执行。请按本轮路由、allowed_inputs 或用户确认路径重构调用。", decision.Reason),
+			"rebuild_or_request_approval"))
 		m.recordActionGuardDecision(session, sessionID, userID, toolCallID, toolName, args, sessionTraceID, sessionSpanID, decision, agentquality.StatusBlocked, latency, "")
-		return m.actionGuardErrorResult(ctx, sessionID, toolCallID, toolName, args, sessionTraceID, content, decision.Reason), false
+		return m.recoverableToolCallErrorResult(ctx, sessionID, toolCallID, toolName, args, sessionTraceID, content, decision.Reason), false
 	case ActionGuardRepair:
-		content := recoverableToolCallErrorContent(decision.Reason, "当前工具调用与本轮工具/参数约束不一致，未执行。请基于可见工具、allowed_inputs 和用户目标重新构造工具调用，不要重复相同参数。")
+		content := recoverableToolCallErrorContentWithHint(recoverableToolCallErrorHint(session, toolName, decision.Reason,
+			"当前工具调用与本轮工具/参数约束不一致，未执行。请基于可见工具、allowed_inputs 和用户目标重新构造工具调用，不要重复相同参数。",
+			"rebuild_tool_call"))
 		m.recordActionGuardDecision(session, sessionID, userID, toolCallID, toolName, args, sessionTraceID, sessionSpanID, decision, agentquality.StatusFail, latency, "")
 		return m.recoverableToolCallErrorResult(ctx, sessionID, toolCallID, toolName, args, sessionTraceID, content, decision.Reason), false
 	default:

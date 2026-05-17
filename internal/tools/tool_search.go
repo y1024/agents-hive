@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"sort"
 	"strings"
@@ -23,28 +24,52 @@ type toolSearchInput struct {
 }
 
 type toolSearchHit struct {
-	Name                string   `json:"name"`
-	Description         string   `json:"description,omitempty"`
-	DangerLevel         string   `json:"danger_level"`
-	RequiresApproval    bool     `json:"requires_approval"`
-	MayRequireApproval  bool     `json:"may_require_approval"`
-	DangerousActions    []string `json:"dangerous_actions,omitempty"`
-	ActionField         string   `json:"action_field,omitempty"`
-	ReadOnlyActions     []string `json:"read_only_actions,omitempty"`
-	LocalWriteActions   []string `json:"local_write_actions,omitempty"`
-	ExternalSendActions []string `json:"external_send_actions,omitempty"`
-	IsConcurrencySafe   bool     `json:"is_concurrency_safe"`
-	Core                bool     `json:"core,omitempty"`
-	Kind                string   `json:"kind"`
-	Domain              string   `json:"domain,omitempty"`
-	Source              string   `json:"source"`
-	Risk                string   `json:"risk"`
-	Visibility          string   `json:"visibility"`
-	Invocation          string   `json:"invocation"`
-	RouteStatus         string   `json:"route_status"`
-	CallableNow         bool     `json:"callable_now"`
-	ExecutionNote       string   `json:"execution_note,omitempty"`
-	Score               float64  `json:"score"`
+	Name                 string                       `json:"name"`
+	Description          string                       `json:"description,omitempty"`
+	DangerLevel          string                       `json:"danger_level"`
+	RequiresApproval     bool                         `json:"requires_approval"`
+	MayRequireApproval   bool                         `json:"may_require_approval"`
+	DangerousActions     []string                     `json:"dangerous_actions,omitempty"`
+	ActionField          string                       `json:"action_field,omitempty"`
+	ReadOnlyActions      []string                     `json:"read_only_actions,omitempty"`
+	LocalWriteActions    []string                     `json:"local_write_actions,omitempty"`
+	ExternalSendActions  []string                     `json:"external_send_actions,omitempty"`
+	ExternalWriteActions []string                     `json:"external_write_actions,omitempty"`
+	ActionCapabilities   []toolSearchActionCapability `json:"action_capabilities,omitempty"`
+	IsConcurrencySafe    bool                         `json:"is_concurrency_safe"`
+	Core                 bool                         `json:"core,omitempty"`
+	Kind                 string                       `json:"kind"`
+	Domain               string                       `json:"domain,omitempty"`
+	Source               string                       `json:"source"`
+	Risk                 string                       `json:"risk"`
+	Visibility           string                       `json:"visibility"`
+	Invocation           string                       `json:"invocation"`
+	RouteStatus          string                       `json:"route_status"`
+	CallableNow          bool                         `json:"callable_now"`
+	ExecutionNote        string                       `json:"execution_note,omitempty"`
+	Score                float64                      `json:"score"`
+}
+
+type toolSearchActionCapability struct {
+	ToolName           string                                 `json:"tool_name"`
+	Action             string                                 `json:"action"`
+	ActionField        string                                 `json:"action_field,omitempty"`
+	CapabilityID       string                                 `json:"capability_id"`
+	Resource           string                                 `json:"resource,omitempty"`
+	Operation          string                                 `json:"operation,omitempty"`
+	RiskClass          string                                 `json:"risk_class,omitempty"`
+	RequiredFields     []string                               `json:"required_fields,omitempty"`
+	ParameterHints     []router.ActionCapabilityParameterHint `json:"parameter_hints,omitempty"`
+	PreparatoryActions []string                               `json:"preparatory_actions,omitempty"`
+	ExampleArgs        map[string]any                         `json:"example_args,omitempty"`
+	ExampleToolCall    *toolSearchExampleToolCall             `json:"example_tool_call,omitempty"`
+	InvocationHint     string                                 `json:"invocation_hint,omitempty"`
+	RepairHint         string                                 `json:"repair_hint,omitempty"`
+}
+
+type toolSearchExampleToolCall struct {
+	Name      string         `json:"name"`
+	Arguments map[string]any `json:"arguments,omitempty"`
 }
 
 // ToolRecallHit 是工具目录召回结果，供 tool_search 和 Master 每轮候选召回复用。
@@ -101,28 +126,30 @@ func handleToolSearch(host *mcphost.Host, raw json.RawMessage) (*mcphost.ToolRes
 		policy := admission.Policy
 		kind, domain, source, risk, visibility, invocation, routeStatus, callableNow, executionNote := inferToolSearchMetadata(profile, policy, qLower)
 		hits = append(hits, toolSearchHit{
-			Name:                def.Name,
-			Description:         def.Description,
-			DangerLevel:         inferToolDangerLevel(profile),
-			RequiresApproval:    policy.RequiresApproval,
-			MayRequireApproval:  policy.MayRequireApproval,
-			DangerousActions:    router.StructuredDangerousActions(profile.Name),
-			ActionField:         router.MixedActionField(profile.Name),
-			ReadOnlyActions:     router.MixedReadOnlyActions(profile.Name),
-			LocalWriteActions:   router.MixedLocalWriteActions(profile.Name),
-			ExternalSendActions: router.ExternalSendActions(profile.Name),
-			IsConcurrencySafe:   def.IsConcurrencySafe,
-			Core:                def.Core,
-			Kind:                kind,
-			Domain:              domain,
-			Source:              source,
-			Risk:                risk,
-			Visibility:          visibility,
-			Invocation:          invocation,
-			RouteStatus:         routeStatus,
-			CallableNow:         callableNow,
-			ExecutionNote:       executionNote,
-			Score:               recall.Score,
+			Name:                 def.Name,
+			Description:          def.Description,
+			DangerLevel:          inferToolDangerLevel(profile),
+			RequiresApproval:     policy.RequiresApproval,
+			MayRequireApproval:   policy.MayRequireApproval,
+			DangerousActions:     router.StructuredDangerousActions(profile.Name),
+			ActionField:          router.MixedActionField(profile.Name),
+			ReadOnlyActions:      router.MixedReadOnlyActions(profile.Name),
+			LocalWriteActions:    router.MixedLocalWriteActions(profile.Name),
+			ExternalSendActions:  router.ExternalSendActions(profile.Name),
+			ExternalWriteActions: router.ExternalWriteActions(profile.Name),
+			ActionCapabilities:   toolSearchActionCapabilities(profile.Name, qLower),
+			IsConcurrencySafe:    def.IsConcurrencySafe,
+			Core:                 def.Core,
+			Kind:                 kind,
+			Domain:               domain,
+			Source:               source,
+			Risk:                 risk,
+			Visibility:           visibility,
+			Invocation:           invocation,
+			RouteStatus:          routeStatus,
+			CallableNow:          callableNow,
+			ExecutionNote:        executionNote,
+			Score:                recall.Score,
 		})
 	}
 
@@ -174,14 +201,14 @@ func inferToolSearchMetadata(profile router.ToolProfile, policy router.ToolPolic
 	return kind, domain, source, risk, visibility, invocation, routeStatus, callableNow, executionNote
 }
 
-func inferToolRouteStatus(policy router.ToolPolicyDecision) (string, bool) {
-	return string(policy.RouteStatus), policy.CallableNow
+func inferToolRouteStatus(_ router.ToolPolicyDecision) (string, bool) {
+	return string(router.ToolRouteDiscoveryOnly), false
 }
 
 func toolSearchExecutionNote(routeStatus string, callableNow bool) string {
 	switch routeStatus {
 	case "discovery_only":
-		return "tool_search 只返回工具目录信息，不授权执行；该条目本身仅用于发现。"
+		return "tool_search 只返回工具目录和调用契约，不授权执行；是否可调用只由本轮 RouteDecision、可见工具列表、plan mode 与权限审批决定。"
 	case "callable_read_only":
 		return "只读安全工具；召回进入本轮候选后通常可直接调用，仍受 RouteDecision、plan mode 和运行时 allow-list 约束。"
 	case "callable_with_action_constraints":
@@ -198,6 +225,116 @@ func toolSearchExecutionNote(routeStatus string, callableNow bool) string {
 		}
 		return "当前仅作为目录信息展示；是否可调用由 RouteDecision、plan mode 和权限审批决定。"
 	}
+}
+
+func toolSearchActionCapabilities(toolName, queryLower string) []toolSearchActionCapability {
+	rules := router.ActionCapabilityRulesForTool(toolName)
+	if len(rules) == 0 {
+		return nil
+	}
+	queryLower = strings.ToLower(strings.TrimSpace(queryLower))
+	actionField := router.MixedActionField(toolName)
+	out := make([]toolSearchActionCapability, 0, len(rules))
+	for _, rule := range rules {
+		if queryLower != "" && !toolSearchActionCapabilityMatchesQuery(rule, queryLower) {
+			continue
+		}
+		out = append(out, toolSearchActionCapabilityFromRule(rule, actionField))
+	}
+	if len(out) == 0 && queryLower != "" {
+		for _, rule := range rules {
+			out = append(out, toolSearchActionCapabilityFromRule(rule, actionField))
+		}
+	}
+	return out
+}
+
+func toolSearchActionCapabilityFromRule(rule router.ActionCapabilityRule, actionField string) toolSearchActionCapability {
+	return toolSearchActionCapability{
+		ToolName:           rule.ToolName,
+		Action:             rule.Action,
+		ActionField:        actionField,
+		CapabilityID:       rule.CapabilityID,
+		Resource:           rule.Resource,
+		Operation:          rule.Operation,
+		RiskClass:          string(rule.RiskClass),
+		RequiredFields:     append([]string(nil), rule.RequiredFields...),
+		ParameterHints:     cloneToolSearchParameterHints(rule.ParameterHints),
+		PreparatoryActions: append([]string(nil), rule.PreparatoryActions...),
+		ExampleArgs:        cloneToolSearchExampleArgs(rule.ExampleArgs),
+		ExampleToolCall:    toolSearchExampleToolCallForRule(rule, actionField),
+		InvocationHint:     toolSearchInvocationHint(rule.ToolName, actionField, rule.Action),
+		RepairHint:         rule.RepairHint,
+	}
+}
+
+func toolSearchExampleToolCallForRule(rule router.ActionCapabilityRule, actionField string) *toolSearchExampleToolCall {
+	toolName := strings.TrimSpace(rule.ToolName)
+	if toolName == "" {
+		return nil
+	}
+	args := cloneToolSearchExampleArgs(rule.ExampleArgs)
+	if args == nil {
+		args = make(map[string]any)
+	}
+	if actionField != "" && strings.TrimSpace(rule.Action) != "" {
+		if _, ok := args[actionField]; !ok {
+			args[actionField] = rule.Action
+		}
+	}
+	return &toolSearchExampleToolCall{Name: toolName, Arguments: args}
+}
+
+func toolSearchInvocationHint(toolName, actionField, action string) string {
+	toolName = strings.TrimSpace(toolName)
+	actionField = strings.TrimSpace(actionField)
+	action = strings.TrimSpace(action)
+	if toolName == "" || action == "" {
+		return ""
+	}
+	if actionField == "" {
+		return fmt.Sprintf("调用工具 %s；不要把 action capability 当作独立工具名。", toolName)
+	}
+	return fmt.Sprintf("调用工具 %s，并在 arguments.%s 中设置 %s；不要调用 %s.%s，%s 不是独立工具名。", toolName, actionField, action, toolName, action, action)
+}
+
+func toolSearchActionCapabilityMatchesQuery(rule router.ActionCapabilityRule, queryLower string) bool {
+	for _, candidate := range []string{rule.Action, rule.CapabilityID, rule.Resource, rule.Operation} {
+		if candidate != "" && scoreToolSearchTerms(queryLower, []string{candidate}) > 0 {
+			return true
+		}
+	}
+	for _, alias := range rule.IntentAliases {
+		for _, part := range strings.Split(alias, "|") {
+			if scoreToolSearchTerms(queryLower, []string{part}) > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func cloneToolSearchExampleArgs(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneToolSearchParameterHints(in []router.ActionCapabilityParameterHint) []router.ActionCapabilityParameterHint {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]router.ActionCapabilityParameterHint, len(in))
+	for i, hint := range in {
+		hint.Enum = append([]string(nil), hint.Enum...)
+		out[i] = hint
+	}
+	return out
 }
 
 // RecallToolCatalog 基于工具 name/description/schema 召回当前 query 相关工具。

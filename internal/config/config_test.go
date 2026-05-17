@@ -119,6 +119,21 @@ func TestToolsFilesystemEnabledDefault(t *testing.T) {
 	}
 }
 
+func TestNormalizeAssetConfigPreservesExplicitS3UseSSLFalse(t *testing.T) {
+	cfg := NormalizeAssetConfig(AssetConfig{
+		Provider: "s3",
+		S3: AssetS3Config{
+			Endpoint: "http://s3-compatible.local",
+			Bucket:   "hive-assets",
+			UseSSL:   false,
+		},
+	})
+
+	if cfg.S3.UseSSL {
+		t.Fatal("explicit s3.use_ssl=false should be preserved for S3-compatible HTTP endpoints")
+	}
+}
+
 func TestToolsFilesystemEnabledExplicitFalse(t *testing.T) {
 	var cfg Config
 	if err := json.Unmarshal([]byte(`{"tools":{"filesystem_enabled":false}}`), &cfg); err != nil {

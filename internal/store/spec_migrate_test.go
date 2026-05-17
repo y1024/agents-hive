@@ -22,10 +22,10 @@ import (
 // 技术能力，不改变 runbook §4 的"不可回退项"操作约束。
 //
 // 覆盖 4 组断言（蓝军自检：缺任一 → mutation 可能溜过）：
-//   1. schema 一致性：up→down→up 后三表 + 索引 + trigger + function 全部重建
-//   2. 数据清零：down 后残留数据不可见（COUNT=0）
-//   3. sequence 起点复位：新 change_id 的 MAX(sequence) 从 1 起，不被老数据串号
-//   4. 幂等：down→down / up→up 不报错（defensive against drill 重跑）
+//  1. schema 一致性：up→down→up 后三表 + 索引 + trigger + function 全部重建
+//  2. 数据清零：down 后残留数据不可见（COUNT=0）
+//  3. sequence 起点复位：新 change_id 的 MAX(sequence) 从 1 起，不被老数据串号
+//  4. 幂等：down→down / up→up 不报错（defensive against drill 重跑）
 func TestMigration_DownReverts(t *testing.T) {
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {

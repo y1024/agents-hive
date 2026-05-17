@@ -258,6 +258,44 @@ func TestCapabilityRegistryFeishuIsMixedActionAware(t *testing.T) {
 	}
 }
 
+func TestActionCapabilityRegistryDrivesBusinessWriteSemantics(t *testing.T) {
+	matches := MatchActionCapabilityRulesForText("创建一个飞书任务，标题是跟进合同")
+	if len(matches) != 1 {
+		t.Fatalf("task create query should match one action capability, got %+v", matches)
+	}
+	got := matches[0]
+	if got.ToolName != "feishu_api" || got.Action != "create_task" || got.CapabilityID != ActionCapabilityExternalTaskCreate {
+		t.Fatalf("task create capability = %+v", got)
+	}
+	if !containsString(got.RequiredFields, "summary") {
+		t.Fatalf("create_task required fields = %+v, want summary", got.RequiredFields)
+	}
+	signal := ActionCapabilitySignal(got.CapabilityID)
+	if signal != "action_capability:external.task.create" {
+		t.Fatalf("ActionCapabilitySignal = %q", signal)
+	}
+	intent := IntentFrame{Signals: []string{IntentSignalExternalBusinessWrite, signal}}
+	ids := IntentActionCapabilityIDs(intent)
+	if len(ids) != 1 || ids[0] != ActionCapabilityExternalTaskCreate {
+		t.Fatalf("IntentActionCapabilityIDs = %+v", ids)
+	}
+	actions := ExternalWriteActionsForIntent("feishu_api", IntentFrame{
+		Kind:              IntentExternalWrite,
+		AllowsSideEffects: true,
+		Signals:           []string{IntentSignalExternalBusinessWrite, signal},
+	})
+	for _, action := range []string{"search_contacts", "get_user_info", "list_tasks", "create_task"} {
+		if !containsString(actions, action) {
+			t.Fatalf("task create actions missing %q: %+v", action, actions)
+		}
+	}
+	for _, action := range []string{"write_sheet", "create_approval", "send_message"} {
+		if containsString(actions, action) {
+			t.Fatalf("task create actions should not include %q: %+v", action, actions)
+		}
+	}
+}
+
 func TestCapabilityRegistryMixedOperationToolsAreActionAware(t *testing.T) {
 	for _, toolName := range []string{"memory", "taskboard", "browser_interact", "filesystem"} {
 		t.Run(toolName, func(t *testing.T) {
@@ -351,6 +389,34 @@ func TestProfileHasSideEffectUsesRiskAndCapabilityMetadata(t *testing.T) {
 				t.Fatalf("ProfileHasSideEffect() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestMatchActionCapabilityRulesForTextKeepsIndependentBusinessWriteActions(t *testing.T) {
+	got := MatchActionCapabilityRulesForText("创建一个飞书任务，并写入飞书表格")
+	ids := map[string]bool{}
+	for _, rule := range got {
+		ids[rule.CapabilityID] = true
+	}
+	if !ids[ActionCapabilityExternalTaskCreate] || !ids[ActionCapabilityExternalTableWrite] {
+		t.Fatalf("independent actions should both survive, got %+v", got)
+	}
+	if ids[ActionCapabilityExternalRecordCreate] || ids[ActionCapabilityExternalRecordUpdate] {
+		t.Fatalf("unmentioned record actions must not match, got %+v", got)
+	}
+}
+
+func TestMatchActionCapabilityRulesForTextPrefersSpecificBitableRecordOverSheetWrite(t *testing.T) {
+	got := MatchActionCapabilityRulesForText("更新飞书多维表格记录")
+	ids := map[string]bool{}
+	for _, rule := range got {
+		ids[rule.CapabilityID] = true
+	}
+	if !ids[ActionCapabilityExternalRecordUpdate] {
+		t.Fatalf("specific bitable record update missing, got %+v", got)
+	}
+	if ids[ActionCapabilityExternalTableWrite] {
+		t.Fatalf("generic sheet write must be suppressed by specific bitable record update, got %+v", got)
 	}
 }
 

@@ -1,7 +1,7 @@
-import { useEffect, useCallback, useMemo } from 'react';
+import { useEffect, useCallback, useMemo, useState } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { X } from 'lucide-react';
+import { BookOpenText, X } from 'lucide-react';
 import { ApiRequestError } from '../api/client';
 import { useSessionStore } from '../store/session';
 import { useChatStore } from '../store/chat';
@@ -16,6 +16,7 @@ import { useTaskProgressStore } from '../store/taskProgress';
 import { shouldShowTodosPanel, useTodosStore } from '../store/todos';
 import { TodosList } from '../components/todos/TodosList';
 import { calculateMessageTotalTokens } from '../utils/tokenUsage';
+import type { KBBinding, KBNamespace } from '../types/api';
 
 export function Chat() {
   const { t } = useTranslation();
@@ -49,6 +50,26 @@ export function Chat() {
   const todosPanelOpen = shouldShowTodosPanel(todosSnapshot);
   const workspaceOpen = canvasOpen || todosPanelOpen;
   const workspaceWidthClass = canvasOpen ? 'md:w-1/2' : 'md:w-80';
+  const [kbNamespaces, setKBNamespace] = useState<KBNamespace[]>([]);
+  const [kbBindings, setKBBindings] = useState<KBBinding[]>([]);
+  const [kbSelection, setKBSelection] = useState('');
+  const [kbDomainId, setKBDomainId] = useState('generic');
+  const [kbBusy, setKBBusy] = useState(false);
+
+  const loadKBState = useCallback(async (sessionId: string, requestedDomainId: string) => {
+    const domainId = normalizeKBDomain(requestedDomainId);
+    try {
+      const [namespacesRes, bindingsRes] = await Promise.all([
+        client.listKBNamespaces({ domainId, limit: 100 }),
+        client.getSessionKBBindings(sessionId, domainId),
+      ]);
+      setKBNamespace(namespacesRes.namespaces ?? []);
+      setKBBindings(bindingsRes.bindings ?? []);
+    } catch {
+      setKBNamespace([]);
+      setKBBindings([]);
+    }
+  }, [client]);
 
   useEffect(() => {
     if (id) {
@@ -58,12 +79,17 @@ export function Chat() {
       useTodosStore.getState().clear();
       // 切换会话时清理进度
       useTaskProgressStore.getState().clear();
-      fetchSession(client, id).catch((err: unknown) => {
+      useTodosStore.getState().loadSnapshot(client, id);
+      void fetchSession(client, id).then(() => {
+        const session = useSessionStore.getState().currentSession;
+        const domainId = normalizeKBDomain(session?.kb_domain_id);
+        setKBDomainId(domainId);
+        void loadKBState(id, domainId);
+      }).catch((err: unknown) => {
         if (err instanceof ApiRequestError && (err.code === 1006 || err.code === 6000)) {
           navigate('/');
         }
       });
-      useTodosStore.getState().loadSnapshot(client, id);
       // 先加载消息，再拉取待处理权限请求（确保锚定位置正确）
       loadMessages(client, id, 100).then(() => {
         useHITLStore.getState().fetchPending(client, id);
@@ -94,7 +120,7 @@ export function Chat() {
       useTaskProgressStore.getState().clear();
       useTodosStore.getState().clear();
     };
-  }, [id, client, fetchSession, loadMessages, clearMessages, loadModels, pendingMessage, sendMessage, updateSessionName, navigate]);
+  }, [id, client, fetchSession, loadMessages, clearMessages, loadModels, pendingMessage, sendMessage, updateSessionName, navigate, loadKBState]);
 
   // 会话被删除后自动跳转回会话列表
   useEffect(() => {
@@ -115,9 +141,9 @@ export function Chat() {
           updateSessionName(id, title);
         }
       }
-      sendMessage(client, id, content, options);
+      sendMessage(client, id, content, { ...options, kbDomainId: normalizeKBDomain(kbDomainId) });
     }
-  }, [id, client, sendMessage, messages.length, updateSessionName]);
+  }, [id, client, sendMessage, messages.length, updateSessionName, kbDomainId]);
 
   const handleClear = useCallback(async () => {
     if (id && confirm(t('chat.clearConfirm'))) {
@@ -154,6 +180,32 @@ export function Chat() {
   const handleStop = useCallback(() => {
     if (id) stopTask(client, id);
   }, [id, client, stopTask]);
+
+  const handleAddKB = useCallback(async () => {
+    if (!id || !kbSelection) return;
+    setKBBusy(true);
+    try {
+      const domainId = normalizeKBDomain(kbDomainId);
+      const nextNamespaceIds = Array.from(new Set([...kbBindings.map((binding) => binding.namespace_id), kbSelection]));
+      await client.setSessionKBBindings(id, nextNamespaceIds, domainId);
+      setKBSelection('');
+      await loadKBState(id, domainId);
+    } finally {
+      setKBBusy(false);
+    }
+  }, [id, kbSelection, kbBindings, kbDomainId, client, loadKBState]);
+
+  const handleRemoveKB = useCallback(async (namespaceId: string) => {
+    if (!id) return;
+    setKBBusy(true);
+    try {
+      const domainId = normalizeKBDomain(kbDomainId);
+      await client.deleteSessionKBBinding(id, namespaceId, domainId);
+      await loadKBState(id, domainId);
+    } finally {
+      setKBBusy(false);
+    }
+  }, [id, kbDomainId, client, loadKBState]);
 
   // 注入全局 Header 的 slots（会话名 + 消息统计）
   const setSlots = useHeaderStore((s) => s.setSlots);
@@ -228,8 +280,21 @@ export function Chat() {
             streamingStatus={streaming ? agentStatus : null}
             onRegenerate={handleRegenerate}
             sessionId={id}
+            kbDomainId={kbDomainId}
           />
           <TodosList variant="mobile" />
+          <SessionKBBar
+            namespaces={kbNamespaces}
+            bindings={kbBindings}
+            value={kbSelection}
+            domainId={kbDomainId}
+            busy={kbBusy}
+            onChange={setKBSelection}
+            onDomainChange={setKBDomainId}
+            onReload={() => { if (id) void loadKBState(id, kbDomainId); }}
+            onAdd={handleAddKB}
+            onRemove={handleRemoveKB}
+          />
           <ChatInput
             sessionId={id}
             onSend={handleSend}
@@ -250,6 +315,80 @@ export function Chat() {
             )}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+function normalizeKBDomain(value: string | undefined) {
+  return value?.trim() || 'generic';
+}
+
+function SessionKBBar(props: {
+  namespaces: KBNamespace[];
+  bindings: KBBinding[];
+  value: string;
+  domainId: string;
+  busy: boolean;
+  onChange: (value: string) => void;
+  onDomainChange: (value: string) => void;
+  onReload: () => void;
+  onAdd: () => void;
+  onRemove: (namespaceId: string) => void;
+}) {
+  const boundNamespaceIDs = new Set(props.bindings.map((binding) => binding.namespace_id));
+  const available = props.namespaces.filter((namespace) => !boundNamespaceIDs.has(namespace.id));
+  const nameByID = new Map(props.namespaces.map((namespace) => [namespace.id, namespace.name]));
+
+  return (
+    <div className="border-t border-[var(--border-color)] bg-[var(--bg-card)] px-4 py-2">
+      <div className="mx-auto flex max-w-3xl flex-wrap items-center gap-2 text-xs">
+        <span className="inline-flex items-center gap-1 text-[var(--text-secondary)]">
+          <BookOpenText className="h-3.5 w-3.5" />
+          KB
+        </span>
+        <input
+          value={props.domainId}
+          onChange={(e) => props.onDomainChange(e.target.value)}
+          onBlur={props.onReload}
+          disabled={props.busy}
+          className="w-28 rounded-lg border border-[var(--border-color)] bg-[var(--bg-primary)] px-2 py-1 font-mono text-[11px] text-[var(--text-primary)] disabled:opacity-50"
+          aria-label="KB domain"
+        />
+        {props.bindings.length === 0 ? (
+          <span className="text-[var(--text-secondary)]">未绑定</span>
+        ) : props.bindings.map((binding) => (
+          <button
+            key={binding.id}
+            type="button"
+            onClick={() => props.onRemove(binding.namespace_id)}
+            disabled={props.busy}
+            className="inline-flex items-center gap-1 rounded-full border border-[var(--border-color)] bg-[var(--bg-primary)] px-2 py-1 text-[var(--text-primary)] hover:bg-[var(--bg-secondary)] disabled:opacity-50"
+            title="点击移除"
+          >
+            {nameByID.get(binding.namespace_id) || binding.namespace_id}
+            <X className="h-3 w-3" />
+          </button>
+        ))}
+        <select
+          value={props.value}
+          onChange={(e) => props.onChange(e.target.value)}
+          disabled={props.busy || available.length === 0}
+          className="ml-auto min-w-[160px] rounded-lg border border-[var(--border-color)] bg-[var(--bg-primary)] px-2 py-1 text-[var(--text-primary)] disabled:opacity-50"
+        >
+          <option value="">{available.length === 0 ? '无可添加 KB' : '选择知识库'}</option>
+          {available.map((namespace) => (
+            <option key={namespace.id} value={namespace.id}>{namespace.name}</option>
+          ))}
+        </select>
+        <button
+          type="button"
+          onClick={props.onAdd}
+          disabled={props.busy || !props.value}
+          className="rounded-lg border border-[var(--border-color)] px-2 py-1 text-[var(--text-primary)] hover:bg-[var(--bg-secondary)] disabled:opacity-50"
+        >
+          绑定
+        </button>
       </div>
     </div>
   );

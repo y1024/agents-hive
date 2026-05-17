@@ -132,9 +132,10 @@ func (c *Client) responsesStreamCollect(ctx context.Context, params responses.Re
 // chatWithToolsViaResponses 通过 Responses API 实现带工具调用的 Chat。
 func (c *Client) chatWithToolsViaResponses(ctx context.Context, req ChatWithToolsRequest) (*ChatWithToolsResponse, error) {
 	snapModel, _, snapProvider := c.snapshot()
+	aliases := toolNameAliasesForTools(req.Tools)
 
 	// 构建 input items
-	input := buildResponsesInputFromToolMessages(req.Messages)
+	input := buildResponsesInputFromToolMessagesWithAliases(req.Messages, aliases)
 
 	// 构建工具定义
 	tools, err := convertToolsForResponses(req.Tools)
@@ -174,7 +175,7 @@ func (c *Client) chatWithToolsViaResponses(ctx context.Context, req ChatWithTool
 	})
 
 	// P0-A：ToolChoice 透传（空字符串时跳过，保持旧 auto 行为）
-	if tc, ok := buildResponsesToolChoice(req.ToolChoice); ok {
+	if tc, ok := buildResponsesToolChoiceWithAliases(req.ToolChoice, aliases); ok {
 		params.ToolChoice = tc
 	}
 
@@ -210,7 +211,7 @@ func (c *Client) chatWithToolsViaResponses(ctx context.Context, req ChatWithTool
 		if item.Type == "function_call" {
 			result.ToolCalls = append(result.ToolCalls, ToolCall{
 				ID:        item.CallID,
-				Name:      item.Name,
+				Name:      aliases.InternalName(item.Name),
 				Arguments: json.RawMessage(item.Arguments),
 			})
 		}
@@ -284,6 +285,10 @@ func buildResponsesInput(msgs []Message) responses.ResponseInputParam {
 // buildResponsesInputFromToolMessages 将 []MessageWithTools 转换为 Responses API 的 input items。
 // 处理包含 tool_calls 的 assistant 消息和 tool 结果消息。
 func buildResponsesInputFromToolMessages(msgs []MessageWithTools) responses.ResponseInputParam {
+	return buildResponsesInputFromToolMessagesWithAliases(msgs, toolNameAliases{})
+}
+
+func buildResponsesInputFromToolMessagesWithAliases(msgs []MessageWithTools, aliases toolNameAliases) responses.ResponseInputParam {
 	items := make(responses.ResponseInputParam, 0, len(msgs)*2)
 
 	for _, msg := range msgs {
@@ -316,7 +321,7 @@ func buildResponsesInputFromToolMessages(msgs []MessageWithTools) responses.Resp
 				items = append(items, responses.ResponseInputItemUnionParam{
 					OfFunctionCall: &responses.ResponseFunctionToolCallParam{
 						CallID:    tc.ID,
-						Name:      tc.Name,
+						Name:      aliases.APIName(tc.Name),
 						Arguments: string(tc.Arguments),
 					},
 				})

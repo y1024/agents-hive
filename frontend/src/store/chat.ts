@@ -19,7 +19,7 @@ interface ChatState {
   toolCallStatuses: Record<string, ToolCallStatus>; // tool call ID → 实时状态
   toolCallStartTimes: Record<string, number>; // tool call ID → start timestamp (for client-side timing)
   // 操作
-  sendMessage: (client: NodeClient, sessionId: string, content: string, options?: { attachments?: FileAttachment[]; deepThinking?: boolean }) => Promise<void>;
+  sendMessage: (client: NodeClient, sessionId: string, content: string, options?: { attachments?: FileAttachment[]; deepThinking?: boolean; kbDomainId?: string }) => Promise<void>;
   addMessage: (msg: Message, sessionId?: string) => void;
   updateLastAssistant: (content: string, reasoningContent?: string) => void;
   ensureAssistantMessage: () => void; // 确保有 assistant 消息占位符
@@ -143,6 +143,7 @@ function mergeMessage(existing: Message, incoming: Message): Message {
     content: incoming.content !== undefined && incoming.content !== '' ? incoming.content : existing.content,
     reasoning_content: incoming.reasoning_content ?? existing.reasoning_content,
     tool_calls: mergeToolCalls(existing.tool_calls, incoming.tool_calls),
+    citations: incoming.citations ?? existing.citations,
     usage: incoming.usage ?? existing.usage,
     llm_duration: incoming.llm_duration ?? existing.llm_duration,
     tool_call_id: incoming.tool_call_id ?? existing.tool_call_id,

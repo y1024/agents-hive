@@ -20,6 +20,7 @@ interface MessagePayload {
   timestamp?: string;
   tool_calls?: { id: string; name: string; arguments: string }[];
   tool_call_preview?: boolean;
+  citations?: Message['citations'];
   usage?: { input_tokens: number; output_tokens: number };
   llm_duration?: number;
   tool_call_id?: string;
@@ -127,6 +128,7 @@ export function useWebSocket({ url, sessionId, enabled = true, onMessage, client
               timestamp: payload.timestamp,
               tool_calls: payload.tool_calls,
               tool_call_preview: payload.tool_call_preview,
+              citations: payload.citations,
               usage: payload.usage,
               llm_duration: payload.llm_duration,
             };
@@ -166,6 +168,7 @@ export function useWebSocket({ url, sessionId, enabled = true, onMessage, client
             timestamp: payload.timestamp,
             tool_calls: payload.tool_calls,
             tool_call_preview: payload.tool_call_preview,
+            citations: payload.citations,
             usage: payload.usage,
             llm_duration: payload.llm_duration,
             tool_call_id: payload.tool_call_id,

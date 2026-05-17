@@ -1,8 +1,15 @@
-import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
+import { render, screen, waitFor } from '@testing-library/react';
 import { MessageList } from '../MessageList';
 import { useChatStore } from '../../../store/chat';
 import type { Message } from '../../../types/api';
+
+const resolveAssetMock = vi.hoisted(() => vi.fn().mockResolvedValue({
+  url: '/api/v1/assets/proxy?x=1',
+  expires_in: 300,
+  mime_type: 'image/png',
+  size: 3,
+}));
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -34,7 +41,17 @@ vi.mock('../../../store/taskProgress', () => ({
     selector({ activeGroups: new Map() }),
 }));
 
+vi.mock('../../../api/node-client', () => ({
+  LocalNodeClient: vi.fn().mockImplementation(() => ({
+    resolveAsset: resolveAssetMock,
+  })),
+}));
+
 describe('MessageList tool call rendering', () => {
+  beforeEach(() => {
+    resolveAssetMock.mockClear();
+  });
+
   it('collapses successful tool calls into a compact diagnostics entry', () => {
     useChatStore.setState({
       inlineApprovals: [],
@@ -132,6 +149,156 @@ describe('MessageList tool call rendering', () => {
     expect(screen.getAllByText('Write File').length).toBeGreaterThan(0);
     expect(document.querySelectorAll('[data-slot="collapsible"]').length).toBe(1);
     expect(screen.queryByText(/已写入 5 字节到/)).toBeNull();
+  });
+
+  it('keeps successful kb tool calls visible as KB result cards', async () => {
+    useChatStore.setState({
+      inlineApprovals: [],
+      toolCallStatuses: {},
+      toolCallStartTimes: {},
+    });
+
+    const messages: Message[] = [
+      {
+        role: 'assistant',
+        content: '',
+        timestamp: '2026-05-04T01:00:00.000Z',
+        tool_calls: [
+          {
+            id: 'call-kb',
+            name: 'kb.section.text',
+            arguments: '{"doc_id":"doc-1","node_ids":["0001"]}',
+          },
+        ],
+      },
+      {
+        role: 'tool',
+        content: JSON.stringify({
+          sections: [{ node_id: '0001', title: 'Refund Policy', text: 'policy' }],
+          asset_refs: [{
+            asset_uri: 'asset://kb/user/u1/ns/doc/hash.png',
+            mime_type: 'image/png',
+            content_hash: 'hash',
+          }],
+        }),
+        timestamp: '2026-05-04T01:00:01.000Z',
+        tool_call_id: 'call-kb',
+        tool_name: 'kb.section.text',
+      },
+    ];
+
+    render(<MessageList messages={messages} sessionId="sess-1" kbDomainId="support" />);
+
+    expect(screen.getByText('Kb.Section.Text')).toBeTruthy();
+    expect(screen.getByText(/1 节点/)).toBeTruthy();
+    expect(screen.queryByText(/1 tool completed/)).toBeNull();
+    await waitFor(() => expect(document.querySelector('a[href="/api/v1/assets/proxy?x=1"]')).toBeTruthy());
+  });
+
+  it('keeps kb metadata and structure tool calls visible instead of dropping them', () => {
+    useChatStore.setState({
+      inlineApprovals: [],
+      toolCallStatuses: {},
+      toolCallStartTimes: {},
+    });
+
+    const messages: Message[] = [
+      {
+        role: 'assistant',
+        content: '',
+        timestamp: '2026-05-04T01:00:00.000Z',
+        tool_calls: [
+          {
+            id: 'call-meta',
+            name: 'kb.doc.meta',
+            arguments: '{}',
+          },
+          {
+            id: 'call-structure',
+            name: 'kb.doc.structure',
+            arguments: '{"doc_id":"doc-1"}',
+          },
+        ],
+      },
+      {
+        role: 'tool',
+        content: JSON.stringify({
+          documents: [{
+            doc_id: 'doc-1',
+            title: 'Refund Policy',
+            version: 'v1',
+            page_count: 8,
+            node_count: 3,
+          }],
+        }),
+        timestamp: '2026-05-04T01:00:01.000Z',
+        tool_call_id: 'call-meta',
+        tool_name: 'kb.doc.meta',
+      },
+      {
+        role: 'tool',
+        content: JSON.stringify({
+          doc_id: 'doc-1',
+          nodes: [{
+            id: '0000',
+            title: 'Refund Policy',
+            node_path: '1',
+            level: 1,
+            token_count: 10,
+            summary: '',
+            prefix_summary: '',
+            start_line: 1,
+            end_line: 5,
+            children: [{ id: '0001', title: 'Scope', node_path: '1.1' }],
+          }],
+        }),
+        timestamp: '2026-05-04T01:00:02.000Z',
+        tool_call_id: 'call-structure',
+        tool_name: 'kb.doc.structure',
+      },
+    ];
+
+    render(<MessageList messages={messages} sessionId="sess-1" />);
+
+    expect(screen.getByText('Kb.Doc.Meta')).toBeTruthy();
+    expect(screen.getByText('Refund Policy')).toBeTruthy();
+    expect(screen.getByText(/1 文档/)).toBeTruthy();
+    expect(screen.getByText('Kb.Doc.Structure')).toBeTruthy();
+    expect(screen.getByText(/2 节点/)).toBeTruthy();
+    expect(screen.queryByText(/2 tools completed/)).toBeNull();
+  });
+
+  it('resolves historical chat attachments with the current session boundary', async () => {
+    useChatStore.setState({
+      inlineApprovals: [],
+      toolCallStatuses: {},
+      toolCallStartTimes: {},
+    });
+
+    const messages: Message[] = [
+      {
+        role: 'user',
+        content: 'see attachment',
+        timestamp: '2026-05-04T01:00:00.000Z',
+        attachments: [{
+          filename: 'diagram.png',
+          mime_type: 'image/png',
+          size: 3,
+          asset_uri: 'asset://chat/user/u1/session/sess-1/hash.png',
+          content_hash: 'hash',
+        }],
+      },
+    ];
+
+    render(<MessageList messages={messages} sessionId="sess-1" />);
+
+    await waitFor(() => expect(resolveAssetMock).toHaveBeenCalledWith(
+      'asset://chat/user/u1/session/sess-1/hash.png',
+      {
+        purpose: 'chat_attachment',
+        sessionId: 'sess-1',
+      },
+    ));
   });
 
   it('renders recoverable approval errors as non-terminal tool diagnostics', () => {

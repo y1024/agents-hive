@@ -19,6 +19,7 @@
     "adminLLM": "大模型管理",
     "adminAuthProviders": "认证管理",
     "adminPrompts": "Prompt 管理",
+    "adminKnowledgeBase": "知识库管理",
     "adminQualityCandidates": "质量候选",
     "adminQualityWorkbench": "质量工作台",
     "adminMemoryGovernance": "Memory 治理",

@@ -4,6 +4,7 @@
 # 架构说明：
 #   hive      主服务（Go 二进制 + 内嵌前端），监听 8080
 #   postgres  PostgreSQL 16，存储运行时配置和会话数据
+#   minio     S3-compatible 对象存储，保存 KB 图片、附件和 Agent 资产
 #
 # Sandbox DooD（Docker outside of Docker）说明：
 #   Hive 通过 /var/run/docker.sock 与宿主机 Docker daemon 通信，
@@ -17,15 +18,20 @@
 # 首次启动前：
 #   1. 构建 sandbox 镜像（宿主机上）：
 #        make build-sandbox-image
-#   2. 复制并修改配置：
-#        cp docker/config.docker.json config.json
-#        # 填入 LLM API Key 等运行时配置（也可通过 Web UI 配置）
-#   3. 创建宿主机 workdir：
-#        mkdir -p /opt/hive/workdir/sessions
-#   4. 设置环境变量或 .env 文件：
+#   2. 设置环境变量或 .env 文件：
 #        echo "POSTGRES_PASSWORD=your_password" > .env
-#   5. 启动：
+#        echo "DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)" >> .env
+#        echo "MINIO_ROOT_USER=minioadmin" >> .env
+#        echo "MINIO_ROOT_PASSWORD=minioadmin" >> .env
+#        # 可选：CLAW_API_KEY / OPENAI_API_KEY 用于首次启动初始化 LLM 配置
+#   3. 创建宿主机 workdir，并确保容器内非 root hive 用户可写：
+#        mkdir -p /opt/hive/workdir/sessions
+#        chmod 0775 /opt/hive/workdir /opt/hive/workdir/sessions
+#   4. 启动：
 #        docker compose up -d
+#
+# runtime 镜像会内置 docker/config.docker.json 到 /app/config.json，并默认
+# 以 --config /app/config.json 启动；如修改 docker/config.docker.json，需要重建镜像。
 ##############################################################################
 
 services:
@@ -58,6 +64,15 @@ services:
       # ── 会话 & 工具目录 ────────────────────────────────────────────
       SESSIONS_DIR: /opt/hive/workdir/sessions
       CUSTOM_TOOLS_DIR: /data/tools
+      ASSET_PROVIDER: ${ASSET_PROVIDER:-minio}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-${MINIO_ROOT_USER:-minioadmin}}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-${MINIO_ROOT_PASSWORD:-minioadmin}}
+      MINIO_BUCKET: ${MINIO_BUCKET:-hive-assets}
+      MINIO_USE_SSL: ${MINIO_USE_SSL:-false}
+      FILECONV_PDF_PROVIDER: ${FILECONV_PDF_PROVIDER:-mineru}
+      FILECONV_PDF_INSTALL_ENABLED: ${FILECONV_PDF_INSTALL_ENABLED:-true}
+      FILECONV_PDF_INSTALL_DIR: /data/fileconv/mineru
 
       # ── LLM 密钥（首次启动后写入数据库，后续可通过 Web UI 修改）──
       CLAW_API_KEY: ${CLAW_API_KEY:-}
@@ -70,7 +85,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
 
       # ── 工作目录（sandbox bind mount 路径一致性）──────────────────
-      # ⚠️  重要：路径必须与 config.json sessions_dir 完全一致，
+      # ⚠️  重要：路径必须与 docker/config.docker.json sessions_dir 完全一致，
       # 且与宿主机实际路径相同（Docker daemon 按宿主机路径解析 -v）。
       # 如修改此路径，同步修改 config.docker.json sessions_dir。
       - /opt/hive/workdir:/opt/hive/workdir
@@ -81,6 +96,8 @@ services:
 
     depends_on:
       postgres:
+        condition: service_healthy
+      minio:
         condition: service_healthy
 
     # ⚠️  必须配置：Hive 以非 root 用户运行，需要访问 /var/run/docker.sock。
@@ -119,6 +136,50 @@ services:
     # ports:
     #   - "127.0.0.1:5432:5432"
 
+  # --------------------------------------------------------------------------
+  # MinIO 对象存储
+  # --------------------------------------------------------------------------
+  minio:
+    image: ${MINIO_IMAGE:-minio/minio:latest}
+    container_name: hive-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - minio-data:/data
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks:
+      - hive-net
+
+  minio-init:
+    image: ${MINIO_IMAGE:-minio/minio:latest}
+    container_name: hive-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        mc alias set hive http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" &&
+        mc mb -p "hive/$${MINIO_BUCKET:-hive-assets}" || true
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-hive-assets}
+    networks:
+      - hive-net
+
 # ------------------------------------------------------------------------------
 # 持久化卷
 # ------------------------------------------------------------------------------
@@ -129,6 +190,8 @@ volumes:
     name: hive-logs
   hive-tools:
     name: hive-tools
+  minio-data:
+    name: hive-minio-data
 
 # ------------------------------------------------------------------------------
 # 内部网络

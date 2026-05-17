@@ -16,11 +16,13 @@ import (
 	"github.com/chef-guo/agents-hive/internal/a2abridge"
 	"github.com/chef-guo/agents-hive/internal/accounting"
 	"github.com/chef-guo/agents-hive/internal/airouter"
+	"github.com/chef-guo/agents-hive/internal/asset"
 	"github.com/chef-guo/agents-hive/internal/auth"
 	"github.com/chef-guo/agents-hive/internal/config"
 	"github.com/chef-guo/agents-hive/internal/errs"
 	"github.com/chef-guo/agents-hive/internal/i18n"
 	"github.com/chef-guo/agents-hive/internal/journal"
+	"github.com/chef-guo/agents-hive/internal/kb"
 	"github.com/chef-guo/agents-hive/internal/llm"
 	"github.com/chef-guo/agents-hive/internal/mcphost"
 	"github.com/chef-guo/agents-hive/internal/memory"
@@ -252,6 +254,8 @@ type Master struct {
 	masterFilter *skills.ToolFilter // Master 的工具过滤器（启动时由 toolPolicy 构建）
 
 	memoryInjector    *memory.Injector            // 记忆注入器（可选，用于将相关记忆注入 LLM 上下文）
+	assetService      *asset.AssetService         // 统一对象存储服务（可选，用于持久化 assistant artifacts）
+	kbEvidenceReader  KBEvidenceReader            // KB evidence 读取器（可选，用于 assistant citations）
 	feedbackExtractor memory.FeedbackExtractor    // feedback 记忆提取器（可选，用于质量反馈闭环）
 	costTracker       accounting.CostTracker      // 成本追踪器（可选，nil 时不记录）
 	asyncRecorder     *accounting.AsyncRecorder   // 异步写入包装器（channel+worker，shutdown 安全）
@@ -323,6 +327,10 @@ type Master struct {
 	runtimeEpoch     string
 	autoContinueMu   sync.Mutex
 	autoContinueRuns map[string]int
+}
+
+type KBEvidenceReader interface {
+	CurrentTurnEvidence(context.Context, kb.EvidenceScope) ([]kb.EvidenceRef, error)
 }
 
 func (m *Master) evaluatePermissionPolicy(ctx context.Context, toolName string, input json.RawMessage) router.ToolPolicyDecision {
@@ -749,6 +757,14 @@ func buildToolPolicy(cfg config.ToolPolicyConfig) *skills.ToolPolicy {
 // SetMemoryInjector 设置记忆注入器，使 Master 能在 LLM 调用前注入相关记忆
 func (m *Master) SetMemoryInjector(inj *memory.Injector) {
 	m.memoryInjector = inj
+}
+
+func (m *Master) SetAssetService(service *asset.AssetService) {
+	m.assetService = service
+}
+
+func (m *Master) SetKBEvidenceReader(reader KBEvidenceReader) {
+	m.kbEvidenceReader = reader
 }
 
 // SetFeedbackExtractor 设置 feedback 记忆提取器，使质量反馈能进入记忆闭环。
@@ -1707,6 +1723,14 @@ func (m *Master) GetOrCreateSession(sessionID string) *SessionState {
 		cancel()
 	}
 	return session
+}
+
+// GetCachedSession 返回内存中的会话；不会创建新会话。
+func (m *Master) GetCachedSession(sessionID string) *SessionState {
+	if m == nil || strings.TrimSpace(sessionID) == "" {
+		return nil
+	}
+	return m.sessionMgr.GetSession(sessionID)
 }
 
 // GetEventBus 返回事件总线（供 acpserver 使用）

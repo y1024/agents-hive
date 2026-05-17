@@ -118,3 +118,30 @@ func TestSessionPersistToolCallsRoundTrip(t *testing.T) {
 	assert.Equal(t, "tool", tool2.Role)
 	assert.Equal(t, "call_def456", tool2.ToolCallID, "ToolCallID 应该被完整恢复")
 }
+
+func TestAttachmentMetadataDoesNotPersistBase64ContentParts(t *testing.T) {
+	data := "base64-image-data"
+	msg := llm.MessageWithTools{
+		Role: "user",
+		Content: llm.NewMultiContent(
+			llm.TextPart("看这张图"),
+			llm.ImageBase64Part("image/png", data),
+		),
+		Metadata: AttachmentMetadataForTest([]FileAttachment{{
+			Filename:    "chart.png",
+			MimeType:    "image/png",
+			Data:        data,
+			Size:        12,
+			AssetURI:    "asset://chat/user/u1/session/s1/hash.png",
+			ContentHash: "hash",
+		}}),
+	}
+
+	meta := buildMessageMeta(msg)
+	require.NotNil(t, meta)
+	assert.NotContains(t, meta, "content_parts")
+	raw, ok := meta["attachments"].(string)
+	require.True(t, ok)
+	assert.Contains(t, raw, "asset://chat/user/u1/session/s1/hash.png")
+	assert.NotContains(t, raw, data)
+}

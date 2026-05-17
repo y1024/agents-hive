@@ -7,6 +7,8 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"mime"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -118,20 +120,29 @@ type xlsxCell struct {
 
 // extractDOCX 从 DOCX 文件中提取文本
 func extractDOCX(filename, base64Data string) (string, error) {
+	paragraphs, err := extractDOCXParagraphText(filename, base64Data)
+	if err != nil {
+		return "", err
+	}
+	content := strings.Join(paragraphs, "\n")
+	return fmt.Sprintf("--- %s ---\n%s", filename, content), nil
+}
+
+func extractDOCXParagraphText(filename, base64Data string) ([]string, error) {
 	zr, err := openZipFromBase64(base64Data)
 	if err != nil {
-		return "", errs.Wrap(errs.CodeInvalidInput, "DOCX 文件解析失败", err)
+		return nil, errs.Wrap(errs.CodeInvalidInput, "DOCX 文件解析失败", err)
 	}
 
 	// 查找 word/document.xml
 	data, err := readZipFile(zr, "word/document.xml")
 	if err != nil {
-		return "", errs.Wrap(errs.CodeInvalidInput, "DOCX 缺少 word/document.xml", err)
+		return nil, errs.Wrap(errs.CodeInvalidInput, "DOCX 缺少 word/document.xml", err)
 	}
 
 	var doc docxDocument
 	if err := xml.Unmarshal(data, &doc); err != nil {
-		return "", errs.Wrap(errs.CodeInvalidInput, "DOCX XML 解析失败", err)
+		return nil, errs.Wrap(errs.CodeInvalidInput, "DOCX XML 解析失败", err)
 	}
 
 	// 提取所有段落文本
@@ -149,9 +160,108 @@ func extractDOCX(filename, base64Data string) (string, error) {
 			paragraphs = append(paragraphs, strings.Join(texts, ""))
 		}
 	}
+	return paragraphs, nil
+}
 
-	content := strings.Join(paragraphs, "\n")
-	return fmt.Sprintf("--- %s ---\n%s", filename, content), nil
+func extractDOCXMarkdown(filename string, data []byte) (*MarkdownDocument, error) {
+	zr, err := openZipFromBytes(data)
+	if err != nil {
+		return nil, errs.Wrap(errs.CodeInvalidInput, "DOCX 文件解析失败", err)
+	}
+	paragraphs, err := extractDOCXParagraphTextFromZip(zr)
+	if err != nil {
+		return nil, err
+	}
+	assets, err := extractDOCXMediaAssets(zr)
+	if err != nil {
+		return nil, err
+	}
+	title := markdownTitle(filename)
+	content := paragraphsToMarkdown(title, paragraphs)
+	if len(assets) > 0 {
+		var b strings.Builder
+		b.WriteString(strings.TrimRight(content, "\n"))
+		b.WriteString("\n\n")
+		for _, asset := range assets {
+			alt := strings.TrimSuffix(asset.Filename, filepath.Ext(asset.Filename))
+			if alt == "" {
+				alt = "image"
+			}
+			b.WriteString("![")
+			b.WriteString(alt)
+			b.WriteString("](")
+			b.WriteString(asset.Path)
+			b.WriteString(")\n\n")
+		}
+		content = strings.TrimRight(b.String(), "\n")
+	}
+	return &MarkdownDocument{Title: title, Content: content, Assets: assets, Quality: ConversionQualityExact}, nil
+}
+
+func extractDOCXParagraphTextFromZip(zr *zip.Reader) ([]string, error) {
+	data, err := readZipFile(zr, "word/document.xml")
+	if err != nil {
+		return nil, errs.Wrap(errs.CodeInvalidInput, "DOCX 缺少 word/document.xml", err)
+	}
+
+	var doc docxDocument
+	if err := xml.Unmarshal(data, &doc); err != nil {
+		return nil, errs.Wrap(errs.CodeInvalidInput, "DOCX XML 解析失败", err)
+	}
+
+	var paragraphs []string
+	for _, p := range doc.Body.Paragraphs {
+		var texts []string
+		for _, r := range p.Runs {
+			for _, t := range r.Text {
+				if t.Value != "" {
+					texts = append(texts, t.Value)
+				}
+			}
+		}
+		if len(texts) > 0 {
+			paragraphs = append(paragraphs, strings.Join(texts, ""))
+		}
+	}
+	return paragraphs, nil
+}
+
+func extractDOCXMediaAssets(zr *zip.Reader) ([]ExtractedAsset, error) {
+	var assets []ExtractedAsset
+	for _, f := range zr.File {
+		if !strings.HasPrefix(f.Name, "word/media/") {
+			continue
+		}
+		mimeType := mime.TypeByExtension(filepath.Ext(f.Name))
+		if !isMarkdownAssetMime(mimeType, f.Name) {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return nil, errs.Wrap(errs.CodeInvalidInput, "DOCX 图片读取失败", err)
+		}
+		data, err := io.ReadAll(rc)
+		closeErr := rc.Close()
+		if err != nil {
+			return nil, errs.Wrap(errs.CodeInvalidInput, "DOCX 图片读取失败", err)
+		}
+		if closeErr != nil {
+			return nil, errs.Wrap(errs.CodeInvalidInput, "DOCX 图片关闭失败", closeErr)
+		}
+		if mimeType == "" {
+			mimeType = "application/octet-stream"
+		}
+		assets = append(assets, ExtractedAsset{
+			Path:     filepath.ToSlash(f.Name),
+			Filename: filepath.Base(f.Name),
+			MimeType: mimeType,
+			Data:     data,
+		})
+	}
+	sort.Slice(assets, func(i, j int) bool {
+		return assets[i].Path < assets[j].Path
+	})
+	return assets, nil
 }
 
 // extractPPTX 从 PPTX 文件中提取文本
@@ -293,6 +403,10 @@ func openZipFromBase64(base64Data string) (*zip.Reader, error) {
 		return nil, fmt.Errorf("base64 解码失败: %w", err)
 	}
 
+	return openZipFromBytes(data)
+}
+
+func openZipFromBytes(data []byte) (*zip.Reader, error) {
 	reader := bytes.NewReader(data)
 	zr, err := zip.NewReader(reader, int64(len(data)))
 	if err != nil {

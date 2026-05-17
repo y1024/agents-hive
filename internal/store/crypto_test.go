@@ -27,7 +27,7 @@ func TestEncryptDecrypt_WithKey(t *testing.T) {
 
 	tests := []string{
 		"simple-token",
-		"token:with:colons",                     // SEC-010 核心场景：含冒号的 OAuth token
+		"token:with:colons",                      // SEC-010 核心场景：含冒号的 OAuth token
 		"https://example.com/oauth?code=abc:def", // URL 格式 token（含多个冒号）
 		"",                                       // 空字符串
 		"Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.payload.signature",

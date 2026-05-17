@@ -24,6 +24,7 @@ var publicPaths = []string{
 	"/api/v1/auth/callback",
 	"/api/v1/auth/refresh",
 	"/api/v1/health",
+	"/api/v1/assets/proxy",
 	"/api/v1/channel/",
 	"/api/v1/ws", // WebSocket: 浏览器无法设置 Authorization header，WS handler 自己验证 token
 	"/assets/",

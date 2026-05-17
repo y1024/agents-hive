@@ -24,10 +24,10 @@ import (
 // 为什么不复用 ingress.MinimalRunner：MinimalRunner 硬写 ErrPlannerSchemaInvalid，
 // 不能 parametrize success path——测试要锁住 PathSpec/PathDual 必须能注入非 nil Context。
 type fakeSpecRunner struct {
-	ctx    *specdriven.Context
-	stats  ingress.RunStats
-	err    error
-	calls  int // 蓝军反锁：断言真被调了，防止 applySpecDrivenIntake 绕过 runner
+	ctx   *specdriven.Context
+	stats ingress.RunStats
+	err   error
+	calls int // 蓝军反锁：断言真被调了，防止 applySpecDrivenIntake 绕过 runner
 }
 
 func (f *fakeSpecRunner) Run(_ context.Context, _ string, _ string) (*specdriven.Context, ingress.RunStats, error) {

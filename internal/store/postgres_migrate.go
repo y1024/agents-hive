@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 	updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 	last_accessed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 	selected_model   TEXT NOT NULL DEFAULT '',
+	kb_domain_id     TEXT NOT NULL DEFAULT '',
 	message_count    INTEGER NOT NULL DEFAULT 0,
 	total_tokens     INTEGER NOT NULL DEFAULT 0,
 	profile_name     TEXT NOT NULL DEFAULT '',
@@ -58,6 +59,28 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);
 CREATE INDEX IF NOT EXISTS idx_messages_role ON messages(session_id, role);
+
+-- 统一对象资产元数据表。对象体在 asset provider 中，PG 仅保存 owner-scoped metadata。
+CREATE TABLE IF NOT EXISTS assets (
+	id           TEXT PRIMARY KEY,
+	key          TEXT NOT NULL,
+	namespace    TEXT NOT NULL,
+	content_hash TEXT NOT NULL,
+	mime_type    TEXT NOT NULL,
+	filename     TEXT NOT NULL DEFAULT '',
+	size_bytes   BIGINT NOT NULL DEFAULT 0,
+	owner_scope  TEXT NOT NULL DEFAULT 'system',
+	owner_id     TEXT NOT NULL DEFAULT '',
+	tags         JSONB NOT NULL DEFAULT '{}'::jsonb,
+	created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	UNIQUE (namespace, content_hash, owner_scope, owner_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_assets_key ON assets(key);
+CREATE INDEX IF NOT EXISTS idx_assets_namespace ON assets(namespace);
+CREATE INDEX IF NOT EXISTS idx_assets_content_hash ON assets(namespace, content_hash);
+CREATE INDEX IF NOT EXISTS idx_assets_owner ON assets(owner_scope, owner_id);
+CREATE INDEX IF NOT EXISTS idx_assets_tags_gin ON assets USING GIN(tags);
 
 -- 权限授予记录表
 CREATE TABLE IF NOT EXISTS permission_grants (
@@ -739,6 +762,84 @@ CREATE TABLE IF NOT EXISTS qualityworkbench_weekly_reports (
 );
 CREATE INDEX IF NOT EXISTS idx_qualityworkbench_weekly_reports_week_start
 	ON qualityworkbench_weekly_reports(week_start DESC);
+
+-- 客服试点：客服 session、转人工状态、webhook subscription 与至少一次投递 outbox。
+CREATE TABLE IF NOT EXISTS cs_sessions (
+	id                TEXT PRIMARY KEY,
+	domain_id         TEXT NOT NULL DEFAULT 'customer_service',
+	owner_scope       TEXT NOT NULL DEFAULT 'user',
+	owner_id          TEXT NOT NULL DEFAULT '',
+	state             TEXT NOT NULL DEFAULT 'ai_handling',
+	external_user_ref TEXT NOT NULL DEFAULT '',
+	metadata          JSONB NOT NULL DEFAULT '{}',
+	created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	resolved_at       TIMESTAMPTZ,
+	CONSTRAINT cs_sessions_state_check CHECK (state IN ('initial','ai_handling','escalate_pending','human_handling','resolved'))
+);
+CREATE INDEX IF NOT EXISTS idx_cs_sessions_owner_state
+	ON cs_sessions(domain_id, owner_scope, owner_id, state, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS cs_escalations (
+	id           TEXT PRIMARY KEY,
+	domain_id    TEXT NOT NULL DEFAULT 'customer_service',
+	owner_scope  TEXT NOT NULL DEFAULT 'user',
+	owner_id     TEXT NOT NULL DEFAULT '',
+	session_id   TEXT NOT NULL DEFAULT '',
+	subject      TEXT NOT NULL DEFAULT '',
+	summary      TEXT NOT NULL DEFAULT '',
+	priority     TEXT NOT NULL DEFAULT '',
+	status       TEXT NOT NULL DEFAULT 'open',
+	metadata     JSONB NOT NULL DEFAULT '{}',
+	created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	canceled_at  TIMESTAMPTZ,
+	CONSTRAINT cs_escalations_status_check CHECK (status IN ('open','queued','sent','failed','canceled'))
+);
+CREATE INDEX IF NOT EXISTS idx_cs_escalations_owner_status
+	ON cs_escalations(domain_id, owner_scope, owner_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_cs_escalations_session
+	ON cs_escalations(session_id, updated_at DESC) WHERE session_id != '';
+
+CREATE TABLE IF NOT EXISTS cs_webhook_subscriptions (
+	id           TEXT PRIMARY KEY,
+	domain_id    TEXT NOT NULL DEFAULT 'customer_service',
+	owner_scope  TEXT NOT NULL DEFAULT 'user',
+	owner_id     TEXT NOT NULL DEFAULT '',
+	name         TEXT NOT NULL DEFAULT '',
+	url          TEXT NOT NULL,
+	secret       TEXT NOT NULL DEFAULT '',
+	events       JSONB NOT NULL DEFAULT '[]',
+	enabled      BOOLEAN NOT NULL DEFAULT TRUE,
+	metadata     JSONB NOT NULL DEFAULT '{}',
+	created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_cs_webhook_subscriptions_owner
+	ON cs_webhook_subscriptions(domain_id, owner_scope, owner_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS cs_webhook_outbox (
+	id              TEXT PRIMARY KEY,
+	domain_id       TEXT NOT NULL DEFAULT 'customer_service',
+	owner_scope     TEXT NOT NULL DEFAULT 'user',
+	owner_id        TEXT NOT NULL DEFAULT '',
+	escalation_id   TEXT NOT NULL REFERENCES cs_escalations(id) ON DELETE CASCADE,
+	subscription_id TEXT NOT NULL REFERENCES cs_webhook_subscriptions(id) ON DELETE CASCADE,
+	event_type      TEXT NOT NULL,
+	payload         JSONB NOT NULL DEFAULT '{}',
+	status          TEXT NOT NULL DEFAULT 'queued',
+	attempts        INTEGER NOT NULL DEFAULT 0,
+	max_attempts    INTEGER NOT NULL DEFAULT 3,
+	next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	last_error      TEXT NOT NULL DEFAULT '',
+	created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	CONSTRAINT cs_webhook_outbox_status_check CHECK (status IN ('queued','sent','failed'))
+);
+CREATE INDEX IF NOT EXISTS idx_cs_webhook_outbox_due
+	ON cs_webhook_outbox(status, next_attempt_at ASC, created_at ASC) WHERE status = 'queued';
+CREATE INDEX IF NOT EXISTS idx_cs_webhook_outbox_dlq_owner
+	ON cs_webhook_outbox(domain_id, owner_scope, owner_id, updated_at DESC) WHERE status = 'failed';
 -- 认证 Provider 配置表
 CREATE TABLE IF NOT EXISTS auth_providers (
     name          TEXT PRIMARY KEY,
@@ -1203,6 +1304,7 @@ const pgAddUserColumns = `
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS is_starred BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS selected_model TEXT NOT NULL DEFAULT '';
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS kb_domain_id TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id) WHERE user_id != '';
 CREATE INDEX IF NOT EXISTS idx_sessions_starred ON sessions(user_id, is_starred) WHERE is_starred = TRUE;
 
@@ -1461,6 +1563,161 @@ CREATE INDEX IF NOT EXISTS idx_hive_session_todos_trace
     ON hive_session_todos(trace_id);
 `
 
+const pgMigrateKBTables = `
+CREATE TABLE IF NOT EXISTS kb_namespaces (
+	id                       TEXT PRIMARY KEY,
+	name                     TEXT NOT NULL,
+	domain_id                TEXT NOT NULL DEFAULT '',
+	owner_scope              TEXT NOT NULL DEFAULT 'user',
+	owner_id                 TEXT NOT NULL DEFAULT '',
+	index_strategy           TEXT NOT NULL DEFAULT 'markdown_tree',
+	thinning_enabled         BOOLEAN NOT NULL DEFAULT FALSE,
+	thinning_token_threshold INTEGER NOT NULL DEFAULT 0,
+	summary_token_threshold  INTEGER NOT NULL DEFAULT 0,
+	summary_model            TEXT NOT NULL DEFAULT '',
+	created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_kb_namespaces_owner_domain_name
+	ON kb_namespaces(owner_scope, owner_id, domain_id, name);
+CREATE INDEX IF NOT EXISTS idx_kb_namespaces_domain_owner
+	ON kb_namespaces(domain_id, owner_scope, owner_id);
+
+CREATE TABLE IF NOT EXISTS kb_documents (
+	id            TEXT PRIMARY KEY,
+	namespace_id  TEXT NOT NULL REFERENCES kb_namespaces(id) ON DELETE CASCADE,
+	domain_id     TEXT NOT NULL DEFAULT '',
+	owner_scope   TEXT NOT NULL DEFAULT 'user',
+	owner_id      TEXT NOT NULL DEFAULT '',
+	source_uri    TEXT NOT NULL DEFAULT '',
+	title         TEXT NOT NULL DEFAULT '',
+	description   TEXT NOT NULL DEFAULT '',
+	content_hash  TEXT NOT NULL DEFAULT '',
+	version       TEXT NOT NULL DEFAULT '',
+	status        TEXT NOT NULL DEFAULT 'draft',
+	effective_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	expires_at    TIMESTAMPTZ,
+	created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_kb_documents_scope_status
+	ON kb_documents(domain_id, owner_scope, owner_id, namespace_id, status, effective_at DESC);
+CREATE INDEX IF NOT EXISTS idx_kb_documents_namespace_updated
+	ON kb_documents(namespace_id, updated_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_kb_documents_namespace_hash_version
+	ON kb_documents(namespace_id, content_hash, version)
+	WHERE content_hash != '' AND version != '';
+
+CREATE TABLE IF NOT EXISTS kb_tree_nodes (
+	id             TEXT NOT NULL,
+	document_id    TEXT NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
+	namespace_id   TEXT NOT NULL REFERENCES kb_namespaces(id) ON DELETE CASCADE,
+	domain_id      TEXT NOT NULL DEFAULT '',
+	owner_scope    TEXT NOT NULL DEFAULT 'user',
+	owner_id       TEXT NOT NULL DEFAULT '',
+	parent_node_id TEXT,
+	node_path      TEXT NOT NULL DEFAULT '',
+	title          TEXT NOT NULL DEFAULT '',
+	level          INTEGER NOT NULL DEFAULT 1,
+	text           TEXT NOT NULL DEFAULT '',
+	token_count    INTEGER NOT NULL DEFAULT 0,
+	summary        TEXT NOT NULL DEFAULT '',
+	prefix_summary TEXT NOT NULL DEFAULT '',
+	start_line     INTEGER NOT NULL DEFAULT 0,
+	end_line       INTEGER NOT NULL DEFAULT 0,
+	start_page     INTEGER NOT NULL DEFAULT 0,
+	end_page       INTEGER NOT NULL DEFAULT 0,
+	content_hash   TEXT NOT NULL DEFAULT '',
+	created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	PRIMARY KEY (document_id, id)
+);
+ALTER TABLE kb_tree_nodes ADD COLUMN IF NOT EXISTS start_page INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE kb_tree_nodes ADD COLUMN IF NOT EXISTS end_page INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_kb_tree_nodes_document_path
+	ON kb_tree_nodes(document_id, node_path);
+CREATE INDEX IF NOT EXISTS idx_kb_tree_nodes_scope
+	ON kb_tree_nodes(domain_id, owner_scope, owner_id, namespace_id, document_id);
+CREATE INDEX IF NOT EXISTS idx_kb_tree_nodes_document_pages
+	ON kb_tree_nodes(document_id, start_page, end_page);
+
+CREATE TABLE IF NOT EXISTS kb_bindings (
+	id             TEXT PRIMARY KEY,
+	domain_id      TEXT NOT NULL DEFAULT '',
+	owner_scope    TEXT NOT NULL DEFAULT 'user',
+	owner_id       TEXT NOT NULL DEFAULT '',
+	namespace_id   TEXT NOT NULL REFERENCES kb_namespaces(id) ON DELETE CASCADE,
+	binding_type   TEXT NOT NULL,
+	binding_target TEXT NOT NULL DEFAULT '',
+	enabled        BOOLEAN NOT NULL DEFAULT TRUE,
+	effective_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	expires_at     TIMESTAMPTZ,
+	created_by     TEXT NOT NULL DEFAULT '',
+	created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_kb_bindings_resolve
+	ON kb_bindings(domain_id, owner_scope, owner_id, binding_type, binding_target, enabled, effective_at, expires_at);
+CREATE INDEX IF NOT EXISTS idx_kb_bindings_namespace
+	ON kb_bindings(namespace_id, enabled);
+
+CREATE TABLE IF NOT EXISTS kb_evidence_events (
+	id               TEXT PRIMARY KEY,
+	session_id       TEXT NOT NULL DEFAULT '',
+	turn_id          TEXT NOT NULL DEFAULT '',
+	trace_id         TEXT NOT NULL DEFAULT '',
+	domain_id        TEXT NOT NULL DEFAULT '',
+	namespace_id     TEXT NOT NULL,
+	document_id      TEXT NOT NULL,
+	document_version TEXT NOT NULL DEFAULT '',
+	node_id          TEXT NOT NULL DEFAULT '',
+	node_path        TEXT NOT NULL DEFAULT '',
+	start_page       INTEGER NOT NULL DEFAULT 0,
+	end_page         INTEGER NOT NULL DEFAULT 0,
+	owner_scope      TEXT NOT NULL DEFAULT 'user',
+	owner_id         TEXT NOT NULL DEFAULT '',
+	evidence_token   TEXT NOT NULL DEFAULT '',
+	citation_text    TEXT NOT NULL DEFAULT '',
+	verified         BOOLEAN NOT NULL DEFAULT FALSE,
+	created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE kb_evidence_events ADD COLUMN IF NOT EXISTS start_page INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE kb_evidence_events ADD COLUMN IF NOT EXISTS end_page INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_kb_evidence_events_session_turn
+	ON kb_evidence_events(session_id, turn_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_kb_evidence_events_trace
+	ON kb_evidence_events(trace_id, created_at DESC)
+	WHERE trace_id != '';
+CREATE INDEX IF NOT EXISTS idx_kb_evidence_events_doc_node
+	ON kb_evidence_events(document_id, node_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS kb_node_assets (
+	id           TEXT PRIMARY KEY,
+	owner_scope  TEXT NOT NULL DEFAULT 'user',
+	owner_id     TEXT NOT NULL DEFAULT '',
+	domain_id    TEXT NOT NULL DEFAULT '',
+	namespace_id TEXT NOT NULL REFERENCES kb_namespaces(id) ON DELETE CASCADE,
+	document_id  TEXT NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
+	node_id      TEXT NOT NULL DEFAULT '',
+	line         INTEGER NOT NULL DEFAULT 0,
+	page         INTEGER NOT NULL DEFAULT 0,
+	asset_uri    TEXT NOT NULL DEFAULT '',
+	content_hash TEXT NOT NULL DEFAULT '',
+	mime_type    TEXT NOT NULL DEFAULT '',
+	alt_text     TEXT NOT NULL DEFAULT '',
+	caption      TEXT NOT NULL DEFAULT '',
+	created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE kb_node_assets ADD COLUMN IF NOT EXISTS line INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE kb_node_assets ADD COLUMN IF NOT EXISTS page INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_kb_node_assets_node
+	ON kb_node_assets(owner_scope, owner_id, domain_id, namespace_id, document_id, node_id);
+CREATE INDEX IF NOT EXISTS idx_kb_node_assets_page
+	ON kb_node_assets(document_id, node_id, page)
+	WHERE page > 0;
+CREATE INDEX IF NOT EXISTS idx_kb_node_assets_asset_uri
+	ON kb_node_assets(asset_uri);
+`
+
 func pgBackfillMemoryColumns(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger, batchSize int) error {
 	if batchSize <= 0 {
 		batchSize = 500
@@ -1560,6 +1817,10 @@ func pgMigrate(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) erro
 	// Agent Plan Runtime：session-scoped todo snapshot 表
 	if _, err := pool.Exec(ctx, pgAddSessionTodos); err != nil {
 		return errs.Wrap(errs.CodeStoreError, "PostgreSQL session todo 表迁移失败", err)
+	}
+
+	if _, err := pool.Exec(ctx, pgMigrateKBTables); err != nil {
+		return errs.Wrap(errs.CodeStoreError, "PostgreSQL KB 表迁移失败", err)
 	}
 
 	// Phase 6: user_session_prefs 表（per-user 收藏偏好）

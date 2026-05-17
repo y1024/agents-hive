@@ -113,11 +113,29 @@ func TestBuildDashboardSnapshotAggregatesWindowedCounts(t *testing.T) {
 	assert.Equal(t, 1, snapshot.CandidateStatusCounts[agentquality.CandidatePromotedVerified])
 	assert.Equal(t, 1, snapshot.FailureTypeCounts[agentquality.FailureTool])
 	assert.Equal(t, 1, snapshot.FailureTypeCounts[agentquality.FailureRuntime])
+	assert.Empty(t, snapshot.KBFailureTypeCounts)
 	assert.Equal(t, 1, snapshot.VerifyResultCounts["passed"])
 	assert.Equal(t, 1, snapshot.VerifyResultCounts["unknown"])
 	assert.Equal(t, map[string]int{"sales": 2}, snapshot.DomainCounts)
 	assert.Equal(t, map[string]int{"master": 1, "subagent": 1}, snapshot.SourceKindCounts)
 	assert.Equal(t, map[string]int{"react_loop": 1, "tool_runner": 1}, snapshot.SourceNameCounts)
+}
+
+func TestBuildDashboardSnapshotAggregatesKBFailureType(t *testing.T) {
+	now := time.Date(2026, 4, 8, 12, 0, 0, 0, time.UTC)
+	candidate := qualityWorkbenchCandidate("candidate-kb", agentquality.CandidateNew, agentquality.FailureKBEvidence, "", now.Add(-time.Hour))
+	candidate.SourceEvent.Name = agentquality.EventKBEvidence
+	candidate.SourceEvent.FailureType = agentquality.FailureKBEvidence
+	candidate.SourceEvent.Attributes = map[string]any{"kb_failure_type": agentquality.KBFailureCitationMissing}
+
+	snapshot := BuildDashboardSnapshot(DashboardInput{
+		Now:        now,
+		Window:     7 * 24 * time.Hour,
+		Candidates: []agentquality.CandidateRecord{candidate},
+	})
+
+	assert.Equal(t, 1, snapshot.FailureTypeCounts[agentquality.FailureKBEvidence])
+	assert.Equal(t, map[string]int{agentquality.KBFailureCitationMissing: 1}, snapshot.KBFailureTypeCounts)
 }
 
 func TestBuildDashboardSeriesBucketsByDay(t *testing.T) {

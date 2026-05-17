@@ -32,8 +32,9 @@ export class ApiClient {
 
     try {
       const token = localStorage.getItem('auth_token');
+      const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData;
       const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
+        ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
         ...(options.headers as Record<string, string>),
       };
       if (token) {
@@ -109,6 +110,18 @@ export class ApiClient {
   /** POST without timeout for LLM responses and other long-running operations */
   postLong<T>(path: string, body?: unknown): Promise<T> {
     return this.post<T>(path, body, { timeout: NO_TIMEOUT });
+  }
+
+  postForm<T>(path: string, body: FormData, opts?: { timeout?: number }): Promise<T> {
+    return this.request<T>(path, {
+      method: 'POST',
+      body,
+      timeout: opts?.timeout,
+    });
+  }
+
+  postFormLong<T>(path: string, body: FormData): Promise<T> {
+    return this.postForm<T>(path, body, { timeout: NO_TIMEOUT });
   }
 
   put<T>(path: string, body: unknown): Promise<T> {

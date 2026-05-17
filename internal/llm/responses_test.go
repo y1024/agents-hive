@@ -104,6 +104,30 @@ func TestBuildResponsesInputFromToolMessages_MixedMessages(t *testing.T) {
 	}
 }
 
+func TestBuildResponsesInputFromToolMessagesUsesProviderAliases(t *testing.T) {
+	aliases := toolNameAliasesForTools([]mcphost.ToolDefinition{
+		{Name: "kb.section.text", InputSchema: []byte(`{"type":"object"}`)},
+	})
+	items := buildResponsesInputFromToolMessagesWithAliases([]MessageWithTools{
+		{
+			Role: "assistant",
+			ToolCalls: []ToolCall{
+				{ID: "call_1", Name: "kb.section.text", Arguments: []byte(`{"doc_id":"doc-1"}`)},
+			},
+		},
+	}, aliases)
+
+	if len(items) != 1 {
+		t.Fatalf("期望 1 个 item，得到 %d", len(items))
+	}
+	if items[0].OfFunctionCall == nil {
+		t.Fatal("期望 OfFunctionCall 不为 nil")
+	}
+	if items[0].OfFunctionCall.Name != "kb_section_text" {
+		t.Fatalf("function_call name = %q, want kb_section_text", items[0].OfFunctionCall.Name)
+	}
+}
+
 func TestApplyResponsesRequestOptimizations(t *testing.T) {
 	params := responses.ResponseNewParams{}
 	applyResponsesRequestOptimizations(&params, responsesRequestOptions{

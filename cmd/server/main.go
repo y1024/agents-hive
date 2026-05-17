@@ -163,6 +163,16 @@ func main() {
 	if sc.MemStore != nil {
 		server.SetMemoryStore(sc.MemStore)
 	}
+	if sc.AssetService != nil {
+		server.SetAssetService(sc.AssetService)
+		server.SetAssetAccessResolver(sc.AssetAccessResolver)
+	}
+	if sc.KBService != nil {
+		server.SetKBService(sc.KBService)
+	}
+	if sc.CustomerService != nil {
+		server.SetCustomerService(sc.CustomerService)
+	}
 
 	go func() {
 		if err := server.Start(); err != nil && err != http.ErrServerClosed {

@@ -445,7 +445,12 @@ func (m *PermissionManager) promptPermission(ctx context.Context, toolName strin
 		if resp.Remember {
 			m.GrantSession(toolName, rememberPermissionPattern(toolName, inputValue, inputGrantPattern, input), PermissionDeny)
 		}
-		return errs.New(errs.CodePermissionDenied, fmt.Sprintf("用户拒绝工具 %q", toolName))
+		return errs.New(errs.CodePermissionDenied, toolruntime.RecoverableToolCallErrorContentWithHint(toolruntime.RecoverableToolCallError{
+			Kind:         "user_denied_tool_approval",
+			Detail:       fmt.Sprintf("用户没有批准工具 %q，本次调用未执行。请不要重复同一调用；应向用户说明未执行，或根据用户新指令选择替代工具/参数。", toolName),
+			RepairAction: "ask_user_or_choose_alternative",
+			ToolName:     toolName,
+		}))
 	}
 
 	if resp.Remember {

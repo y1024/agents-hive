@@ -52,6 +52,7 @@ type SpecChangeEvent struct {
 //     语义即冲突。skill_store 那个 SELECT→INSERT 中间存在 TOCTOU 窗口，
 //     两 client 都能读到 revision=3 然后双写（INSERT ON CONFLICT 会都成功）。
 //   - AppendEvent 在同一事务里 SELECT MAX(sequence)+1，避免事件漏号。
+//
 // CASConflictObserver 在 UpsertWithCAS 每次冲突时被回调。scenario 取自
 // specdriven.CASConflictScenario 白名单（duplicate_create / ghost_id / stale_revision），
 // 供 Master 把计数打入 specdriven.cas_conflict_total{scenario} metric。
@@ -409,11 +410,11 @@ func (s *SpecChangeStore) ListByUser(ctx context.Context, userID string, page, s
 // 这个集合是 append-only——新增状态只能加、绝不能删。任何试图把 "in_progress"
 // 从这个表里拿掉的 PR 必须被 review 拦下。
 var RetentionProtectedStatuses = []string{
-	"draft",        // 刚 propose 还没开始实现
-	"planning",     // planner 正在规划
-	"active",       // session 正在基于它做事
-	"in_progress",  // 与 active 语义等价，兼容历史数据
-	"blocked",      // 阻塞中的 change 是问题信号，绝不静默清理
+	"draft",       // 刚 propose 还没开始实现
+	"planning",    // planner 正在规划
+	"active",      // session 正在基于它做事
+	"in_progress", // 与 active 语义等价，兼容历史数据
+	"blocked",     // 阻塞中的 change 是问题信号，绝不静默清理
 }
 
 // RetentionSweep 删除 cutoff 之前**且状态不在保护名单**的 change + 关联 events。

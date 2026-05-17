@@ -127,11 +127,14 @@ func modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntentWithOptio
 	if opts.FastPath && opts.MaxModelVisibleTools > 0 {
 		obs.MaxVisibleTools = opts.MaxModelVisibleTools
 	}
-	runtimeAllowedInputs := mergeAllowedToolInputsWithMixedDefaults(obs.RouteDecision.AllowedToolInputs, out, intent)
-	obs.Entries = buildAdmissionEntries(session, catalog, out, obs.RouteDecision, runtimeAllowedInputs)
+	routeDecision := buildVisibleRouteDecision(session, out, skillMetas, intent, userID)
+	obs.RouteDecision = routeDecision
+	runtimeAllowedTools := allowedToolsForRuntime(session, routeDecision, out)
+	runtimeAllowedInputs := mergeAllowedToolInputsForRuntime(routeDecision.AllowedToolInputs, out, intent, stringSet(runtimeAllowedTools))
+	obs.Entries = buildAdmissionEntries(session, catalog, out, routeDecision, obs.CandidateProfiles, intent, runtimeAllowedInputs)
 	if session != nil {
-		session.SetRouteDecision(obs.RouteDecision)
-		session.SetAllowedTools(allowedToolsForRuntime(obs.RouteDecision, out))
+		session.SetRouteDecision(routeDecision)
+		session.SetAllowedTools(runtimeAllowedTools)
 		session.SetAllowedToolInputs(runtimeAllowedInputs)
 	}
 	return out, obs
@@ -513,7 +516,7 @@ func appendDiscoveredToolRecalls(recalls []tools.ToolRecallHit, catalog []mcphos
 	return recalls
 }
 
-func buildAdmissionEntries(session *SessionState, catalog []mcphost.ToolDefinition, visible []mcphost.ToolDefinition, decision router.RouteDecision, runtimeAllowedInputs map[string]map[string]string) map[string]admissionEntry {
+func buildAdmissionEntries(session *SessionState, catalog []mcphost.ToolDefinition, visible []mcphost.ToolDefinition, decision router.RouteDecision, candidateProfiles []router.ToolProfile, intent router.IntentFrame, runtimeAllowedInputs map[string]map[string]string) map[string]admissionEntry {
 	entries := make(map[string]admissionEntry, len(catalog))
 	visibleSet := make(map[string]bool, len(visible))
 	for _, tool := range visible {
@@ -524,6 +527,11 @@ func buildAdmissionEntries(session *SessionState, catalog []mcphost.ToolDefiniti
 	}
 	callableSet := stringSet(decision.AllowedTools)
 	blockReasons := routeBlockReasons(decision.BlockedTools)
+	for name, reason := range routeBlockReasons(router.BuildRouteDecisionWithBlocks(normalizeRouteIntent(intent), candidateProfiles, "exec", sessionReflectionBlocks(session)).BlockedTools) {
+		if blockReasons[name] == "" {
+			blockReasons[name] = reason
+		}
+	}
 
 	for _, tool := range catalog {
 		name := strings.TrimSpace(tool.Name)
@@ -562,14 +570,21 @@ func buildAdmissionEntries(session *SessionState, catalog []mcphost.ToolDefiniti
 }
 
 func mergeAllowedToolInputsWithMixedReadDefaults(inputs map[string]map[string]string, visible []mcphost.ToolDefinition) map[string]map[string]string {
-	return mergeAllowedToolInputsWithMixedDefaults(inputs, visible, router.IntentFrame{Kind: router.IntentRead})
+	return mergeAllowedToolInputsWithMixedDefaultsForAllowed(inputs, visible, router.IntentFrame{Kind: router.IntentRead}, nil)
 }
 
 func mergeAllowedToolInputsWithMixedDefaults(inputs map[string]map[string]string, visible []mcphost.ToolDefinition, intent router.IntentFrame) map[string]map[string]string {
+	return mergeAllowedToolInputsWithMixedDefaultsForAllowed(inputs, visible, intent, nil)
+}
+
+func mergeAllowedToolInputsWithMixedDefaultsForAllowed(inputs map[string]map[string]string, visible []mcphost.ToolDefinition, intent router.IntentFrame, allowed map[string]bool) map[string]map[string]string {
 	out := collections.CloneNonEmptyNestedStringMap(inputs)
 	for _, tool := range visible {
 		name := strings.TrimSpace(tool.Name)
 		if name == "" {
+			continue
+		}
+		if len(allowed) > 0 && !allowed[name] {
 			continue
 		}
 		if len(out[name]) > 0 {
@@ -593,24 +608,33 @@ func mergeAllowedToolInputsWithMixedDefaults(inputs map[string]map[string]string
 	return out
 }
 
-func allowedToolsForRuntime(decision router.RouteDecision, visible []mcphost.ToolDefinition) []string {
+func mergeAllowedToolInputsForRuntime(inputs map[string]map[string]string, visible []mcphost.ToolDefinition, intent router.IntentFrame, allowed map[string]bool) map[string]map[string]string {
+	if len(allowed) == 0 {
+		return nil
+	}
+	filtered := make(map[string]map[string]string, len(inputs))
+	for name, constraints := range inputs {
+		name = strings.TrimSpace(name)
+		if name == "" || !allowed[name] || len(constraints) == 0 {
+			continue
+		}
+		filtered[name] = constraints
+	}
+	return mergeAllowedToolInputsWithMixedDefaultsForAllowed(filtered, visible, intent, allowed)
+}
+
+func allowedToolsForRuntime(session *SessionState, decision router.RouteDecision, visible []mcphost.ToolDefinition) []string {
 	allowed := stringSet(decision.AllowedTools)
 	for _, tool := range visible {
 		name := strings.TrimSpace(tool.Name)
 		if name == "" {
 			continue
 		}
-		if router.IsHostToolInSet(router.HostToolSetDefaultVisible, name) {
+		if isRuntimeDiscoveryEntrypoint(name) || isRuntimeListEntrypoint(name) {
 			allowed[name] = true
 			continue
 		}
-		if router.IsHostToolInSet(router.HostToolSetPlanControl, name) || router.IsHostToolInSet(router.HostToolSetPlanAllowed, name) {
-			allowed[name] = true
-			continue
-		}
-		admission := toolruntime.Admit(toolruntime.DescriptorFromDefinition(tool), router.ToolPolicyContext{ForRoute: true})
-		policy := admission.Policy
-		if policy.Action == router.ToolPolicyAllow && policy.CallableNow {
+		if session != nil && session.PlanMode && (router.IsHostToolInSet(router.HostToolSetPlanControl, name) || router.IsHostToolInSet(router.HostToolSetPlanAllowed, name)) {
 			allowed[name] = true
 		}
 	}
@@ -623,6 +647,54 @@ func allowedToolsForRuntime(decision router.RouteDecision, visible []mcphost.Too
 	}
 	sort.Strings(out)
 	return out
+}
+
+func isRuntimeDiscoveryEntrypoint(name string) bool {
+	return strings.TrimSpace(name) == "tool_search"
+}
+
+func isRuntimeListEntrypoint(name string) bool {
+	return strings.TrimSpace(name) == "skill"
+}
+
+func buildVisibleRouteDecision(session *SessionState, visible []mcphost.ToolDefinition, skillMetas []skills.SkillMetadata, intent router.IntentFrame, userID string) router.RouteDecision {
+	return router.BuildRouteDecisionWithOptions(normalizeRouteIntent(intent), visibleRouteProfiles(visible, skillMetas), router.RouteDecisionOptions{
+		ReflectionMode:   "exec",
+		ReflectionBlocks: sessionReflectionBlocks(session),
+		UserID:           userID,
+	})
+}
+
+func visibleRouteProfiles(visible []mcphost.ToolDefinition, skillMetas []skills.SkillMetadata) []router.ToolProfile {
+	profiles := make([]router.ToolProfile, 0, len(visible)+len(skillMetas))
+	seen := make(map[string]bool, len(visible)+len(skillMetas))
+	for _, tool := range visible {
+		name := strings.TrimSpace(tool.Name)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		descriptor := toolruntime.DescriptorFromDefinition(tool)
+		profile := descriptor.Profile
+		if hint := profileHintForVisibilityTool(name); hint.Kind != "" {
+			profile = router.InferToolProfile(tool, hint)
+		}
+		profiles = append(profiles, profile)
+	}
+	for _, meta := range skillMetas {
+		name := strings.TrimSpace(meta.Name)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		profiles = append(profiles, router.InferSkillWorkflowProfileFromMetadata(router.SkillWorkflowMetadata{
+			Name:        name,
+			Description: meta.Description,
+			Scope:       string(meta.Scope),
+			UserID:      meta.UserID,
+		}))
+	}
+	return profiles
 }
 
 func defaultRuntimeAllowedInputsForTool(name string, routed map[string]string, callable bool) map[string]string {

@@ -93,16 +93,16 @@ func TestCandidatePromotesToGoldenCaseDraftWithRedaction(t *testing.T) {
 
 func TestDuplicateCandidateMergesIntoExistingCaseDraft(t *testing.T) {
 	existingCase := Case{
-		ID:          "golden_abc123",
-		Name:        "回归用例 abc123",
-		Route:       "customer_service",
-		Input:       "用户查询知识库",
+		ID:             "golden_abc123",
+		Name:           "回归用例 abc123",
+		Route:          "customer_service",
+		Input:          "用户查询知识库",
 		ExpectedStatus: StatusFail,
-		FailureType: FailureTool,
-		Risk:        "safe",
-		State:       string(GoldenCaseStateDraft),
-		DomainID:    "customer_service",
-		CreatedFrom: "candidate_abc123",
+		FailureType:    FailureTool,
+		Risk:           "safe",
+		State:          string(GoldenCaseStateDraft),
+		DomainID:       "customer_service",
+		CreatedFrom:    "candidate_abc123",
 	}
 
 	newCandidate := CandidateRecord{
@@ -263,15 +263,15 @@ func TestApprovalRejectionCanCreateRegressionCandidate(t *testing.T) {
 func TestActiveGoldenCaseRequiresDomainAndAssertions(t *testing.T) {
 	// Valid active golden case
 	validCase := Case{
-		ID:             "golden_test_001",
-		Name:           "Active golden case",
-		Route:          "customer_service",
-		Input:          "用户查询",
-		ExpectedStatus: StatusFail,
-		FailureType:    FailureTool,
-		Risk:           "safe",
-		State:          string(GoldenCaseStateActive),
-		DomainID:       "customer_service",
+		ID:               "golden_test_001",
+		Name:             "Active golden case",
+		Route:            "customer_service",
+		Input:            "用户查询",
+		ExpectedStatus:   StatusFail,
+		FailureType:      FailureTool,
+		Risk:             "safe",
+		State:            string(GoldenCaseStateActive),
+		DomainID:         "customer_service",
 		EvidenceLevelMin: string(EvidenceRealRunner),
 		Assertions: []CaseAssertion{
 			{Type: AssertionToolCalled, Target: "search_kb", Message: "Must call search_kb"},

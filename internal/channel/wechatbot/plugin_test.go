@@ -19,30 +19,35 @@ import (
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 
+	"github.com/chef-guo/agents-hive/internal/auth"
 	"github.com/chef-guo/agents-hive/internal/channel"
+	"github.com/chef-guo/agents-hive/internal/imctx"
 	"github.com/chef-guo/agents-hive/internal/master"
 	"github.com/chef-guo/agents-hive/internal/observability"
 	"github.com/chef-guo/agents-hive/internal/store"
 )
 
 type fakeBackend struct {
-	loginErr error
-	sendErr  error
-	runErr   error
-	panicRun bool
-	sentTo   string
-	sentText string
-	replyTo  string
-	replyTok string
-	replyTxt string
-	replies  []string
-	replyErr error
-	typingTo string
-	stopTo   string
-	handler  func(*SDKMessage)
-	onCount  int
-	runCh    chan struct{}
-	runCount int32
+	loginErr    error
+	sendErr     error
+	runErr      error
+	panicRun    bool
+	sentTo      string
+	sentText    string
+	replyTo     string
+	replyTok    string
+	replyTxt    string
+	replies     []string
+	replyErr    error
+	typingTo    string
+	stopTo      string
+	downloaded  *DownloadedMedia
+	downloadMsg *SDKMessage
+	downloadErr error
+	handler     func(*SDKMessage)
+	onCount     int
+	runCh       chan struct{}
+	runCount    int32
 }
 
 func (b *fakeBackend) Login(context.Context, bool) (*Credentials, error) {
@@ -107,6 +112,11 @@ func (b *fakeBackend) SendTyping(_ context.Context, userID string) error {
 func (b *fakeBackend) StopTyping(_ context.Context, userID string) error {
 	b.stopTo = userID
 	return nil
+}
+
+func (b *fakeBackend) Download(_ context.Context, msg *SDKMessage) (*DownloadedMedia, error) {
+	b.downloadMsg = msg
+	return b.downloaded, b.downloadErr
 }
 
 func TestPluginSendRequiresOwnerScope(t *testing.T) {
@@ -221,6 +231,34 @@ type fakeInputCoordinator struct {
 	pending   []*master.InputRequest
 	submitted []master.InputResponse
 	err       error
+}
+
+type wechatAttachmentCaptureProcessor struct {
+	mu        sync.Mutex
+	response  master.TaskResponse
+	received  []master.FileAttachment
+	sessionID string
+}
+
+func (p *wechatAttachmentCaptureProcessor) ProcessMessage(_ context.Context, sessionID string, _ string) (master.TaskResponse, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.sessionID = sessionID
+	return p.response, nil
+}
+
+func (p *wechatAttachmentCaptureProcessor) ProcessMessageFromIM(_ context.Context, sessionID, _, _ string, attachments []master.FileAttachment, _ string, _ bool, _ *imctx.IMMessageContext) (master.TaskResponse, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.sessionID = sessionID
+	p.received = append([]master.FileAttachment(nil), attachments...)
+	return p.response, nil
+}
+
+func (p *wechatAttachmentCaptureProcessor) attachments() []master.FileAttachment {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]master.FileAttachment(nil), p.received...)
 }
 
 func (f *fakeInputCoordinator) PendingInputs(taskID string) []*master.InputRequest {
@@ -919,6 +957,64 @@ func TestBotInstanceInboundPreservesSafeMediaMetadata(t *testing.T) {
 	}
 }
 
+func TestBotInstanceInboundFileAttachmentDownloadsThroughRouter(t *testing.T) {
+	st := store.NewMemoryStore()
+	backend := &fakeBackend{
+		runCh: make(chan struct{}),
+		downloaded: &DownloadedMedia{
+			Data:     []byte("pdf-bytes"),
+			Type:     "file",
+			FileName: "a.pdf",
+		},
+	}
+	proc := &wechatAttachmentCaptureProcessor{
+		response: master.TaskResponse{Content: "ok", Completed: true},
+	}
+	router := channel.NewRouter(proc, zap.NewNop())
+	router.SetOwnerUserResolver(func(context.Context, string) (*auth.User, error) {
+		return &auth.User{ID: "owner-1", Role: "user", Status: "active"}, nil
+	})
+	reg := NewRegistry(Config{Enabled: true, CredRoot: t.TempDir()}, router, st, zap.NewNop())
+	reg.SetBackendFactory(func(string, string, BackendOptions) Backend { return backend })
+	if _, err := reg.Ensure(context.Background(), "owner-1", false); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	defer reg.Stop()
+	select {
+	case <-backend.runCh:
+	case <-time.After(time.Second):
+		t.Fatal("backend Run was not started")
+	}
+	inst, ok := reg.Get("owner-1")
+	if !ok {
+		t.Fatal("instance not registered")
+	}
+	router.RegisterPlugin(NewPlugin(reg, zap.NewNop()))
+
+	inst.handleIncoming(context.Background(), &SDKMessage{
+		UserID:       "wx-peer",
+		Type:         "file",
+		Files:        []sdk.FileContent{{Media: &sdk.CDNMedia{EncryptQueryParam: "encrypted"}, FileName: "a.pdf", Size: 123}},
+		ContextToken: "ctx-token",
+		Raw:          &sdk.WireMessage{MessageID: 1001},
+		Timestamp:    time.Now(),
+	})
+
+	if backend.downloadMsg == nil || len(backend.downloadMsg.Files) != 1 || backend.downloadMsg.Files[0].FileName != "a.pdf" {
+		t.Fatalf("download message = %+v", backend.downloadMsg)
+	}
+	attachments := proc.attachments()
+	if len(attachments) != 1 {
+		t.Fatalf("attachments len=%d, want 1", len(attachments))
+	}
+	if attachments[0].Filename != "a.pdf" || attachments[0].MimeType != "application/pdf" {
+		t.Fatalf("attachment meta = %+v", attachments[0])
+	}
+	if attachments[0].Data != "cGRmLWJ5dGVz" {
+		t.Fatalf("attachment data = %q", attachments[0].Data)
+	}
+}
+
 func TestBotInstanceInboundLogsMalformedMessages(t *testing.T) {
 	core, logs := observer.New(zapcore.WarnLevel)
 	inst := NewInstance(InstanceOptions{
@@ -1119,6 +1215,10 @@ func (b *blockingLoginBackend) SendTyping(context.Context, string) error {
 
 func (b *blockingLoginBackend) StopTyping(context.Context, string) error {
 	return nil
+}
+
+func (b *blockingLoginBackend) Download(context.Context, *SDKMessage) (*DownloadedMedia, error) {
+	return nil, nil
 }
 
 var _ Backend = (*blockingLoginBackend)(nil)

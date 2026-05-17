@@ -241,13 +241,13 @@ func TestIndentationFlexibleReplacer_Match(t *testing.T) {
 // TestFuzzyMatchHunk_渐进策略 测试渐进匹配调度逻辑
 func TestFuzzyMatchHunk_渐进策略(t *testing.T) {
 	tests := []struct {
-		name           string
-		fileLines      []string
-		hunk           *Hunk
-		reverse        bool
-		wantLevel      MatchLevel
-		wantStart      int
-		wantErr        bool
+		name      string
+		fileLines []string
+		hunk      *Hunk
+		reverse   bool
+		wantLevel MatchLevel
+		wantStart int
+		wantErr   bool
 	}{
 		{
 			name:      "精确匹配成功",
@@ -835,9 +835,9 @@ func TestLevenshteinDistance(t *testing.T) {
 // TestLevenshteinSimilarity 测试相似度计算
 func TestLevenshteinSimilarity(t *testing.T) {
 	tests := []struct {
-		a, b     string
-		wantMin  float64
-		wantMax  float64
+		a, b    string
+		wantMin float64
+		wantMax float64
 	}{
 		{"", "", 1.0, 1.0},
 		{"abc", "abc", 1.0, 1.0},

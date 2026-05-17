@@ -2,6 +2,7 @@ package channel
 
 import (
 	"context"
+	"encoding/base64"
 	"net/http"
 	"sync"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/chef-guo/agents-hive/internal/auth"
 	"github.com/chef-guo/agents-hive/internal/imctx"
+	"github.com/chef-guo/agents-hive/internal/kb"
 	"github.com/chef-guo/agents-hive/internal/master"
 	"github.com/chef-guo/agents-hive/internal/observability"
 	"github.com/stretchr/testify/assert"
@@ -29,6 +31,7 @@ type imCaptureProcessor struct {
 	lastSessionID     string
 	lastInput         string
 	lastMessageID     string
+	lastAttachments   []master.FileAttachment
 	lastModelOverride string
 	lastIMContext     *imctx.IMMessageContext
 	response          master.TaskResponse
@@ -42,12 +45,13 @@ func (p *imCaptureProcessor) ProcessMessage(_ context.Context, sessionID string,
 	return p.response, nil
 }
 
-func (p *imCaptureProcessor) ProcessMessageFromIM(_ context.Context, sessionID, input, channelMessageID, modelOverride string, _ bool, imCtx *imctx.IMMessageContext) (master.TaskResponse, error) {
+func (p *imCaptureProcessor) ProcessMessageFromIM(_ context.Context, sessionID, input, channelMessageID string, attachments []master.FileAttachment, modelOverride string, _ bool, imCtx *imctx.IMMessageContext) (master.TaskResponse, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.lastSessionID = sessionID
 	p.lastInput = input
 	p.lastMessageID = channelMessageID
+	p.lastAttachments = attachments
 	p.lastModelOverride = modelOverride
 	p.lastIMContext = imCtx
 	return p.response, nil
@@ -80,6 +84,76 @@ func (p *pendingAwarePlugin) HasPendingInput(_ context.Context, _ InboundMessage
 type metricCaptureWriter struct {
 	mu      sync.Mutex
 	metrics []observability.Metric
+}
+
+type fakeChannelKBService struct {
+	mu         sync.Mutex
+	bindings   []kb.Binding
+	created    []kb.CreateBindingInput
+	disabled   []string
+	listScopes []kb.ManagementScope
+}
+
+func (s *fakeChannelKBService) ListNamespaces(ctx context.Context, scope kb.ManagementScope, input kb.ListNamespacesInput) ([]kb.Namespace, error) {
+	s.mu.Lock()
+	s.listScopes = append(s.listScopes, scope)
+	s.mu.Unlock()
+	return []kb.Namespace{{
+		ID:         "ns-1",
+		Name:       "FAQ",
+		DomainID:   scope.DomainID,
+		OwnerScope: scope.OwnerScope,
+		OwnerID:    scope.OwnerID,
+	}}, nil
+}
+
+func (s *fakeChannelKBService) ListBindingsForManagement(ctx context.Context, scope kb.ManagementScope, query kb.BindingQuery) ([]kb.Binding, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]kb.Binding, 0, len(s.bindings))
+	for _, binding := range s.bindings {
+		if binding.DomainID != scope.DomainID || binding.OwnerScope != scope.OwnerScope || binding.OwnerID != scope.OwnerID {
+			continue
+		}
+		if query.Enabled != nil && binding.Enabled != *query.Enabled {
+			continue
+		}
+		out = append(out, binding)
+	}
+	return out, nil
+}
+
+func (s *fakeChannelKBService) CreateBinding(ctx context.Context, scope kb.ManagementScope, input kb.CreateBindingInput) (*kb.Binding, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.created = append(s.created, input)
+	binding := kb.Binding{
+		ID:            "bind-" + input.NamespaceID,
+		NamespaceID:   input.NamespaceID,
+		DomainID:      input.DomainID,
+		OwnerScope:    scope.OwnerScope,
+		OwnerID:       scope.OwnerID,
+		BindingType:   input.BindingType,
+		BindingTarget: input.BindingTarget,
+		Enabled:       true,
+		EffectiveAt:   time.Now(),
+	}
+	s.bindings = append(s.bindings, binding)
+	return &binding, nil
+}
+
+func (s *fakeChannelKBService) DisableBinding(ctx context.Context, scope kb.ManagementScope, bindingID string) (*kb.Binding, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.disabled = append(s.disabled, bindingID)
+	for i := range s.bindings {
+		if s.bindings[i].ID == bindingID {
+			s.bindings[i].Enabled = false
+			cp := s.bindings[i]
+			return &cp, nil
+		}
+	}
+	return &kb.Binding{ID: bindingID, DomainID: scope.DomainID, OwnerScope: scope.OwnerScope, OwnerID: scope.OwnerID, Enabled: false}, nil
 }
 
 func (w *metricCaptureWriter) Record(_ context.Context, metric observability.Metric) error {
@@ -151,6 +225,16 @@ func (m *mockPlugin) WebhookHandler() http.HandlerFunc {
 }
 func (m *mockPlugin) Verify(_ *http.Request) bool { return true }
 
+type mockAttachmentPlugin struct {
+	mockPlugin
+	data AttachmentData
+	err  error
+}
+
+func (m *mockAttachmentPlugin) DownloadAttachment(_ context.Context, _ InboundMessage, _ Attachment) (AttachmentData, error) {
+	return m.data, m.err
+}
+
 func TestRouterBindAndLookup(t *testing.T) {
 	logger := zap.NewNop()
 	proc := &mockProcessor{}
@@ -207,6 +291,81 @@ func TestRouterRegisterPlugin(t *testing.T) {
 	router.RegisterPlugin(&mockPlugin{platform: PlatformDingTalk})
 	_, ok = router.GetPlugin(PlatformDingTalk)
 	assert.True(t, ok)
+}
+
+func TestRouterKBCommandUppercaseCurrentDoesNotCallProcessor(t *testing.T) {
+	logger := zap.NewNop()
+	proc := &mockProcessor{}
+	router := NewRouter(proc, logger)
+	plugin := &mockPlugin{platform: PlatformFeishu}
+	router.RegisterPlugin(plugin)
+	router.SetKBService(&fakeChannelKBService{})
+	router.Bind(Binding{Platform: PlatformFeishu, TenantKey: "tenant-a", ChatID: "chat-001", SessionID: "session-abc"})
+
+	err := router.HandleMessage(context.Background(), InboundMessage{
+		Platform:   PlatformFeishu,
+		TenantKey:  "tenant-a",
+		ChatID:     "chat-001",
+		Content:    "/KB current support",
+		NoDebounce: true,
+	})
+
+	assert.NoError(t, err)
+	assert.Empty(t, proc.getLastInput())
+	assert.Contains(t, plugin.getLastMsg().Content, "domain=support")
+}
+
+func TestRouterKBUseReplacesSessionBindingWithExplicitDomain(t *testing.T) {
+	logger := zap.NewNop()
+	proc := &mockProcessor{}
+	router := NewRouter(proc, logger)
+	plugin := &mockPlugin{platform: PlatformFeishu}
+	service := &fakeChannelKBService{
+		bindings: []kb.Binding{{
+			ID:            "bind-old",
+			NamespaceID:   "ns-old",
+			DomainID:      "support",
+			OwnerScope:    kb.OwnerScopeUser,
+			OwnerID:       "user-1",
+			BindingType:   kb.BindingTypeSession,
+			BindingTarget: "session-abc",
+			Enabled:       true,
+			EffectiveAt:   time.Now(),
+		}},
+	}
+	var updatedSessionID string
+	var updatedDomainID string
+	var updatedEnabled bool
+	router.RegisterPlugin(plugin)
+	router.SetKBService(service)
+	router.SetKBSessionDomainUpdater(func(sessionID, domainID string, enabled bool) {
+		updatedSessionID = sessionID
+		updatedDomainID = domainID
+		updatedEnabled = enabled
+	})
+	router.Bind(Binding{Platform: PlatformFeishu, TenantKey: "tenant-a", ChatID: "chat-001", SessionID: "session-abc"})
+	ctx := auth.WithUser(context.Background(), &auth.User{ID: "user-1"})
+
+	router.processMessageSync(ctx, InboundMessage{
+		Platform:   PlatformFeishu,
+		TenantKey:  "tenant-a",
+		ChatID:     "chat-001",
+		Content:    "/kb use ns-new support",
+		NoDebounce: true,
+	})
+
+	assert.Empty(t, proc.getLastInput())
+	assert.Equal(t, []string{"bind-old"}, service.disabled)
+	if assert.Len(t, service.created, 1) {
+		assert.Equal(t, "ns-new", service.created[0].NamespaceID)
+		assert.Equal(t, "support", service.created[0].DomainID)
+		assert.Equal(t, kb.BindingTypeSession, service.created[0].BindingType)
+		assert.Equal(t, "session-abc", service.created[0].BindingTarget)
+	}
+	assert.Equal(t, "session-abc", updatedSessionID)
+	assert.Equal(t, "support", updatedDomainID)
+	assert.True(t, updatedEnabled)
+	assert.Contains(t, plugin.getLastMsg().Content, "domain=support")
 }
 
 func TestRouterHandleMessage(t *testing.T) {
@@ -360,6 +519,52 @@ func TestRouterInboundController_ModelOverridePassesToIMProcessor(t *testing.T) 
 	assert.Equal(t, "hello", input)
 	assert.Equal(t, "msg-model-1", messageID)
 	assert.Equal(t, "gpt-5.2", modelOverride)
+}
+
+func TestRouterDownloadsInboundAttachmentsBeforeDispatch(t *testing.T) {
+	logger := zap.NewNop()
+	proc := &imCaptureProcessor{
+		response: master.TaskResponse{Content: "ok", Completed: true},
+	}
+	router := NewRouter(proc, logger)
+	plugin := &mockAttachmentPlugin{
+		mockPlugin: mockPlugin{platform: PlatformFeishu},
+		data: AttachmentData{
+			Data:     []byte("file-bytes"),
+			FileName: "report.txt",
+			MimeType: "text/plain",
+		},
+	}
+	router.RegisterPlugin(plugin)
+	router.Bind(Binding{
+		Platform:  PlatformFeishu,
+		TenantKey: "tenant-a",
+		ChatID:    "chat-file",
+		SessionID: "sess-file",
+	})
+
+	router.processMessageSync(context.Background(), InboundMessage{
+		MessageID:  "msg-file-1",
+		Platform:   PlatformFeishu,
+		TenantKey:  "tenant-a",
+		ChatID:     "chat-file",
+		SenderName: "test-user",
+		Content:    "请看附件",
+		Attachments: []Attachment{{
+			Type: "file",
+			Key:  "file-key-1",
+		}},
+		NoDebounce: true,
+	})
+
+	proc.mu.Lock()
+	attachments := append([]master.FileAttachment(nil), proc.lastAttachments...)
+	proc.mu.Unlock()
+	if assert.Len(t, attachments, 1) {
+		assert.Equal(t, "report.txt", attachments[0].Filename)
+		assert.Equal(t, "text/plain", attachments[0].MimeType)
+		assert.Equal(t, base64.StdEncoding.EncodeToString([]byte("file-bytes")), attachments[0].Data)
+	}
 }
 
 func TestRouterHandleMessage_Debounce(t *testing.T) {

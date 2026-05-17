@@ -17,7 +17,7 @@ func TestCreateHandoffSummaryRendersCurrentSnapshot(t *testing.T) {
 			require.Equal(t, "sess-handoff", sessionID)
 			return SessionTodoSnapshot{
 				SessionID:   sessionID,
-				PlanStatus: PlanStatusExecuting,
+				PlanStatus:  PlanStatusExecuting,
 				PlanVersion: 4,
 				Todos: []SessionTodo{
 					{ID: "read", Content: "阅读上下文", Status: TodoStatusCompleted},

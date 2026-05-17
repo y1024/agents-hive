@@ -103,6 +103,110 @@ func TestDetectToolChoice_UsesStructuredExternalSendIntent(t *testing.T) {
 	}
 }
 
+func TestDetectToolChoice_FeishuBusinessWriteRequiresToolAndRelaxesAfterWrite(t *testing.T) {
+	intent := router.IntentFrame{
+		Kind:               router.IntentExternalWrite,
+		AllowsSideEffects:  true,
+		RequiresExternal:   true,
+		AllowedDomainsHint: []string{"feishu"},
+		Signals:            []string{externalBusinessWriteSignal, router.ActionCapabilitySignal(router.ActionCapabilityExternalTaskCreate)},
+	}
+	if got := detectToolChoiceWithIntent("创建一个飞书任务", nil, nil, intent); got != ToolChoiceRequired {
+		t.Fatalf("structured external business write intent should require tools, got %q", got)
+	}
+	if trigger := toolChoiceRequiredTriggerWithMessages("创建一个飞书任务", nil, nil, intent, nil); trigger != "external_write" {
+		t.Fatalf("trigger = %q, want external_write", trigger)
+	}
+
+	messages := []llm.MessageWithTools{
+		{Role: "user", Content: llm.NewTextContent("创建一个飞书任务")},
+		{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "task-1", Name: "feishu_api", Arguments: json.RawMessage(`{"action":"create_task","summary":"跟进合同"}`)}}},
+		{Role: "tool", ToolCallID: "task-1", ToolName: "feishu_api", Content: llm.NewTextContent(`{"task_id":"task_1"}`)},
+	}
+	if got := detectToolChoiceWithIntentAndMessages("创建一个飞书任务", nil, nil, intent, messages); got == ToolChoiceRequired {
+		t.Fatalf("successful business write should relax required tool choice, got %q", got)
+	}
+}
+
+func TestToolChoiceWithDiscoveryFallback_ForcesToolSearchWhenNoCallableExternalTool(t *testing.T) {
+	intent := router.IntentFrame{Kind: router.IntentExternalWrite, AllowsSideEffects: true, RequiresExternal: true}
+	tools := []mcphost.ToolDefinition{
+		{Name: "tool_search", Core: true},
+		{Name: "memory", Core: true},
+	}
+	got := toolChoiceWithDiscoveryFallback(ToolChoiceRequired, tools, intent, nil)
+	if got != "tool_search" {
+		t.Fatalf("tool choice = %q, want tool_search", got)
+	}
+}
+
+func TestToolChoiceWithDiscoveryFallback_ForcesToolSearchForExternalBusinessWriteSubtype(t *testing.T) {
+	intent := router.IntentFrame{
+		Kind:              router.IntentExternalWrite,
+		AllowsSideEffects: true,
+		RequiresExternal:  true,
+		Signals: []string{
+			externalBusinessWriteSignal,
+			router.ActionCapabilitySignal(router.ActionCapabilityExternalTaskCreate),
+		},
+	}
+	tools := []mcphost.ToolDefinition{
+		{Name: "tool_search", Core: true},
+		{Name: "memory", Core: true},
+	}
+	got := toolChoiceWithDiscoveryFallback(ToolChoiceRequired, tools, intent, nil)
+	if got != "tool_search" {
+		t.Fatalf("business write without callable external tool should force tool_search, got %q", got)
+	}
+}
+
+func TestToolChoiceWithDiscoveryFallback_ForcesToolSearchForBusinessWriteEvenWhenTargetToolCallable(t *testing.T) {
+	intent := router.IntentFrame{
+		Kind:              router.IntentExternalWrite,
+		AllowsSideEffects: true,
+		RequiresExternal:  true,
+		Signals: []string{
+			externalBusinessWriteSignal,
+			router.ActionCapabilitySignal(router.ActionCapabilityExternalTaskCreate),
+		},
+	}
+	tools := []mcphost.ToolDefinition{
+		{Name: "tool_search", Core: true},
+		{Name: "feishu_api", Description: "飞书 API"},
+	}
+	got := toolChoiceWithDiscoveryFallback(ToolChoiceRequired, tools, intent, []llm.MessageWithTools{
+		{Role: "user", Content: llm.NewTextContent("创建一个飞书任务，标题是跟进合同")},
+	})
+	if got != "tool_search" {
+		t.Fatalf("business write first step must force tool_search even when feishu_api is visible/callable, got %q", got)
+	}
+}
+
+func TestToolChoiceWithDiscoveryFallback_AllowsTargetToolAfterSuccessfulDiscovery(t *testing.T) {
+	intent := router.IntentFrame{
+		Kind:              router.IntentExternalWrite,
+		AllowsSideEffects: true,
+		RequiresExternal:  true,
+		Signals: []string{
+			externalBusinessWriteSignal,
+			router.ActionCapabilitySignal(router.ActionCapabilityExternalTaskCreate),
+		},
+	}
+	tools := []mcphost.ToolDefinition{
+		{Name: "tool_search", Core: true},
+		{Name: "feishu_api", Description: "飞书 API"},
+	}
+	messages := []llm.MessageWithTools{
+		{Role: "user", Content: llm.NewTextContent("创建一个飞书任务，标题是跟进合同")},
+		{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "search-1", Name: "tool_search", Arguments: json.RawMessage(`{"query":"创建飞书任务"}`)}}},
+		{Role: "tool", ToolCallID: "search-1", ToolName: "tool_search", Content: llm.NewTextContent(`{"results":[{"name":"feishu_api"}]}`)},
+	}
+	got := toolChoiceWithDiscoveryFallback(ToolChoiceRequired, tools, intent, messages)
+	if got != ToolChoiceRequired {
+		t.Fatalf("after successful tool_search, business write should allow required target-tool selection, got %q", got)
+	}
+}
+
 func TestDetectToolChoice_ExternalSendRelaxesAfterValidSendAttempt(t *testing.T) {
 	intent := router.IntentFrame{Kind: router.IntentExternalWrite, AllowsSideEffects: true, RequiresExternal: true}
 	messages := []llm.MessageWithTools{
@@ -520,6 +624,44 @@ func TestEvaluateRequiredGuard_ToolCallsResetsBreach(t *testing.T) {
 	}
 }
 
+func TestRecoverableToolResultDoesNotEnterTerminalFailureCache(t *testing.T) {
+	detector := newLoopDetector(4)
+	terminalCache := map[string]string{}
+	var terminalFailures []string
+	call := llm.ToolCall{
+		Name:      "feishu_api",
+		Arguments: json.RawMessage(`{"action":"send_message","content":"hi"}`),
+	}
+	fp := canonicalFingerprint(call.Name, call.Arguments)
+	tr := toolResult{
+		Content:     recoverableToolCallErrorContent("route_input_outside_allowed_values", "send_message 不在本轮 allowed_inputs 中"),
+		IsError:     true,
+		Recoverable: true,
+		ErrorKind:   "route_input_outside_allowed_values",
+	}
+
+	for i := 0; i < 2; i++ {
+		if tr.IsError && !tr.Terminal && !tr.Recoverable {
+			if detector.recordCallResult(fp, true) {
+				terminalCache[fp] = tr.Content
+				terminalFailures = append(terminalFailures, call.Name)
+			}
+		} else if !tr.IsError || tr.Recoverable {
+			detector.recordCallResult(fp, false)
+		}
+	}
+
+	if _, hit := terminalCache[fp]; hit {
+		t.Fatalf("recoverable errors must not be cached as terminal: %+v", terminalCache)
+	}
+	if len(terminalFailures) != 0 {
+		t.Fatalf("recoverable errors must not produce terminal failure hint, got %+v", terminalFailures)
+	}
+	if got := detector.callFailures[fp]; got != 0 {
+		t.Fatalf("recoverable errors should reset repeated-failure detector, got %d", got)
+	}
+}
+
 // 非 required + 0 tool_calls：不触发 guard，breach 保持原值传递给下一轮。
 func TestEvaluateRequiredGuard_NonRequiredZeroCallsPreservesBreach(t *testing.T) {
 	cases := []struct {
@@ -558,7 +700,7 @@ func TestShouldSuppressStreamPartial(t *testing.T) {
 		{"auto → stream", ToolChoiceAuto, false},
 		{"none → stream", ToolChoiceNone, false},
 		{"empty (flag off) → stream", "", false},
-		{"unknown value → stream", "weird", false},
+		{"named tool → suppress", "tool_search", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

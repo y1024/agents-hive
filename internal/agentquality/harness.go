@@ -65,9 +65,9 @@ type GateMetrics struct {
 	DelegationTraceCoverageRate float64 `json:"delegation_trace_coverage_rate"`
 
 	// Phase 2: Semantic Judge metrics
-	SemanticScore       float64  `json:"semantic_score,omitempty"`
-	JudgeMissing        bool     `json:"judge_missing,omitempty"`
-	JudgeRequiredDomain string   `json:"judge_required_domain,omitempty"`
+	SemanticScore       float64 `json:"semantic_score,omitempty"`
+	JudgeMissing        bool    `json:"judge_missing,omitempty"`
+	JudgeRequiredDomain string  `json:"judge_required_domain,omitempty"`
 }
 
 type GateThresholds struct {
@@ -78,8 +78,8 @@ type GateThresholds struct {
 	DelegationTraceCoverageRateMin float64 `json:"delegation_trace_coverage_rate_min"`
 
 	// Phase 2: Semantic Judge thresholds
-	SemanticScoreMin         float64  `json:"semantic_score_min,omitempty"`
-	JudgeRequiredForDomains  []string `json:"judge_required_for_domains,omitempty"`
+	SemanticScoreMin        float64  `json:"semantic_score_min,omitempty"`
+	JudgeRequiredForDomains []string `json:"judge_required_for_domains,omitempty"`
 }
 
 func DefaultGateThresholds() GateThresholds {

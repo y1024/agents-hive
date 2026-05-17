@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/chef-guo/agents-hive/internal/agentquality"
+	"github.com/chef-guo/agents-hive/internal/asset"
 	"github.com/chef-guo/agents-hive/internal/auth"
 	"github.com/chef-guo/agents-hive/internal/config"
 	"github.com/chef-guo/agents-hive/internal/errs"
@@ -295,6 +297,39 @@ func TestHandleGetSession_Found(t *testing.T) {
 	}
 }
 
+func TestHandleGetSessionIncludesKBDomainID(t *testing.T) {
+	handler, _, st, cleanup := newTestServerForSessionsWithStore(t)
+	defer cleanup()
+
+	now := time.Now().Format(time.RFC3339)
+	sessionID := "kb-domain-session"
+	if err := st.SaveSession(context.Background(), &store.SessionRecord{
+		ID:             sessionID,
+		Name:           "kb domain",
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		LastAccessedAt: now,
+		KBDomainID:     "support",
+	}); err != nil {
+		t.Fatalf("save session: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/sessions/"+sessionID, nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp SessionDetailResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.KBDomainID != "support" {
+		t.Fatalf("kb_domain_id = %q, want support", resp.KBDomainID)
+	}
+}
+
 func TestHandleGetSession_NotFound(t *testing.T) {
 	handler, _, cleanup := newTestServerForSessions(t)
 	defer cleanup()
@@ -453,6 +488,172 @@ func TestHandleGetMessagesPreservesRecoverableToolMetadata(t *testing.T) {
 	msg := resp.Messages[0]
 	if !msg.IsError || !msg.Recoverable || msg.Terminal || msg.ErrorKind != "approval_channel_missing" {
 		t.Fatalf("message metadata = %+v, want recoverable non-terminal approval_channel_missing", msg)
+	}
+}
+
+func TestHandleGetMessagesExposesAssistantCitations(t *testing.T) {
+	handler, _, st, cleanup := newTestServerForSessionsWithStore(t)
+	defer cleanup()
+
+	now := time.Now().Format(time.RFC3339)
+	sessionID := "assistant-citations-session"
+	if err := st.SaveSession(context.Background(), &store.SessionRecord{
+		ID:             sessionID,
+		Name:           "assistant citations",
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		LastAccessedAt: now,
+	}); err != nil {
+		t.Fatalf("save session: %v", err)
+	}
+	citations := `[{"token":"kbref-token","doc_id":"doc-1","node_id":"0000","verified":true}]`
+	if err := st.AddMessage(context.Background(), sessionID, "assistant", "answer", map[string]any{
+		"citations": citations,
+	}); err != nil {
+		t.Fatalf("save message: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+sessionID+"/messages", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp MessagesListResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Messages) != 1 || len(resp.Messages[0].Citations) != 1 {
+		t.Fatalf("messages = %+v, want one citation", resp.Messages)
+	}
+	citation, _ := resp.Messages[0].Citations[0].(map[string]any)
+	if citation["token"] != "kbref-token" || citation["doc_id"] != "doc-1" {
+		t.Fatalf("citation = %+v", citation)
+	}
+}
+
+func TestHandleGetMessagesExposesAssistantArtifacts(t *testing.T) {
+	handler, _, st, cleanup := newTestServerForSessionsWithStore(t)
+	defer cleanup()
+
+	now := time.Now().Format(time.RFC3339)
+	sessionID := "assistant-artifacts-session"
+	if err := st.SaveSession(context.Background(), &store.SessionRecord{
+		ID:             sessionID,
+		Name:           "assistant artifacts",
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		LastAccessedAt: now,
+	}); err != nil {
+		t.Fatalf("save session: %v", err)
+	}
+	artifacts := `[{"uri":"asset://agent/user/u1/session/s1/a.txt","title":"Report","type":"markdown","mime_type":"text/markdown","size":6,"content_hash":"abc"}]`
+	if err := st.AddMessage(context.Background(), sessionID, "assistant", "answer", map[string]any{
+		"artifacts": artifacts,
+	}); err != nil {
+		t.Fatalf("save message: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+sessionID+"/messages", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp MessagesListResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Messages) != 1 || len(resp.Messages[0].Artifacts) != 1 {
+		t.Fatalf("messages = %+v, want one artifact", resp.Messages)
+	}
+	artifact, _ := resp.Messages[0].Artifacts[0].(map[string]any)
+	if artifact["uri"] == "" || artifact["title"] != "Report" {
+		t.Fatalf("artifact = %+v", artifact)
+	}
+}
+
+func TestPersistChatAttachmentsUploadsToAssetService(t *testing.T) {
+	ctx := context.Background()
+	local, err := asset.NewLocalStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewLocalStore() error = %v", err)
+	}
+	svc, err := asset.NewService(local, newAPIAssetMetaStore())
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	srv := &Server{assetService: svc}
+	data := []byte("hello attachment")
+	attachments := []master.FileAttachment{{
+		Filename: "note.txt",
+		MimeType: "text/plain",
+		Data:     base64.StdEncoding.EncodeToString(data),
+	}}
+	if err := srv.persistChatAttachments(ctx, "session-1", &store.SessionRecord{UserID: "u1"}, attachments, [][]byte{data}); err != nil {
+		t.Fatalf("persistChatAttachments() error = %v", err)
+	}
+	if attachments[0].AssetURI == "" || attachments[0].ContentHash != attachmentContentHash(data) || attachments[0].Size != int64(len(data)) {
+		t.Fatalf("attachment metadata = %+v", attachments[0])
+	}
+	uri := asset.AssetURI(attachments[0].AssetURI)
+	downloaded, rec, err := svc.Download(ctx, uri)
+	if err != nil {
+		t.Fatalf("Download() error = %v", err)
+	}
+	if string(downloaded) != string(data) || rec.Tags["source_kind"] != "chat_attachment" || rec.Tags["session_id"] != "session-1" {
+		t.Fatalf("downloaded=%q rec=%+v", downloaded, rec)
+	}
+}
+
+func TestHandleGetMessagesReturnsAttachmentManifestWithoutBase64(t *testing.T) {
+	handler, _, st, cleanup := newTestServerForSessionsWithStore(t)
+	defer cleanup()
+
+	sessionID := "attachment-history-session"
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := st.SaveSession(context.Background(), &store.SessionRecord{
+		ID:             sessionID,
+		Name:           "attachments",
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		LastAccessedAt: now,
+	}); err != nil {
+		t.Fatalf("save session: %v", err)
+	}
+	metadata := master.AttachmentMetadataForTest([]master.FileAttachment{{
+		Filename:    "chart.png",
+		MimeType:    "image/png",
+		Data:        base64.StdEncoding.EncodeToString([]byte("png-data")),
+		Size:        8,
+		AssetURI:    "asset://chat/user/local/session/" + sessionID + "/hash.png",
+		ContentHash: "hash",
+	}})
+	if err := st.AddMessage(context.Background(), sessionID, "user", "看图", map[string]any{
+		"attachments": metadata["attachments"],
+	}); err != nil {
+		t.Fatalf("save message: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+sessionID+"/messages", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp MessagesListResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Messages) != 1 || len(resp.Messages[0].Attachments) != 1 {
+		t.Fatalf("messages = %+v, want attachment manifest", resp.Messages)
+	}
+	got := resp.Messages[0].Attachments[0]
+	if got.Data != "" || got.AssetURI == "" || got.Filename != "chart.png" {
+		t.Fatalf("attachment = %+v, want manifest without base64 data", got)
 	}
 }
 

@@ -24,6 +24,7 @@ var ErrNoContextToken = errors.New("wechatbot no context token")
 const (
 	defaultRecoverDelay       = 30 * time.Second
 	defaultMaxRecoverAttempts = 3
+	maxPendingMediaMessages   = 256
 
 	MetricAutoRecoverTotal = "wechatbot_auto_recover_total"
 	MetricSDKErrorsTotal   = "wechatbot_sdk_errors_total"
@@ -71,6 +72,9 @@ type BotInstance struct {
 	recovering    bool
 	recoverCancel context.CancelFunc
 	handlerOnce   sync.Once
+	mediaMu       sync.Mutex
+	mediaByMsgID  map[string]*SDKMessage
+	mediaOrder    []string
 }
 
 func NewInstance(opts InstanceOptions) *BotInstance {
@@ -98,6 +102,7 @@ func NewInstance(opts InstanceOptions) *BotInstance {
 		recoverDelay:       recoverDelay,
 		maxRecoverAttempts: maxRecoverAttempts,
 		status:             StatusNotConnected,
+		mediaByMsgID:       make(map[string]*SDKMessage),
 	}
 }
 
@@ -277,6 +282,31 @@ func (i *BotInstance) Reply(ctx context.Context, peerWxid, contextToken, content
 	}
 	i.emitMetric(MetricOutboundTotal, map[string]any{"status": "success"})
 	return nil
+}
+
+func (i *BotInstance) Download(ctx context.Context, msg *SDKMessage) (*DownloadedMedia, error) {
+	if i == nil || i.backend == nil {
+		return nil, errors.New("wechatbot instance not initialized")
+	}
+	if i.Status() != StatusOnline {
+		i.emitMetric(MetricUnavailableTotal, map[string]any{"reason": "offline"})
+		return nil, errors.New("wechatbot offline")
+	}
+	return i.backend.Download(ctx, msg)
+}
+
+func (i *BotInstance) DownloadAttachment(ctx context.Context, messageID string, att channel.Attachment) (*DownloadedMedia, error) {
+	i.mediaMu.Lock()
+	raw := i.mediaByMsgID[messageID]
+	i.mediaMu.Unlock()
+	if raw == nil {
+		return nil, fmt.Errorf("wechatbot raw media message %q not found", messageID)
+	}
+	sdkMsg, err := sdkMessageFromAttachment(raw, att)
+	if err != nil {
+		return nil, err
+	}
+	return i.Download(ctx, sdkMsg)
 }
 
 func (i *BotInstance) runLoop(ctx context.Context) {
@@ -493,7 +523,9 @@ func (i *BotInstance) handleIncoming(ctx context.Context, msg *SDKMessage) {
 		ReplyToken:  msg.ContextToken,
 		NoDebounce:  false,
 		Timestamp:   msg.Timestamp,
+		Attachments: wechatbotAttachments(msg),
 	}
+	i.rememberInboundMedia(inbound.MessageID, msg, len(inbound.Attachments) > 0)
 	if inbound.Timestamp.IsZero() {
 		inbound.Timestamp = now
 	}
@@ -502,6 +534,23 @@ func (i *BotInstance) handleIncoming(ctx context.Context, msg *SDKMessage) {
 			zap.String("owner_user_hash", safeWechatID(i.ownerUserID)),
 			zap.String("peer_wxid_hash", safeWechatID(msg.UserID)),
 			zap.Error(err))
+	}
+}
+
+func (i *BotInstance) rememberInboundMedia(messageID string, msg *SDKMessage, hasAttachment bool) {
+	if !hasAttachment || messageID == "" || msg == nil {
+		return
+	}
+	i.mediaMu.Lock()
+	defer i.mediaMu.Unlock()
+	if _, exists := i.mediaByMsgID[messageID]; !exists {
+		i.mediaOrder = append(i.mediaOrder, messageID)
+	}
+	i.mediaByMsgID[messageID] = msg
+	for len(i.mediaOrder) > maxPendingMediaMessages {
+		oldest := i.mediaOrder[0]
+		i.mediaOrder = i.mediaOrder[1:]
+		delete(i.mediaByMsgID, oldest)
 	}
 }
 

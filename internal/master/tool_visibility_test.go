@@ -570,11 +570,15 @@ func TestReflectionBlockRouteDecisionHidesRecalledTool(t *testing.T) {
 	if hasTool(visible, "send_im_message") {
 		t.Fatal("reflection block should hide recalled tool from model-visible set")
 	}
-	if len(obs.RouteDecision.BlockedTools) != 1 || obs.RouteDecision.BlockedTools[0].Name != "send_im_message" {
-		t.Fatalf("RouteDecision blocked tools = %+v, want send_im_message", obs.RouteDecision.BlockedTools)
+	candidateDecision := router.BuildRouteDecisionWithBlocks(externalSendIntentForVisibilityTest(), obs.CandidateProfiles, "exec", session.ListReflectionBlocks())
+	if len(candidateDecision.BlockedTools) != 1 || candidateDecision.BlockedTools[0].Name != "send_im_message" {
+		t.Fatalf("candidate RouteDecision blocked tools = %+v, want send_im_message", candidateDecision.BlockedTools)
 	}
-	if !strings.Contains(obs.RouteDecision.BlockedTools[0].Reason, "permission_denied") {
-		t.Fatalf("RouteDecision block reason = %q, want failure kind", obs.RouteDecision.BlockedTools[0].Reason)
+	if !strings.Contains(candidateDecision.BlockedTools[0].Reason, "permission_denied") {
+		t.Fatalf("candidate RouteDecision block reason = %q, want failure kind", candidateDecision.BlockedTools[0].Reason)
+	}
+	if containsStringForMasterToolTest(obs.RouteDecision.AllowedTools, "send_im_message") {
+		t.Fatalf("final visible RouteDecision must not allow hidden reflected tool: %+v", obs.RouteDecision)
 	}
 }
 
@@ -1243,6 +1247,61 @@ func TestScreenshotScenario_SendWeatherToNamedPersonGetsSearchAndFeishuTools(t *
 	}
 }
 
+func TestToolVisibility_FeishuBusinessWriteExposesToolSearchAndFeishuAPI(t *testing.T) {
+	session := &SessionState{ID: "s-feishu-business-write"}
+	catalog := []mcphost.ToolDefinition{
+		{Name: "tool_search", Core: true, Description: "搜索工具"},
+		{
+			Name:        "feishu_api",
+			Description: "飞书应用 API 工具。访问飞书文档、通讯录、消息、审批、任务、电子表格、多维表格和资源。",
+			InputSchema: []byte(`{
+				"type": "object",
+				"properties": {
+					"action": {
+						"type": "string",
+						"enum": ["search_contacts", "send_message", "create_task", "write_sheet"]
+					},
+					"summary": {"type": "string"}
+				}
+			}`),
+		},
+	}
+	query := "创建一个飞书任务，标题是跟进合同"
+	intent := resolveTurnIntent(session, query, router.IntentFrame{Kind: router.IntentAnswer})
+	visible, obs := modelVisibleToolsForSessionWithRecallObservationAndSkillsAndIntent(session, catalog, nil, query, config.DefaultToolRecallConfig(), intent)
+
+	if !hasTool(visible, "tool_search") || !hasTool(visible, "feishu_api") {
+		t.Fatalf("business write should expose tool_search and feishu_api, visible=%v", toolNamesForTest(visible))
+	}
+	entry := obs.Entries["feishu_api"]
+	if !entry.VisibleToModel || !entry.TaskCallable {
+		t.Fatalf("feishu_api admission entry should be visible and callable: %#v", entry)
+	}
+	actions := session.AllowedToolInputsSnapshot()["feishu_api"]["action"]
+	if !strings.Contains(actions, "create_task") {
+		t.Fatalf("business write allowed inputs should include create_task, got %q", actions)
+	}
+	if strings.Contains(actions, "write_sheet") || strings.Contains(actions, "send_message") {
+		t.Fatalf("task create intent should not expose unrelated write/send actions, got %q", actions)
+	}
+	if !session.IsAllowedTool("tool_search") {
+		t.Fatalf("tool_search must remain executable only as discovery entrypoint, allowed=%v", session.AllowedToolsSnapshot())
+	}
+	route, ok := session.RouteDecisionSnapshot()
+	if !ok {
+		t.Fatal("missing route decision")
+	}
+	if containsStringForMasterToolTest(route.AllowedTools, "tool_search") {
+		t.Fatalf("RouteDecision business callable tools must not include discovery-only tool_search: %+v", route.AllowedTools)
+	}
+	if !containsStringForMasterToolTest(route.AllowedTools, "feishu_api") {
+		t.Fatalf("RouteDecision should expose the real business tool, got %+v", route.AllowedTools)
+	}
+	if obs.Entries["tool_search"].TaskCallable {
+		t.Fatalf("tool_search admission entry must stay discovery-only, got %+v", obs.Entries["tool_search"])
+	}
+}
+
 func TestScreenshotScenario_FeishuNotBlockedByGenericSendTool(t *testing.T) {
 	session := &SessionState{ID: "s-screenshot-mixed-send"}
 	catalog := []mcphost.ToolDefinition{
@@ -1542,6 +1601,15 @@ func TestToolVisibility_LocalWriteIntentWidensFilesystemActionConstraints(t *tes
 func hasTool(tools []mcphost.ToolDefinition, name string) bool {
 	for _, tool := range tools {
 		if tool.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func containsStringForMasterToolTest(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
 			return true
 		}
 	}

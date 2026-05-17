@@ -16,6 +16,10 @@ import (
 //
 // 见 docs/计划与路线/Agent-质量护栏治理计划.md P0-A。
 func buildChatCompletionsToolChoice(choice string) (openai.ChatCompletionToolChoiceOptionUnionParam, bool) {
+	return buildChatCompletionsToolChoiceWithAliases(choice, toolNameAliases{})
+}
+
+func buildChatCompletionsToolChoiceWithAliases(choice string, aliases toolNameAliases) (openai.ChatCompletionToolChoiceOptionUnionParam, bool) {
 	if choice == "" {
 		return openai.ChatCompletionToolChoiceOptionUnionParam{}, false
 	}
@@ -28,7 +32,7 @@ func buildChatCompletionsToolChoice(choice string) (openai.ChatCompletionToolCho
 		return openai.ChatCompletionToolChoiceOptionUnionParam{
 			OfChatCompletionNamedToolChoice: &openai.ChatCompletionNamedToolChoiceParam{
 				Function: openai.ChatCompletionNamedToolChoiceFunctionParam{
-					Name: choice,
+					Name: aliases.APIName(choice),
 				},
 			},
 		}, true
@@ -42,6 +46,10 @@ func buildChatCompletionsToolChoice(choice string) (openai.ChatCompletionToolCho
 // 对于具体工具名：走 function tool 分支。
 // 空字符串返回 (zero, false)，由调用方跳过设置。
 func buildResponsesToolChoice(choice string) (responses.ResponseNewParamsToolChoiceUnion, bool) {
+	return buildResponsesToolChoiceWithAliases(choice, toolNameAliases{})
+}
+
+func buildResponsesToolChoiceWithAliases(choice string, aliases toolNameAliases) (responses.ResponseNewParamsToolChoiceUnion, bool) {
 	if choice == "" {
 		return responses.ResponseNewParamsToolChoiceUnion{}, false
 	}
@@ -61,7 +69,7 @@ func buildResponsesToolChoice(choice string) (responses.ResponseNewParamsToolCho
 	default:
 		return responses.ResponseNewParamsToolChoiceUnion{
 			OfFunctionTool: &responses.ToolChoiceFunctionParam{
-				Name: choice,
+				Name: aliases.APIName(choice),
 			},
 		}, true
 	}

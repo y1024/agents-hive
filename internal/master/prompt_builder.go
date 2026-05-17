@@ -3,6 +3,7 @@ package master
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/chef-guo/agents-hive/internal/airouter"
+	"github.com/chef-guo/agents-hive/internal/asset"
 	"github.com/chef-guo/agents-hive/internal/compaction"
 	"github.com/chef-guo/agents-hive/internal/config"
 	"github.com/chef-guo/agents-hive/internal/errs"
@@ -30,21 +32,38 @@ func (m *Master) buildUserContent(ctx context.Context, text string, attachments 
 
 	parts := []llm.ContentPart{llm.TextPart(text)}
 	for _, a := range attachments {
-		m.logger.Info("[DEBUG-UPLOAD] fileconv.Convert 开始",
+		if strings.TrimSpace(a.Data) == "" {
+			if m != nil && m.assetService != nil && strings.TrimSpace(a.AssetURI) != "" {
+				data, rec, err := m.assetService.Download(ctx, asset.AssetURI(strings.TrimSpace(a.AssetURI)))
+				if err == nil {
+					a.Data = base64.StdEncoding.EncodeToString(data)
+					if strings.TrimSpace(a.MimeType) == "" && rec != nil {
+						a.MimeType = rec.MimeType
+					}
+					if strings.TrimSpace(a.Filename) == "" && rec != nil {
+						a.Filename = rec.Filename
+					}
+				}
+			}
+		}
+		if strings.TrimSpace(a.Data) == "" {
+			parts = append(parts, llm.TextPart(attachmentReferenceText(a)))
+			continue
+		}
+		m.logger.Debug("附件转换开始",
 			zap.String("filename", a.Filename),
 			zap.String("mime_type", a.MimeType),
-			zap.Int("data_len", len(a.Data)),
 		)
 		result, err := fileconv.Convert(ctx, a.Filename, a.MimeType, a.Data, m.transcribeAudio)
 		if err != nil {
-			m.logger.Error("[DEBUG-UPLOAD] fileconv.Convert 失败",
+			m.logger.Error("附件转换失败",
 				zap.String("filename", a.Filename),
 				zap.Error(err),
 			)
 			parts = append(parts, llm.TextPart(fmt.Sprintf("[文件处理失败: %s] %s", a.Filename, err.Error())))
 			continue
 		}
-		m.logger.Info("[DEBUG-UPLOAD] fileconv.Convert 成功",
+		m.logger.Debug("附件转换成功",
 			zap.String("filename", a.Filename),
 			zap.String("result_type", result.Type),
 			zap.Int("text_len", len(result.Text)),
@@ -57,18 +76,6 @@ func (m *Master) buildUserContent(ctx context.Context, text string, attachments 
 		case "file":
 			parts = append(parts, llm.ContentPart{Type: llm.ContentFile, FileData: a.Data, Filename: a.Filename})
 		}
-	}
-	m.logger.Info("[DEBUG-UPLOAD] 最终 parts 构成",
-		zap.Int("total_parts", len(parts)),
-	)
-	for i, p := range parts {
-		m.logger.Info("[DEBUG-UPLOAD] part",
-			zap.Int("index", i),
-			zap.String("type", string(p.Type)),
-			zap.Int("text_len", len(p.Text)),
-			zap.Int("image_url_len", len(p.ImageURL)),
-			zap.Int("file_data_len", len(p.FileData)),
-		)
 	}
 	return llm.NewMultiContent(parts...)
 }

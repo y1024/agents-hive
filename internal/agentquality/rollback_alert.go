@@ -32,13 +32,13 @@ type RollbackAlert struct {
 
 // RollbackEvidence 是回滚告警的证据。
 type RollbackEvidence struct {
-	CaseID           string `json:"case_id"`
-	TraceRef         string `json:"trace_ref,omitempty"`
-	ReplayRef        string `json:"replay_ref,omitempty"`
-	JudgeVerdictRef  string `json:"judge_verdict_ref,omitempty"`
-	RunnerEvidence   string `json:"runner_evidence"`
-	SemanticScore    int    `json:"semantic_score,omitempty"`
-	FailureType      string `json:"failure_type,omitempty"`
+	CaseID          string `json:"case_id"`
+	TraceRef        string `json:"trace_ref,omitempty"`
+	ReplayRef       string `json:"replay_ref,omitempty"`
+	JudgeVerdictRef string `json:"judge_verdict_ref,omitempty"`
+	RunnerEvidence  string `json:"runner_evidence"`
+	SemanticScore   int    `json:"semantic_score,omitempty"`
+	FailureType     string `json:"failure_type,omitempty"`
 }
 
 type RollbackAlertThresholds struct {

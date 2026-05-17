@@ -14,6 +14,7 @@ import (
 
 	"github.com/chef-guo/agents-hive/internal/accounting"
 	"github.com/chef-guo/agents-hive/internal/agentquality"
+	"github.com/chef-guo/agents-hive/internal/asset"
 	"github.com/chef-guo/agents-hive/internal/auth"
 	"github.com/chef-guo/agents-hive/internal/i18n"
 
@@ -27,9 +28,11 @@ import (
 	"github.com/chef-guo/agents-hive/internal/channel/wecom"
 	"github.com/chef-guo/agents-hive/internal/config"
 	"github.com/chef-guo/agents-hive/internal/controlplane"
+	"github.com/chef-guo/agents-hive/internal/cs"
 	"github.com/chef-guo/agents-hive/internal/gateway"
 	"github.com/chef-guo/agents-hive/internal/imcore"
 	"github.com/chef-guo/agents-hive/internal/journal"
+	"github.com/chef-guo/agents-hive/internal/kb"
 	"github.com/chef-guo/agents-hive/internal/llm"
 	"github.com/chef-guo/agents-hive/internal/master"
 	"github.com/chef-guo/agents-hive/internal/mcphost"
@@ -105,6 +108,10 @@ type ServerComponents struct {
 	TaskBoard           taskboard.TaskBoard
 	SessionTodoStore    sessiontodo.Store
 	AuthEngine          *auth.Engine
+	AssetService        *asset.AssetService
+	AssetAccessResolver asset.AccessResolver
+	KBService           *kb.Service
+	CustomerService     *cs.Service
 	PromptLoader        interface {
 		Start(context.Context)
 		InvalidateDBCache(key string)
@@ -233,6 +240,10 @@ func (b *feishuIngressModeBridge) Bind(
 
 // InitServer 执行 Server 模式的全量初始化，返回所有组件
 func InitServer(cfg *config.Config, configPath string, logger *zap.Logger) *ServerComponents {
+	if err := ensureFileConvDependencies(context.Background(), cfg, logger); err != nil {
+		logger.Fatal("文档转换依赖初始化失败", zap.Error(err))
+	}
+
 	sc := &ServerComponents{
 		FeishuIngressBridge: newFeishuIngressModeBridge(cfg.Channel.Feishu.ResolvedIngressMode()),
 	}
@@ -305,6 +316,7 @@ func InitServer(cfg *config.Config, configPath string, logger *zap.Logger) *Serv
 		pgPool = pgStore.Pool()
 	}
 	sc.AuthEngine = initAuthEngine(context.Background(), cfg, pgPool, logger)
+	sc.AssetService = initAssetService(cfg, pgPool, logger)
 
 	// 7.0.5 Skill DB 覆盖层（pg 可用时启用热重载）
 	if pgPool != nil {
@@ -346,6 +358,18 @@ func InitServer(cfg *config.Config, configPath string, logger *zap.Logger) *Serv
 		ServiceTier:      cfg.LLM.InteractiveServiceTier,
 	})
 	sc.LLMClient = sc.AIRouter.GetUserLLMClient()
+
+	if pgPool != nil {
+		kbOptions := []kb.ServiceOption{kb.WithSummaryGenerator(newAirouterKBSummaryGenerator(sc.AIRouter, logger))}
+		if sc.AssetService != nil {
+			kbOptions = append(kbOptions, kb.WithAssetUploader(newKBAssetUploader(sc.AssetService)))
+		}
+		sc.KBService = kb.NewService(kb.NewPGStore(pgPool), kbOptions...)
+		logger.Info("KB 服务已初始化")
+	}
+	if sc.AssetService != nil {
+		sc.AssetAccessResolver = initAssetAccessResolver(logger, sc.KBService)
+	}
 
 	// 8. Master（使用 DB 覆盖后的 cfg）
 	sc.Master = master.NewMaster(master.Config{
@@ -391,8 +415,17 @@ func InitServer(cfg *config.Config, configPath string, logger *zap.Logger) *Serv
 	sc.Master.EnableStreamingExecutor = true // 域D: 并发工具执行已就绪，正式启用
 	sc.Master.SetValidationExecutor(sc.Executor)
 	sc.Master.SetMCPHost(sc.MCPHost)
+	if sc.AssetService != nil {
+		sc.Master.SetAssetService(sc.AssetService)
+	}
 	if sc.SessionTodoStore != nil {
 		sc.Master.SetSessionTodoStore(sc.SessionTodoStore)
+	}
+	if sc.KBService != nil {
+		sc.Master.SetKBEvidenceReader(sc.KBService)
+	}
+	if sc.KBService != nil {
+		sc.KBService.SetQualityRecorder(sc.Master)
 	}
 
 	// hive-skill-on-demand §11.5：把 Master 适配为 mcphost.HITLEmitter 注入 Host。
@@ -480,12 +513,17 @@ func InitServer(cfg *config.Config, configPath string, logger *zap.Logger) *Serv
 	initTaskBoard(sc, cfg, logger)
 
 	// 11. 注册内置工具
+	if pgStore, ok := sc.DB.(*store.PostgresStore); ok && pgStore != nil && pgStore.Pool() != nil {
+		sc.CustomerService = cs.NewService(cs.NewPGStore(pgStore.Pool()))
+	} else {
+		sc.CustomerService = cs.NewService(cs.NewMemoryStore())
+	}
 	// 注入 HITL 审批桥接（用于 create_tool 审批 和 exec_rules ask 策略）
 	if sc.Master != nil {
 		tools.SetApprovalBridge(NewApprovalBridge(sc.Master.GetHITLBroker()))
 	}
 	tools.RegisterBuiltinTools(sc.MCPHost, logger, cfg, sc.Master, sc.Master,
-		cfg.CustomToolsDir, nil, sc.SkillReg, sc.PluginMgr, nil, sc.MemStore, sc.Master.GetAgentFactory(), sc.SessionTodoStore, sc.Master, sc.TaskBoard)
+		cfg.CustomToolsDir, nil, sc.SkillReg, sc.PluginMgr, nil, sc.MemStore, sc.Master.GetAgentFactory(), sc.SessionTodoStore, sc.Master, sc.TaskBoard, sc.KBService, sc.CustomerService)
 
 	// 11.1 hive-skill-on-demand：按需注册 skill_install / skill_search。
 	// OnDemandEnabled=false 时完全 skip，对旧部署 byte-identical（§8.4 回归基线配套）。
@@ -1329,6 +1367,20 @@ func initChannels(sc *ServerComponents, cfg *config.Config, logger *zap.Logger) 
 	}
 	if pgStore, ok := sc.DB.(*store.PostgresStore); ok && pgStore != nil {
 		channelRouter.SetMetricsWriter(observability.NewPgMetricsWriter(pgStore.Pool(), logger))
+	}
+	if sc.KBService != nil {
+		channelRouter.SetKBService(sc.KBService)
+		channelRouter.SetKBSessionDomainUpdater(func(sessionID, domainID string, enabled bool) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := sc.Master.SetSessionKBDomain(ctx, sessionID, domainID, enabled); err != nil {
+				logger.Warn("IM KB 会话 domain 持久化失败",
+					zap.String("session_id", sessionID),
+					zap.String("domain_id", domainID),
+					zap.Bool("enabled", enabled),
+					zap.Error(err))
+			}
+		})
 	}
 
 	// P0-#7 & P0-#8：注入 RetryQueue 和 EventClaimer。

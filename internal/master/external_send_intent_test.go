@@ -16,6 +16,69 @@ func TestResolveTurnIntent_DetectsExplicitExternalSendRequest(t *testing.T) {
 	}
 }
 
+func TestResolveTurnIntent_DetectsExplicitFeishuBusinessWriteRequests(t *testing.T) {
+	cases := []string{
+		"创建一个飞书任务，标题是跟进合同",
+		"在飞书新建任务：跟进合同",
+		"发起飞书审批",
+		"写入飞书表格",
+		"新增飞书多维表格记录",
+	}
+	for _, q := range cases {
+		t.Run(q, func(t *testing.T) {
+			intent := resolveTurnIntent(&SessionState{ID: "s1"}, q, router.IntentFrame{Kind: router.IntentAnswer})
+			if !isStructuredExternalSendIntent(intent) {
+				t.Fatalf("business write request should become external write intent: %+v", intent)
+			}
+			if !isExternalBusinessWriteIntent(intent) {
+				t.Fatalf("business write signal missing: %+v", intent)
+			}
+			if len(router.IntentActionCapabilityIDs(intent)) == 0 {
+				t.Fatalf("business write intent should carry action capability subtype: %+v", intent)
+			}
+			if !equalStringSlices(intent.AllowedDomainsHint, []string{"feishu"}) {
+				t.Fatalf("AllowedDomainsHint = %#v, want feishu; intent=%+v", intent.AllowedDomainsHint, intent)
+			}
+		})
+	}
+}
+
+func TestResolveTurnIntent_FeishuBusinessWriteSubtypes(t *testing.T) {
+	cases := []struct {
+		query string
+		want  string
+	}{
+		{query: "创建一个飞书任务，标题是跟进合同", want: router.ActionCapabilityExternalTaskCreate},
+		{query: "发起飞书审批", want: router.ActionCapabilityExternalApprovalSubmit},
+		{query: "写入飞书表格", want: router.ActionCapabilityExternalTableWrite},
+		{query: "新增飞书多维表格记录", want: router.ActionCapabilityExternalRecordCreate},
+		{query: "更新飞书多维表格记录", want: router.ActionCapabilityExternalRecordUpdate},
+	}
+	for _, tc := range cases {
+		t.Run(tc.query, func(t *testing.T) {
+			intent := resolveTurnIntent(&SessionState{ID: "s1"}, tc.query, router.IntentFrame{Kind: router.IntentAnswer})
+			got := router.IntentActionCapabilityIDs(intent)
+			if len(got) != 1 || got[0] != tc.want {
+				t.Fatalf("IntentActionCapabilityIDs = %+v, want %s; intent=%+v", got, tc.want, intent)
+			}
+		})
+	}
+}
+
+func TestResolveTurnIntent_MarksStructuredFeishuBusinessWriteIntent(t *testing.T) {
+	classified := router.IntentFrame{
+		Kind:              router.IntentExternalWrite,
+		RequiresExternal:  true,
+		AllowsSideEffects: true,
+		Signals:           []string{"llm"},
+	}
+	intent := resolveTurnIntent(&SessionState{ID: "s1"}, "创建一个飞书任务", classified)
+
+	if !isExternalBusinessWriteIntent(intent) {
+		t.Fatalf("structured classifier result should retain business write signal: %+v", intent)
+	}
+}
+
 func TestExternalSendIntentFromQuery_PlatformHints(t *testing.T) {
 	cases := []struct {
 		name string

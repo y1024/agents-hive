@@ -52,9 +52,10 @@ func responsesServiceTierForDiag(params responses.ResponseNewParams) string {
 // chatWithToolsStreamViaResponses 通过 Responses API 流式实现带工具调用的 Chat。
 func (c *Client) chatWithToolsStreamViaResponses(ctx context.Context, req ChatWithToolsRequest, onChunk StreamCallback) (*ChatWithToolsResponse, error) {
 	snapModel, snapBaseURL, snapProvider := c.snapshot()
+	aliases := toolNameAliasesForTools(req.Tools)
 
 	// 构建 input items（与 chatWithToolsViaResponses 相同）
-	input := buildResponsesInputFromToolMessages(req.Messages)
+	input := buildResponsesInputFromToolMessagesWithAliases(req.Messages, aliases)
 
 	// 构建工具定义
 	tools, err := convertToolsForResponses(req.Tools)
@@ -94,7 +95,7 @@ func (c *Client) chatWithToolsStreamViaResponses(ctx context.Context, req ChatWi
 	})
 
 	// P0-A：ToolChoice 透传（空字符串时跳过，保持旧 auto 行为）
-	if tc, ok := buildResponsesToolChoice(req.ToolChoice); ok {
+	if tc, ok := buildResponsesToolChoiceWithAliases(req.ToolChoice, aliases); ok {
 		params.ToolChoice = tc
 	}
 
@@ -196,7 +197,7 @@ func (c *Client) chatWithToolsStreamViaResponses(ctx context.Context, req ChatWi
 			if variant.Item.Type == "function_call" {
 				pendingCalls[variant.Item.ID] = &responsesPendingToolCall{
 					CallID: variant.Item.CallID,
-					Name:   variant.Item.Name,
+					Name:   aliases.InternalName(variant.Item.Name),
 				}
 			}
 

@@ -52,6 +52,7 @@ type ContractEvidence struct {
 	RecipientAmbiguous  bool
 	RecipientMissing    bool
 	QuestionAsked       bool
+	RepairNeeded        bool
 	SendAttempted       bool
 	SendAttemptValid    bool
 	MessagingFailed     bool
@@ -59,6 +60,10 @@ type ContractEvidence struct {
 	SendPlatform        string
 	WrongPlatform       bool
 	NoSendableRecipient bool
+	WriteAttempted      bool
+	WriteAttemptValid   bool
+	WriteFailed         bool
+	WriteTool           string
 }
 
 func NewIntentContract(intent router.IntentFrame) (IntentContract, bool) {
@@ -81,6 +86,9 @@ func (c IntentContract) Evaluate(messages []llm.MessageWithTools, response llm.C
 
 func evaluateExternalSendContract(messages []llm.MessageWithTools, intent router.IntentFrame) ContractEvaluation {
 	evidence := collectExternalSendEvidence(messages, intent)
+	if evidence.RepairNeeded {
+		return ContractEvaluation{Status: ContractIncomplete, Reason: "external_write_repair_needed", Missing: []MissingRequirement{MissingSendAttempt}, Evidence: evidence}
+	}
 	if evidence.NoSendableRecipient && !evidence.QuestionAsked {
 		return ContractEvaluation{Status: ContractNeedsUser, Reason: "external_send_no_sendable_recipient", Evidence: evidence}
 	}
@@ -89,6 +97,12 @@ func evaluateExternalSendContract(messages []llm.MessageWithTools, intent router
 	}
 	if evidence.MessagingFailed {
 		return ContractEvaluation{Status: ContractBlocked, Reason: "external_send_tool_failed", Evidence: evidence}
+	}
+	if evidence.WriteFailed {
+		return ContractEvaluation{Status: ContractBlocked, Reason: "external_write_tool_failed", Evidence: evidence}
+	}
+	if evidence.WriteAttemptValid {
+		return ContractEvaluation{Status: ContractSatisfied, Reason: "external_write_satisfied", Evidence: evidence}
 	}
 	if evidence.RecipientAmbiguous && evidence.QuestionAsked {
 		return ContractEvaluation{Status: ContractNeedsUser, Reason: "external_send_recipient_ambiguous", Evidence: evidence}
@@ -144,10 +158,11 @@ const (
 )
 
 type externalSendCallFact struct {
-	Name     string
-	Kind     externalSendCallKind
-	Action   string
-	Platform string
+	Name          string
+	Kind          externalSendCallKind
+	Action        string
+	Platform      string
+	BusinessWrite bool
 }
 
 func collectExternalSendEvidence(messages []llm.MessageWithTools, intent router.IntentFrame) ContractEvidence {
@@ -171,6 +186,10 @@ func collectExternalSendEvidence(messages []llm.MessageWithTools, intent router.
 			case externalSendCallSend:
 				evidence.SendAttempted = true
 				evidence.MessagingTool = fact.Name
+				if fact.BusinessWrite {
+					evidence.WriteAttempted = true
+					evidence.WriteTool = fact.Name
+				}
 				if strings.TrimSpace(fact.Platform) != "" {
 					evidence.SendPlatform = strings.TrimSpace(fact.Platform)
 				}
@@ -179,6 +198,9 @@ func collectExternalSendEvidence(messages []llm.MessageWithTools, intent router.
 					evidence.WrongPlatform = true
 				}
 				hasContent, hasRecipient := sendCallPayloadFacts(call)
+				if fact.BusinessWrite {
+					hasContent, hasRecipient = businessWritePayloadFacts(call)
+				}
 				if hasContent {
 					evidence.ContentPrepared = true
 				}
@@ -187,6 +209,9 @@ func collectExternalSendEvidence(messages []llm.MessageWithTools, intent router.
 				}
 				if hasContent && hasRecipient && matchesPlatform {
 					evidence.SendAttemptValid = true
+					if fact.BusinessWrite {
+						evidence.WriteAttemptValid = true
+					}
 				}
 			}
 		}
@@ -194,6 +219,13 @@ func collectExternalSendEvidence(messages []llm.MessageWithTools, intent router.
 			continue
 		}
 		fact := callsByID[msg.ToolCallID]
+		if msg.IsError && isRecoverableExternalToolRepair(msg) {
+			if fact.BusinessWrite {
+				evidence.WriteAttempted = true
+			}
+			evidence.RepairNeeded = true
+			continue
+		}
 		if toolResultCanPrepareExternalSendContent(msg, fact) {
 			evidence.ContentPrepared = true
 		}
@@ -201,19 +233,44 @@ func collectExternalSendEvidence(messages []llm.MessageWithTools, intent router.
 			applyContactLookupEvidence(&evidence, msg.Content.Text(), fact)
 		}
 		if msg.IsError && (fact.Kind == externalSendCallSend || isExternalMessagingTool(msg.ToolName)) && externalSendFactMatchesIntent(fact, platforms) {
-			evidence.MessagingFailed = true
+			if fact.BusinessWrite {
+				evidence.WriteFailed = true
+				if evidence.WriteTool == "" {
+					evidence.WriteTool = msg.ToolName
+				}
+			} else {
+				evidence.MessagingFailed = true
+			}
 			if evidence.MessagingTool == "" {
 				evidence.MessagingTool = msg.ToolName
 			}
 		}
 		if !msg.IsError && fact.Kind == externalSendCallSend && externalSendFactMatchesIntent(fact, platforms) {
-			evidence.MessagingFailed = false
+			if fact.BusinessWrite {
+				evidence.WriteFailed = false
+				evidence.WriteAttemptValid = true
+				if evidence.WriteTool == "" {
+					evidence.WriteTool = fact.Name
+				}
+			} else {
+				evidence.MessagingFailed = false
+			}
 			if evidence.MessagingTool == "" {
 				evidence.MessagingTool = fact.Name
 			}
 		}
 	}
 	return evidence
+}
+
+func isRecoverableExternalToolRepair(msg llm.MessageWithTools) bool {
+	if !msg.IsError {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(msg.Metadata["recoverable"]), "true") {
+		return true
+	}
+	return isRecoverableToolCallError(msg.Content.Text())
 }
 
 func intentPlatformSet(intent router.IntentFrame) map[string]bool {
@@ -270,6 +327,8 @@ func classifyExternalSendToolCall(call llm.ToolCall) externalSendCallFact {
 			return externalSendCallFact{Name: name, Kind: externalSendCallLookup, Action: action, Platform: "feishu"}
 		case "send_message", "send_image", "send_file":
 			return externalSendCallFact{Name: name, Kind: externalSendCallSend, Action: action, Platform: "feishu"}
+		case "create_approval", "create_bitable_record", "update_bitable_record", "create_task", "complete_task", "write_sheet":
+			return externalSendCallFact{Name: name, Kind: externalSendCallSend, Action: action, Platform: "feishu", BusinessWrite: true}
 		}
 	}
 	return externalSendCallFact{Name: name}
@@ -303,6 +362,59 @@ func sendCallPayloadFacts(call llm.ToolCall) (bool, bool) {
 	hasContent := firstNonEmptyStringFromMap(payload, "content", "text", "message") != ""
 	hasRecipient := firstNonEmptyStringFromMap(payload, "receive_id", "chat_id", "open_id", "user_id", "email", "recipient", "to", "recipient_id", "conversation_id") != ""
 	return hasContent, hasRecipient
+}
+
+func businessWritePayloadFacts(call llm.ToolCall) (bool, bool) {
+	action := toolActionFromArgs(call.Arguments)
+	var payload map[string]any
+	if err := json.Unmarshal(call.Arguments, &payload); err != nil {
+		return false, false
+	}
+	hasAll := func(keys ...string) bool {
+		for _, key := range keys {
+			if !payloadHasNonEmptyValue(payload, key) {
+				return false
+			}
+		}
+		return len(keys) > 0
+	}
+	if rule, ok := router.ActionCapabilityRuleForAction(call.Name, action); ok {
+		ok := hasAll(rule.RequiredFields...)
+		return ok, ok
+	}
+	switch action {
+	case "create_task":
+		ok := hasAll("summary")
+		return ok, ok
+	case "complete_task":
+		ok := hasAll("task_id")
+		return ok, ok
+	case "create_approval":
+		ok := hasAll("approval_code", "open_id", "form")
+		return ok, ok
+	case "create_bitable_record":
+		ok := hasAll("app_token", "table_id", "fields")
+		return ok, ok
+	case "update_bitable_record":
+		ok := hasAll("app_token", "table_id", "record_id", "fields")
+		return ok, ok
+	case "write_sheet":
+		ok := hasAll("spreadsheet_token", "range", "values")
+		return ok, ok
+	default:
+		return sendCallPayloadFacts(call)
+	}
+}
+
+func payloadHasNonEmptyValue(payload map[string]any, key string) bool {
+	value, ok := payload[key]
+	if !ok || value == nil {
+		return false
+	}
+	if s, ok := value.(string); ok {
+		return strings.TrimSpace(s) != ""
+	}
+	return true
 }
 
 func sendCallHasContentAndRecipient(call llm.ToolCall) bool {

@@ -1,0 +1,312 @@
+openapi: 3.0.3
+info:
+  title: Agents Hive Customer Service API
+  version: v1
+servers:
+  - url: /api/v1
+security:
+  - bearerAuth: []
+paths:
+  /cs/sessions:
+    post:
+      summary: 创建客服会话
+      operationId: createCustomerServiceSession
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCSSessionRequest'
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CSSession'
+  /cs/sessions/{id}/state:
+    get:
+      summary: 查询客服会话状态
+      operationId: getCustomerServiceSessionState
+      parameters:
+        - $ref: '#/components/parameters/ID'
+      responses:
+        '200':
+          description: 当前状态
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CSSessionStateSnapshot'
+        '404':
+          description: 不存在或无权访问
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /cs/sessions/{id}/escalate/cancel:
+    post:
+      summary: 取消当前转人工请求
+      operationId: cancelCustomerServiceSessionEscalation
+      parameters:
+        - $ref: '#/components/parameters/ID'
+      responses:
+        '200':
+          description: 已取消
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CSSessionStateSnapshot'
+  /cs/webhooks/subscriptions:
+    post:
+      summary: 创建 webhook 订阅
+      operationId: createCustomerServiceWebhookSubscription
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWebhookSubscriptionRequest'
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookSubscription'
+    get:
+      summary: 列出 webhook 订阅
+      operationId: listCustomerServiceWebhookSubscriptions
+      responses:
+        '200':
+          description: 订阅列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/WebhookSubscription'
+  /cs/webhooks/dlq:
+    get:
+      summary: 列出 webhook DLQ
+      operationId: listCustomerServiceWebhookDLQ
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+      responses:
+        '200':
+          description: DLQ 列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/OutboxMessage'
+  /cs/webhooks/dlq/{id}/retry:
+    post:
+      summary: 重试 DLQ 消息
+      operationId: retryCustomerServiceWebhookDLQ
+      parameters:
+        - $ref: '#/components/parameters/ID'
+      responses:
+        '200':
+          description: 已重新排队
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OutboxMessage'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    ID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+  schemas:
+    OwnerScope:
+      type: object
+      properties:
+        domain_id:
+          type: string
+          default: customer_service
+        owner_scope:
+          type: string
+          default: user
+        owner_id:
+          type: string
+    CreateCSSessionRequest:
+      type: object
+      properties:
+        external_user_ref:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+    CSSession:
+      type: object
+      required: [id, scope, state, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        scope:
+          $ref: '#/components/schemas/OwnerScope'
+        state:
+          type: string
+          enum: [initial, ai_handling, escalate_pending, human_handling, resolved]
+        external_user_ref:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        resolved_at:
+          type: string
+          format: date-time
+    Escalation:
+      type: object
+      required: [id, scope, subject, summary, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        scope:
+          $ref: '#/components/schemas/OwnerScope'
+        session_id:
+          type: string
+        subject:
+          type: string
+        summary:
+          type: string
+        priority:
+          type: string
+        status:
+          type: string
+          enum: [open, queued, sent, failed, canceled]
+        metadata:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        canceled_at:
+          type: string
+          format: date-time
+    CSSessionStateSnapshot:
+      type: object
+      required: [session]
+      properties:
+        session:
+          $ref: '#/components/schemas/CSSession'
+        escalation:
+          $ref: '#/components/schemas/Escalation'
+    CreateWebhookSubscriptionRequest:
+      type: object
+      required: [url]
+      properties:
+        name:
+          type: string
+        url:
+          type: string
+          format: uri
+        secret:
+          type: string
+        events:
+          type: array
+          items:
+            type: string
+        enabled:
+          type: boolean
+        metadata:
+          type: object
+          additionalProperties: true
+    WebhookSubscription:
+      type: object
+      properties:
+        id:
+          type: string
+        scope:
+          $ref: '#/components/schemas/OwnerScope'
+        name:
+          type: string
+        url:
+          type: string
+        secret:
+          type: string
+        events:
+          type: array
+          items:
+            type: string
+        enabled:
+          type: boolean
+        metadata:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    OutboxMessage:
+      type: object
+      properties:
+        id:
+          type: string
+        scope:
+          $ref: '#/components/schemas/OwnerScope'
+        escalation_id:
+          type: string
+        subscription_id:
+          type: string
+        event_type:
+          type: string
+        payload:
+          type: object
+          additionalProperties: true
+        status:
+          type: string
+          enum: [queued, sent, failed]
+        attempts:
+          type: integer
+        max_attempts:
+          type: integer
+        next_attempt_at:
+          type: string
+          format: date-time
+        last_error:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+        code:
+          type: string

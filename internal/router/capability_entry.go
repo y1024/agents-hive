@@ -13,6 +13,7 @@ const (
 	CapabilityExternalSendWeCom               Capability = "external.send.wecom"
 	CapabilityExternalSendDingTalk            Capability = "external.send.dingtalk"
 	CapabilityRuntimeExec                     Capability = "runtime.exec"
+	CapabilityKBRead                          Capability = "kb.read"
 	CapabilityCustomerServiceKBRead           Capability = "customer_service.kb.read"
 	CapabilityCustomerServiceEscalate         Capability = "customer_service.escalate"
 	CapabilityCustomerServiceCancelEscalation Capability = "customer_service.escalation.cancel"

@@ -8,10 +8,19 @@ import (
 	"github.com/chef-guo/agents-hive/internal/router"
 )
 
+const externalBusinessWriteSignal = router.IntentSignalExternalBusinessWrite
+
 func resolveTurnIntent(session *SessionState, query string, classified router.IntentFrame) router.IntentFrame {
 	classified = normalizeRouteIntent(classified)
+	businessWriteRules := router.MatchActionCapabilityRulesForText(query)
 	if isStructuredExternalSendIntent(classified) {
+		if len(businessWriteRules) > 0 {
+			return markExternalBusinessWriteIntent(classified, query, "action_capability_rule", businessWriteRules)
+		}
 		return classified
+	}
+	if len(businessWriteRules) > 0 && hasExternalWriteDomainOrRulePlatform(query, businessWriteRules) {
+		return externalBusinessWriteIntentFromQuery(query, "action_capability_rule", businessWriteRules)
 	}
 	if isExplicitExternalSendRequest(query) {
 		return externalSendIntentFromQuery(query, "explicit_external_send_rule")
@@ -79,6 +88,70 @@ func externalSendIntentFromQuery(query, signal string) router.IntentFrame {
 		Signals:            signals,
 		AllowedDomainsHint: hints,
 	}
+}
+
+func externalBusinessWriteIntentFromQuery(query, signal string, rules []router.ActionCapabilityRule) router.IntentFrame {
+	return markExternalBusinessWriteIntent(externalSendIntentFromQuery(query, signal), query, signal, rules)
+}
+
+func markExternalBusinessWriteIntent(intent router.IntentFrame, query, signal string, rules []router.ActionCapabilityRule) router.IntentFrame {
+	if strings.TrimSpace(intent.Subject) == "" {
+		intent.Subject = truncateRunes(strings.TrimSpace(query), 120)
+	}
+	intent.Kind = router.IntentExternalWrite
+	intent.RequiresExternal = true
+	intent.AllowsSideEffects = true
+	if intent.Confidence < 0.86 {
+		intent.Confidence = 0.86
+	}
+	intent.Signals = appendSignalForToolVisibility(intent.Signals, signal)
+	intent.Signals = appendSignalForToolVisibility(intent.Signals, externalBusinessWriteSignal)
+	for _, rule := range rules {
+		intent.Signals = appendSignalForToolVisibility(intent.Signals, router.ActionCapabilitySignal(rule.CapabilityID))
+	}
+	if len(intent.AllowedDomainsHint) == 0 {
+		if hints, multiPlatform := externalBusinessWriteAllowedDomainsHint(query, rules); !multiPlatform {
+			intent.AllowedDomainsHint = hints
+		}
+	}
+	return intent
+}
+
+func externalBusinessWriteAllowedDomainsHint(query string, rules []router.ActionCapabilityRule) ([]string, bool) {
+	if hints, multiPlatform := externalSendAllowedDomainsHint(query); len(hints) > 0 || multiPlatform {
+		return hints, multiPlatform
+	}
+	var hints []string
+	for _, rule := range rules {
+		for _, platform := range rule.Platforms {
+			platform = strings.TrimSpace(strings.ToLower(platform))
+			if platform == "" || platform == "lark" {
+				platform = "feishu"
+			}
+			exists := false
+			for _, existing := range hints {
+				if existing == platform {
+					exists = true
+					break
+				}
+			}
+			if !exists {
+				hints = append(hints, platform)
+			}
+		}
+	}
+	if len(hints) > 1 {
+		return nil, true
+	}
+	return hints, false
+}
+
+func hasExternalWriteDomainOrRulePlatform(query string, rules []router.ActionCapabilityRule) bool {
+	if hasExternalWriteDomain(strings.ToLower(strings.TrimSpace(query))) {
+		return true
+	}
+	hints, multiPlatform := externalBusinessWriteAllowedDomainsHint(query, rules)
+	return multiPlatform || len(hints) > 0
 }
 
 func externalSendAllowedDomainsHint(query string) ([]string, bool) {
@@ -266,6 +339,15 @@ var explicitExternalSendPatterns = []string{
 	"发送给", "发给", "发到", "发送到", "转发给", "转给", "推送到", "通知到",
 	"给郭松发", "给对方发", "给客户发", "给用户发", "给群里发",
 	"send this to", "send to", "send it to", "forward this to", "forward to",
+}
+
+func hasExternalWriteDomain(q string) bool {
+	return containsAny(q,
+		"飞书", "feishu", "lark",
+		"钉钉", "dingtalk", "ding talk",
+		"企业微信", "企微", "wecom", "weixin work", "wechat work",
+		"个人微信", "微信", "wechat", "wechatbot",
+	)
 }
 
 func isExplicitCreateSkillRequest(q string) bool {

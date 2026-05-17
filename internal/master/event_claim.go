@@ -90,8 +90,8 @@ var ErrClaimNotFound = errors.New("event_claim: event not found (already evicted
 type MemoryEventClaimer struct {
 	mu sync.Mutex
 
-	claimed   map[string]*claimEntry  // claimed/in-flight
-	completed map[string]time.Time    // completed eventID → 完成时间，用于 GC
+	claimed   map[string]*claimEntry // claimed/in-flight
+	completed map[string]time.Time   // completed eventID → 完成时间，用于 GC
 	logger    *zap.Logger
 
 	completedTTL time.Duration
@@ -241,14 +241,14 @@ func (c *MemoryEventClaimer) gcCompletedLocked(now time.Time) {
 //
 // 调用方负责传 stop channel 或 context 控制生命周期。
 type ReclaimWorker struct {
-	claimer    EventClaimer
-	interval   time.Duration
-	logger     *zap.Logger
-	onReclaim  func(token ClaimToken)
-	stopCh     chan struct{}
-	stopOnce   sync.Once
-	doneCh     chan struct{}
-	now        func() time.Time
+	claimer   EventClaimer
+	interval  time.Duration
+	logger    *zap.Logger
+	onReclaim func(token ClaimToken)
+	stopCh    chan struct{}
+	stopOnce  sync.Once
+	doneCh    chan struct{}
+	now       func() time.Time
 }
 
 // NewReclaimWorker 构造 worker。interval<=0 取默认 5s；onReclaim nil 时仅日志。

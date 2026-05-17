@@ -437,9 +437,9 @@ func TestCASScenarioLabels_EnumLocked(t *testing.T) {
 
 // TestCASConflict_ScenarioLabelsIndependent PG 集成测试：驱动三路 CAS conflict，
 // 每路独立验证观察者回调接到的 scenario label 正确。防：
-//   1. 某一 case 回调漏 emit（Codex R5-3 红线）
-//   2. label 字符串与 enum 白名单不一致（cardinality 漂移）
-//   3. 不同 case 被错误映射到同一 label（例如 ghost_id 错写成 duplicate_create）
+//  1. 某一 case 回调漏 emit（Codex R5-3 红线）
+//  2. label 字符串与 enum 白名单不一致（cardinality 漂移）
+//  3. 不同 case 被错误映射到同一 label（例如 ghost_id 错写成 duplicate_create）
 //
 // Sprint 2.3 准入条件。
 func TestCASConflict_ScenarioLabelsIndependent(t *testing.T) {

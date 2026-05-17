@@ -1,5 +1,94 @@
 # TODOS
 
+## [P1] KB：PageIndex-style 真实样本检索基准集
+
+**What:** 基于真实 PDF/DOCX/Markdown 业务文档建立 KB 检索 golden cases，记录 query、expected `doc_id`、expected `node_ids` / `page_ranges`、expected citation nodes / citation page ranges，并用 `internal/agentquality.ScoreKBPageIndexRetrieval` 统计 retrieval hit rate 和 citation hit rate。
+
+**Why:** 当前代码已经按 PageIndex 核心契约接入 `kb.doc.meta -> kb.doc.structure -> kb.section.text`，并支持 PDF 页锚 `start_page/end_page` 与 `page_ranges` 精确取证；但“准确率达到 PageIndex 水平”不能靠形态判断，必须用业务样本和真实 provider 输出验证。
+
+**Context:**
+- 已完成：Markdown tree-mode、页锚提取、`kb.doc.meta` 输出 `page_count/line_count/node_count`、`kb.doc.structure` 输出 `start_page/end_page`、`kb.section.text.page_ranges`、页范围正文切片、页内图片 `asset_refs`、PageIndex-style score helper。
+- 样本集至少覆盖：带 TOC PDF、无 TOC PDF、扫描件 OCR、DOCX 标题层级、Markdown 前言、图片章节、跨页答案。
+- 验收口径：不把整篇文档作为成功；必须命中 tight node/page range，并在最终 citation 中包含期望节点和期望页范围。
+- 该 TODO 是评测/样本补齐，不是新建向量库或旁路 RAG。
+
+**Effort:** M
+
+---
+
+## [P1] 统一对象存储：tenant/system ACL resolver
+
+**What:** 为统一资产层补齐 tenant/system 作用域的业务 ACL resolver，覆盖 `source_kind=chat_attachment`、`kb_document_image`、`agent_artifact` 以外的多租户资产解析场景。
+
+**Why:** 当前对象存储核心、KB 图片 resolver、user-scoped chat/artifact resolve 已落地；但 tenant/system 资产还没有完整业务授权闭环。`asset://` 不是授权凭证，生产多租户场景不能只靠 URI 或 owner 基础字段放行。
+
+**Context:**
+- 已完成：`internal/asset`、MinIO/S3-compatible provider、PG metadata、resolve/proxy API、KB 图片 resolver、Agent artifact session 校验、Web/飞书附件持久化。
+- 待实施：定义 tenant/system 的 `ResolveContext` 来源、业务 owner 映射、session/agent/domain 约束、审计字段和拒绝指标。
+- HTTP resolve 仍必须 fail closed：没有显式 resolver 或 resolver 无法确认授权时拒绝。
+- 参考运维入口：`docs/运维手册/unified-asset-storage.md`。
+- 已归档计划：`docs/计划与路线/归档/2026-05-16-统一对象存储层计划.md`。
+
+**Effort:** M
+
+---
+
+## [P2] 统一对象存储：multipart / streaming 上传
+
+**What:** 将 `AssetService.Upload([]byte)` 的大文件路径扩展为 reader-based streaming / S3 multipart 上传，避免并发 100MB 对象导致内存峰值和 GC 压力过高。
+
+**Why:** 当前首版硬限制单对象 100MB，聊天入口仍有 25MB 单附件限制，能覆盖首发场景；但 PDF/DOCX、客服资料包、外部 Widget 上传进入生产后，需要流式 hash、分片上传、失败清理和可观测性。
+
+**Context:**
+- 已完成：KB Admin/API 上传入口只接受 `multipart/form-data` 文档文件 + 图片资产，并会进入 `internal/kb/asset_ingest.go` 统一写 `internal/asset`；未上线无老客户端兼容负担，JSON/base64 ingest API 已删除，非 multipart 请求返回 415。本 TODO 不是“KB 上传入口缺失”，而是对象存储底层大对象上传仍使用内存 `[]byte`。
+- 当前限制：`DefaultMaxUploadBytes = 100MB`。
+- 目标接口：保留现有 `Upload` 兼容小文件，新增 reader-based 上传入口，支持 SHA-256 streaming hash、size limit、content-type、取消和超时。
+- MinIO/S3 provider 优先使用 SDK multipart；local provider 使用临时文件 + 原子 rename。
+- 验收：并发大文件上传内存不随文件大小线性膨胀；失败后无孤儿 multipart；GC 仍能清理历史孤儿对象。
+
+**Effort:** M
+
+---
+
+## [P2] IM 附件：钉钉 / 企微 AttachmentDownloader
+
+**What:** 为钉钉、企微插件实现 `channel.AttachmentDownloader`，把各平台原始附件下载为统一 `channel.Attachment{Data,MimeType}` 后复用资产层。
+
+**Why:** Router 和 Master 已完成平台无关附件下载/持久化链路，飞书和微信已接入；钉钉、企微当前入站层仍只摄取文本，若后续只传 file key / media id 而不下载对象体，就无法进入统一 `internal/asset`，后续 turn 也不能可靠引用。
+
+**Context:**
+- 已完成抽象：`channel.AttachmentDownloader`、Router 下载、Master 上传为 `source_kind=chat_attachment`。
+- 已完成实现：飞书通过 `Client.DownloadMessageResource` 接入；微信通过官方 wechatbot SDK `Download` 接入，Router 对含附件消息跳过 debounce，避免附件上下文被合并丢失。
+- 待实施平台：dingtalk、wecom。必须先在各自 webhook/callback 层把平台媒体事件解析为 `channel.Attachment`，再复用官方 API / 现有 client 下载；不能在 Router 中写平台分支。
+- 验收：各平台入站图片/文件能写入 `assets` metadata，消息 metadata 带 `asset_uri` / `content_hash`，附件仍继续走现有 fileconv 给 LLM。
+
+**Effort:** M
+
+---
+
+## [P1] 工具域统一 Phase 7：迁移观察与旧入口降级
+
+**What:** 跟踪工具域统一剩余观察项，并在指标满足后推进旧入口降级：
+
+1. IM legacy/unified 7 天、14 天指标窗口
+2. 旧文件工具默认入口是否降级
+3. 旧入口是否移除 Core
+
+**Why:** `filesystem.action` 与 `im_api.send_message` 的代码实施已完成，但旧入口降级不能按代码完成时间推进，必须按真实使用指标与事故窗口判断。否则会影响历史 skill/sub-agent、旧会话 replay、batch 并发读性能和 IM 发送稳定性。
+
+**Context:**
+- IM 指标：观察 `im_send_legacy_path_total` 与 `im_send_unified_path_total`
+- 7 天门槛：legacy 占比低于 20%，且 unified 错误率不高于 legacy
+- 14 天门槛：legacy 占比低于 5% 连续 7 天，且无 P0/P1 事故
+- 文件工具指标：观察 `hive_tool_call_total`、`hive_tool_error_total`、`hive_filesystem_action_total`、`hive_route_input_denied_total`
+- 决策 1：是否把旧 `read_file|grep|glob|ls|write_file|edit|multiedit` 从默认可见入口降级为兼容入口
+- 决策 2：是否移除旧入口 Core 标记；删除工具名不在当前范围内
+- 归档验收报告：`docs/验收报告/2026-05-16-工具域统一与分层收敛实施验收报告.md`
+
+**Effort:** S（观察与配置调整）→ M（如涉及默认可见性策略变更）
+
+---
+
 ## [P1] WeChat 测试覆盖基线
 
 **What:** 为 wechatbot 核心路径补全单元测试，达到关键路径 100% 覆盖。

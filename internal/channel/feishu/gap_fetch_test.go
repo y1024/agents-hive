@@ -546,7 +546,7 @@ func (p *gapFetchCaptureProcessor) ProcessMessage(_ context.Context, _ string, i
 	return master.TaskResponse{Content: "ok"}, nil
 }
 
-func (p *gapFetchCaptureProcessor) ProcessMessageFromIM(_ context.Context, _ string, input, channelMessageID, _ string, _ bool, imCtx *imctx.IMMessageContext) (master.TaskResponse, error) {
+func (p *gapFetchCaptureProcessor) ProcessMessageFromIM(_ context.Context, _ string, input, channelMessageID string, _ []master.FileAttachment, _ string, _ bool, imCtx *imctx.IMMessageContext) (master.TaskResponse, error) {
 	p.mu.Lock()
 	p.calls = append(p.calls, gapFetchCaptureCall{
 		messageID: channelMessageID,

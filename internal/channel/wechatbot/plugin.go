@@ -3,6 +3,7 @@ package wechatbot
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -18,6 +19,7 @@ import (
 var _ channel.EventRenderer = (*Plugin)(nil)
 var _ channel.InboundController = (*Plugin)(nil)
 var _ channel.PendingInputDetector = (*Plugin)(nil)
+var _ channel.AttachmentDownloader = (*Plugin)(nil)
 
 // Plugin 把官方 wechatbot 接入统一 IM Router。
 type Plugin struct {
@@ -66,6 +68,38 @@ func (p *Plugin) Send(ctx context.Context, msg channel.OutboundMessage) error {
 		return inst.Reply(ctx, msg.ChatID, msg.ReplyToken, msg.Content)
 	}
 	return inst.Send(ctx, msg.ChatID, msg.Content)
+}
+
+func (p *Plugin) DownloadAttachment(ctx context.Context, msg channel.InboundMessage, att channel.Attachment) (channel.AttachmentData, error) {
+	if p == nil || p.registry == nil {
+		return channel.AttachmentData{}, errors.New("wechatbot registry not initialized")
+	}
+	if msg.OwnerUserID == "" {
+		return channel.AttachmentData{}, errors.New("wechatbot attachment requires owner_user_id")
+	}
+	if msg.TenantKey != msg.OwnerUserID {
+		return channel.AttachmentData{}, errors.New("wechatbot attachment requires tenant_key == owner_user_id")
+	}
+	inst, ok := p.registry.Get(msg.OwnerUserID)
+	if !ok {
+		return channel.AttachmentData{}, errors.New("wechatbot not connected")
+	}
+	media, err := inst.DownloadAttachment(ctx, msg.MessageID, att)
+	if err != nil {
+		return channel.AttachmentData{}, err
+	}
+	if media == nil || len(media.Data) == 0 {
+		return channel.AttachmentData{}, fmt.Errorf("wechatbot attachment %q has no downloadable data", att.Key)
+	}
+	fileName := strings.TrimSpace(media.FileName)
+	if fileName == "" {
+		fileName = strings.TrimSpace(att.FileName)
+	}
+	return channel.AttachmentData{
+		Data:     media.Data,
+		FileName: fileName,
+		MimeType: wechatbotAttachmentMimeType(media.Type, media.Format, fileName),
+	}, nil
 }
 
 func (p *Plugin) WebhookHandler() http.HandlerFunc {

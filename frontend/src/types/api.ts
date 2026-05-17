@@ -4,6 +4,7 @@ export interface Session {
   name: string;
   message_count: number;
   total_tokens: number;
+  kb_domain_id?: string;
   last_accessed: string;
   created_at?: string;
   updated_at?: string;
@@ -30,14 +31,17 @@ export interface UpdateSessionRequest {
 export interface FileAttachment {
   filename: string;
   mime_type: string;
-  data: string; // base64
+  data?: string; // base64，仅发送当前 turn 时存在；历史消息走 asset_uri
   size: number; // bytes, for display
+  asset_uri?: string;
+  content_hash?: string;
 }
 
 export interface SendMessageRequest {
   content: string;
   attachments?: FileAttachment[];
   reasoning_effort?: string;
+  kb_domain_id?: string;
 }
 
 export interface SendMessageResponse {
@@ -73,6 +77,40 @@ export interface MessageUsage {
   output_tokens: number;
 }
 
+export interface MessageArtifact {
+  uri: string;
+  title: string;
+  type: 'markdown' | 'html' | 'code' | 'ppt';
+  language?: string;
+  mime_type: string;
+  size: number;
+  content_hash: string;
+}
+
+export interface MessageCitation {
+  token?: string;
+  Token?: string;
+  namespace_id?: string;
+  NamespaceID?: string;
+  document_id?: string;
+  DocumentID?: string;
+  doc_id?: string;
+  document_version?: string;
+  DocumentVersion?: string;
+  node_id?: string;
+  NodeID?: string;
+  node_path?: string;
+  NodePath?: string;
+  start_page?: number;
+  StartPage?: number;
+  end_page?: number;
+  EndPage?: number;
+  citation_text?: string;
+  CitationText?: string;
+  verified?: boolean;
+  Verified?: boolean;
+}
+
 export interface Message {
   role: 'user' | 'assistant' | 'tool';
   content: string;
@@ -82,6 +120,8 @@ export interface Message {
   tool_call_preview?: boolean; // WebSocket 工具调用预览帧，最终帧到达后按 tool_call_id 合并
   timestamp?: string;
   attachments?: FileAttachment[];
+  artifacts?: MessageArtifact[];
+  citations?: MessageCitation[];
   usage?: MessageUsage;       // token 用量（后端支持后填充）
   llm_duration?: number;      // LLM 请求耗时（毫秒）
   is_error?: boolean;         // 错误消息标记
@@ -1623,4 +1663,224 @@ export interface LLMModelUpdateRequest {
   is_default?: boolean;
   enabled?: boolean;
   config_json?: string;
+}
+
+export type KBOwnerScope = 'user' | 'tenant' | 'system';
+export type KBDocumentStatus = 'draft' | 'active' | 'archived' | 'revoked';
+export type KBBindingType = 'agent' | 'domain' | 'session_template' | 'session' | 'tenant' | 'user' | 'system';
+
+export interface KBNamespace {
+  id: string;
+  name: string;
+  domain_id: string;
+  owner_scope: KBOwnerScope;
+  owner_id: string;
+  index_strategy: string;
+  thinning_enabled: boolean;
+  thinning_token_threshold: number;
+  summary_token_threshold: number;
+  summary_model?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface KBCreateNamespaceRequest {
+  name: string;
+  domain_id?: string;
+  index_strategy?: string;
+  thinning_enabled?: boolean;
+  thinning_token_threshold?: number;
+  summary_token_threshold?: number;
+  summary_model?: string;
+}
+
+export interface KBDocument {
+  id: string;
+  namespace_id: string;
+  title: string;
+  version: string;
+  status: KBDocumentStatus;
+  description?: string;
+  source_uri?: string;
+  effective_at: string;
+  expires_at?: string;
+}
+
+export interface KBAssetRef {
+  asset_uri?: string;
+  uri?: string;
+  node_id?: string;
+  line?: number;
+  page?: number;
+  mime_type: string;
+  filename?: string;
+  alt_text?: string;
+  caption?: string;
+  content_hash: string;
+  source: 'local_file' | 'data_uri' | 'remote_url' | 'pdf_extract' | 'docx_extract' | string;
+  signed_url?: string;
+}
+
+export interface KBMarkdownPreviewAsset {
+  path: string;
+  filename?: string;
+  mime_type?: string;
+  alt_text?: string;
+  caption?: string;
+  size: number;
+  data_url?: string;
+}
+
+export interface KBMarkdownPreviewResponse {
+  title?: string;
+  markdown: string;
+  assets?: KBMarkdownPreviewAsset[];
+  quality?: string;
+  provider?: string;
+  warnings?: string[];
+}
+
+export interface KBSectionTextNode {
+  node_id: string;
+  node_path?: string;
+  title?: string;
+  text?: string;
+  evidence_token?: string;
+  asset_refs?: KBAssetRef[];
+}
+
+export interface KBSectionTextSection {
+  node_id: string;
+  node_path?: string;
+  title?: string;
+  text?: string;
+  evidence_token?: string;
+  start_line?: number;
+  end_line?: number;
+  start_page?: number;
+  end_page?: number;
+}
+
+export interface KBSectionTextResult {
+  sections?: KBSectionTextSection[];
+  nodes?: KBSectionTextNode[];
+  asset_refs?: KBAssetRef[];
+}
+
+export interface KBStructureNode {
+  id: string;
+  parent_node_id?: string;
+  node_path: string;
+  title: string;
+  level: number;
+  token_count: number;
+  summary: string;
+  prefix_summary: string;
+  start_line: number;
+  end_line: number;
+  start_page?: number;
+  end_page?: number;
+  children?: KBStructureNode[];
+}
+
+export interface KBDocumentTreeResponse {
+  doc_id: string;
+  namespace_id: string;
+  nodes: KBStructureNode[];
+}
+
+export interface KBDocumentNodeResponse {
+  doc_id: string;
+  namespace_id: string;
+  node: unknown;
+}
+
+export interface KBBinding {
+  id: string;
+  namespace_id: string;
+  domain_id: string;
+  binding_type: KBBindingType;
+  binding_target: string;
+  enabled: boolean;
+  effective_at: string;
+  expires_at?: string;
+}
+
+export interface KBEffectiveBindingsFilter {
+  agentId?: string;
+  domainId?: string;
+  sessionTemplateId?: string;
+  sessionId?: string;
+  tenantId?: string;
+}
+
+export interface KBEffectiveBindingsResponse {
+  bindings: KBBinding[];
+}
+
+export interface KBIngestStageEvent {
+  name: string;
+  status: string;
+  duration_ms: number;
+  attributes?: Record<string, unknown>;
+}
+
+export interface KBAssetBindingReport {
+  asset_uri: string;
+  node_id?: string;
+  line?: number;
+  page?: number;
+  node_path?: string;
+  node_title?: string;
+  alt_text?: string;
+  caption?: string;
+  content_hash?: string;
+  mime_type?: string;
+  bound: boolean;
+}
+
+export interface KBIngestReport {
+  ingest_id: string;
+  namespace_id: string;
+  document_id?: string;
+  title?: string;
+  version?: string;
+  source_filename?: string;
+  content_bytes: number;
+  markdown_lines: number;
+  converted: boolean;
+  provider?: string;
+  quality?: string;
+  uploaded_assets: number;
+  converted_assets: number;
+  image_refs: number;
+  tree_nodes: number;
+  bound_assets: number;
+  unbound_assets: number;
+  duration_ms: number;
+  warnings?: string[];
+  stages: KBIngestStageEvent[];
+  asset_bindings?: KBAssetBindingReport[];
+}
+
+export interface KBIngestResponse {
+  document: KBDocument;
+  warnings?: string[];
+  report?: KBIngestReport;
+}
+
+export interface KBCreateBindingRequest {
+  namespace_id: string;
+  domain_id?: string;
+  binding_type: KBBindingType;
+  binding_target: string;
+  effective_at?: string;
+  expires_at?: string;
+}
+
+export interface KBUpdateBindingRequest {
+  enabled?: boolean;
+  binding_target?: string;
+  effective_at?: string;
+  expires_at?: string;
 }

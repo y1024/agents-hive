@@ -94,8 +94,14 @@ func detectToolChoiceWithIntent(userQuery string, skillsIndex map[string]bool, r
 }
 
 func detectToolChoiceWithIntentAndMessages(userQuery string, skillsIndex map[string]bool, refs []imctx.DocRef, intent router.IntentFrame, messages []llm.MessageWithTools) string {
-	if isStructuredExternalSendIntent(intent) && shouldForceExternalSendToolChoice(intent, messages) {
-		return ToolChoiceRequired
+	if isStructuredExternalSendIntent(intent) {
+		if isExternalBusinessWriteIntent(intent) {
+			if shouldForceExternalBusinessWriteToolChoice(intent, messages) {
+				return ToolChoiceRequired
+			}
+		} else if shouldForceExternalSendToolChoice(intent, messages) {
+			return ToolChoiceRequired
+		}
 	}
 	return detectToolChoiceWithContext(userQuery, skillsIndex, refs)
 }
@@ -155,8 +161,14 @@ func toolChoiceRequiredTriggerWithMessages(userQuery string, skillsIndex map[str
 	if q == "" {
 		return "auto"
 	}
-	if isStructuredExternalSendIntent(intent) && shouldForceExternalSendToolChoice(intent, messages) {
-		return "external_send"
+	if isStructuredExternalSendIntent(intent) {
+		if isExternalBusinessWriteIntent(intent) {
+			if shouldForceExternalBusinessWriteToolChoice(intent, messages) {
+				return "external_write"
+			}
+		} else if shouldForceExternalSendToolChoice(intent, messages) {
+			return "external_send"
+		}
 	}
 	if skillRefPattern.MatchString(q) {
 		return "skill_ref"
@@ -186,6 +198,52 @@ func shouldForceExternalSendToolChoice(intent router.IntentFrame, messages []llm
 	return !evidence.SendAttemptValid
 }
 
+func shouldForceExternalBusinessWriteToolChoice(intent router.IntentFrame, messages []llm.MessageWithTools) bool {
+	if len(messages) == 0 {
+		return true
+	}
+	evidence := collectExternalSendEvidence(messagesFromLatestUser(messages), intent)
+	if evidence.WriteFailed || evidence.QuestionAsked {
+		return false
+	}
+	return !evidence.WriteAttemptValid
+}
+
+func toolChoiceWithDiscoveryFallback(toolChoice string, tools []mcphost.ToolDefinition, intent router.IntentFrame, messages []llm.MessageWithTools) string {
+	if toolChoice != ToolChoiceRequired || !isStructuredExternalSendIntent(intent) {
+		return toolChoice
+	}
+	if isExternalBusinessWriteIntent(intent) && hasToolDefinition(tools, "tool_search") && !hasSuccessfulToolSearchSinceLatestUser(messages) {
+		return "tool_search"
+	}
+	if hasRequiredIntentCallableTool(tools, intent) || !hasToolDefinition(tools, "tool_search") {
+		return toolChoice
+	}
+	return "tool_search"
+}
+
+func hasSuccessfulToolSearchSinceLatestUser(messages []llm.MessageWithTools) bool {
+	current := messagesFromLatestUser(messages)
+	toolSearchCalls := map[string]bool{}
+	for _, msg := range current {
+		for _, call := range msg.ToolCalls {
+			if strings.TrimSpace(call.Name) == "tool_search" && strings.TrimSpace(call.ID) != "" {
+				toolSearchCalls[call.ID] = true
+			}
+		}
+		if msg.Role != "tool" || msg.IsError {
+			continue
+		}
+		if strings.TrimSpace(msg.ToolName) == "tool_search" {
+			return true
+		}
+		if msg.ToolCallID != "" && toolSearchCalls[msg.ToolCallID] {
+			return true
+		}
+	}
+	return false
+}
+
 func hasRequiredIntentCallableTool(tools []mcphost.ToolDefinition, intent router.IntentFrame) bool {
 	if intent.Kind == router.IntentUnknown {
 		return false
@@ -198,8 +256,22 @@ func hasRequiredIntentCallableTool(tools []mcphost.ToolDefinition, intent router
 	return len(decision.AllowedTools) > 0
 }
 
+func hasToolDefinition(tools []mcphost.ToolDefinition, name string) bool {
+	name = strings.TrimSpace(name)
+	for _, tool := range tools {
+		if strings.TrimSpace(tool.Name) == name {
+			return true
+		}
+	}
+	return false
+}
+
 func isStructuredExternalSendIntent(intent router.IntentFrame) bool {
 	return intent.Kind == router.IntentExternalWrite && intent.AllowsSideEffects && intent.RequiresExternal
+}
+
+func isExternalBusinessWriteIntent(intent router.IntentFrame) bool {
+	return isStructuredExternalSendIntent(intent) && hasToolVisibilitySignal(intent.Signals, externalBusinessWriteSignal)
 }
 
 func refsForToolChoice(imCtx *imctx.IMMessageContext, imRefsRead bool) []imctx.DocRef {
@@ -386,7 +458,7 @@ const (
 // 屏蔽它直到终态（L649 pass 分支）一次性 broadcast，retry/fail 则完全丢弃。
 // 其它 toolChoice 值（auto/none/"")保持原流式 UX。
 func shouldSuppressStreamPartial(toolChoice string) bool {
-	return toolChoice == ToolChoiceRequired
+	return isForcedToolChoice(toolChoice)
 }
 
 // emitAssistantMessage 根据 guard 决策判断本轮是否应 persist + broadcast assistant 消息。
@@ -415,7 +487,7 @@ func evaluateRequiredGuard(toolChoice string, toolCalls int, breach int) (requir
 		// C2-HIGH-A：模型产出工具调用，连锁断了，计数归零。
 		return requiredGuardPass, 0
 	}
-	if toolChoice != ToolChoiceRequired {
+	if !isForcedToolChoice(toolChoice) {
 		// 非 required：计数不变（保留给后续 required 轮次比较）。
 		return requiredGuardPass, breach
 	}
@@ -424,6 +496,15 @@ func evaluateRequiredGuard(toolChoice string, toolCalls int, breach int) (requir
 		return requiredGuardFail, breach + 1
 	}
 	return requiredGuardRetry, breach + 1
+}
+
+func isForcedToolChoice(toolChoice string) bool {
+	switch strings.TrimSpace(toolChoice) {
+	case "", ToolChoiceAuto, ToolChoiceNone:
+		return false
+	default:
+		return true
+	}
 }
 
 // truncateForLog 截断字符串便于日志输出，超长时追加省略号。

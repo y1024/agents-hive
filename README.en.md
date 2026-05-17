@@ -84,7 +84,7 @@ This prompt tells the coding agent to prefer Docker Compose, which avoids common
 
 ### Docker Compose
 
-The Docker deployment includes the Hive service and PostgreSQL. The Hive service embeds the frontend static assets and uses the host Docker socket to create sandbox containers for isolated execution.
+The Docker deployment includes the Hive service, PostgreSQL, and MinIO. The Hive service embeds the frontend static assets and uses the host Docker socket to create sandbox containers for isolated execution. MinIO is the default unified object storage backend for KB images, chat attachments, and Agent artifacts.
 
 ```bash
 git clone https://github.com/chef-guo/agents-hive.git
@@ -98,13 +98,19 @@ POSTGRES_PASSWORD=your_strong_password
 DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
 TZ=Asia/Shanghai
 HIVE_PORT=8080
+MINIO_ROOT_USER=minioadmin
+MINIO_ROOT_PASSWORD=minioadmin
+MINIO_BUCKET=hive-assets
 EOF
 
 mkdir -p /opt/hive/workdir/sessions
+# The Hive container runs as a non-root user; the bind-mounted workdir must be writable.
+chmod 0775 /opt/hive/workdir /opt/hive/workdir/sessions
 
 # Sandbox containers run on the host Docker daemon, so build the sandbox image first.
 docker build -t hive-sandbox:latest -f docker/sandbox/Dockerfile .
 
+# The image embeds docker/config.docker.json and starts with --config /app/config.json by default.
 docker compose up -d
 docker compose logs -f hive
 ```
@@ -121,7 +127,9 @@ To build only the main service image:
 docker build -t hive:latest .
 ```
 
-The sandbox bind mount path must be identical on the host and inside the Hive container. The default is `/opt/hive/workdir`. If you change it, update both [docker-compose.yml](docker-compose.yml) and [docker/config.docker.json](docker/config.docker.json).
+The sandbox bind mount path must be identical on the host and inside the Hive container. The default is `/opt/hive/workdir`. If you change it, update both [docker-compose.yml](docker-compose.yml) and [docker/config.docker.json](docker/config.docker.json), then rebuild the main service image. The host directory must also be writable by the non-root `hive` user inside the container.
+
+Unified object storage defaults to the Compose MinIO service, and the bucket is created by `minio-init`. Local or single-node deployments can use `asset.provider=local`; production deployments can set `asset.provider=s3` for AWS S3 or another S3-compatible service.
 
 ### Local Development
 
@@ -160,6 +168,8 @@ cd frontend
 npm install
 npm run dev
 ```
+
+The Vite dev server currently listens on `http://localhost:3000` and proxies `/api` to `http://localhost:8080`.
 
 CLI mode:
 
@@ -230,10 +240,26 @@ Common environment variables:
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_SSL_MODE` | PostgreSQL auth and SSL settings |
 | `SESSIONS_DIR` | Session work directory |
 | `CUSTOM_TOOLS_DIR` | Custom tools directory |
+| `ASSET_PROVIDER` / `ASSET_LOCAL_BASE_PATH` | Unified object storage provider and local storage path |
+| `MINIO_ENDPOINT` / `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` / `MINIO_BUCKET` | MinIO / S3-compatible object storage settings |
+| `S3_ENDPOINT` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` / `S3_BUCKET` / `S3_REGION` / `S3_USE_SSL` | AWS S3 or another S3-compatible provider; set `S3_USE_SSL=false` explicitly for HTTP-compatible endpoints |
+| `FILECONV_PDF_PROVIDER` | KB PDF-to-Markdown provider, default `mineru`; can be `external` or `none` |
+| `FILECONV_PDF_BIN` / `FILECONV_PDF_ARGS` | Override the PDF provider command and arguments |
+| `FILECONV_PDF_INSTALL_ENABLED` / `FILECONV_PDF_INSTALL_DIR` | MinerU startup self-check and auto-install switch/path |
 | `CLAW_API_KEY` / `OPENAI_API_KEY` | Initial LLM configuration on first startup |
 | `CLAW_LOG_FILE` / `CLAW_LOG_LEVEL` / `CLAW_CONSOLE_LEVEL` | Logging configuration |
 
 See [config.example.json](config.example.json) for a complete example.
+
+## KB Documents And PDF
+
+Upload knowledge-base documents from the Admin Knowledge Base page or `POST /api/v1/kb/namespaces/{namespace}/documents:ingest-markdown`. This endpoint only accepts `multipart/form-data`: use `file` for the document, repeated `assets` fields for Markdown-referenced images, or `markdown` / `content` for direct text. Non-multipart requests return 415; there is no JSON/base64 ingest API.
+
+Markdown, plain text, and DOCX enter the same Markdown ingest pipeline. PDF defaults to `fileconv.markdown.pdf.provider=mineru`; MinerU emits Markdown plus image assets, images are stored through `internal/asset`, and Markdown references are rewritten to internal `asset://` URIs. `asset://` is not a public URL; the frontend resolves it through the asset API to get a short-lived access URL.
+
+KB retrieval uses PageIndex-style tree mode, not a separate vector database. The agent calls `kb.doc.meta`, then `kb.doc.structure`, then `kb.section.text` with tight `node_ids` or PDF page-anchor `page_ranges`. `kb.doc.meta` returns `page_count`, `line_count`, and `node_count`, so the agent can judge document scale before selecting tight ranges. When PDF/MinerU or an external provider emits Markdown with markers such as `<physical_index_5>`, `<page_5>`, `<!-- page: 5 -->`, or `[[page=5]]`, KB stores them as `start_page/end_page` in the structure tree and supports `page_ranges: ["5-7"]` to fetch exact text plus in-page image `asset_refs`.
+
+When MinerU is configured, server startup checks whether `mineru` is executable. If it is missing and `install.enabled=true`, Hive creates an isolated Python venv under `fileconv.markdown.pdf.install.install_dir` and installs `mineru[all]`. Install failure is fail-fast; PDF ingest does not create degraded placeholder documents. To use another OCR/layout/model tool, set provider to `external` and configure a command that writes a Markdown file plus an asset directory.
 
 ## Web UI
 

@@ -2,7 +2,8 @@ package api
 
 import (
 	"context"
-	"encoding/base64"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/chef-guo/agents-hive/internal/asset"
 	"github.com/chef-guo/agents-hive/internal/auth"
 	"github.com/chef-guo/agents-hive/internal/errs"
 	"github.com/chef-guo/agents-hive/internal/imctx"
@@ -61,6 +63,7 @@ type SessionDetailResponse struct {
 	UpdatedAt      string   `json:"updated"`
 	LastAccessedAt string   `json:"last_accessed"`
 	SelectedModel  string   `json:"selected_model,omitempty"`
+	KBDomainID     string   `json:"kb_domain_id,omitempty"`
 	MessageCount   int      `json:"message_count"`
 	TotalTokens    int      `json:"total_tokens"`
 	Tags           []string `json:"tags,omitempty"`
@@ -78,6 +81,7 @@ type SendMessageRequest struct {
 	Content         string                  `json:"content"`
 	Attachments     []master.FileAttachment `json:"attachments,omitempty"`
 	ReasoningEffort string                  `json:"reasoning_effort,omitempty"`
+	KBDomainID      string                  `json:"kb_domain_id,omitempty"`
 }
 
 // SendMessageResponse 发送消息响应
@@ -215,6 +219,7 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt:      session.UpdatedAt,
 		LastAccessedAt: session.LastAccessedAt,
 		SelectedModel:  session.SelectedModel,
+		KBDomainID:     session.KBDomainID,
 		MessageCount:   session.MessageCount,
 		TotalTokens:    session.TotalTokens,
 		Tags:           session.Tags,
@@ -378,7 +383,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 验证附件
+	decodedAttachments := make([][]byte, len(req.Attachments))
 	if len(req.Attachments) > 10 {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{
 			Error: "附件数量不能超过 10 个",
@@ -401,7 +406,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		decoded, err := base64.StdEncoding.DecodeString(att.Data)
+		decoded, err := master.DecodeAttachmentData(att.Data)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, ErrorResponse{
 				Error: fmt.Sprintf("附件 #%d: 无效的 base64 数据", i+1),
@@ -409,12 +414,26 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		req.Attachments[i].Size = int64(len(decoded))
+		decodedAttachments[i] = decoded
 		if len(decoded) > 25*1024*1024 {
 			writeJSON(w, http.StatusBadRequest, ErrorResponse{
 				Error: fmt.Sprintf("附件 #%d: 文件大小超过 25MB 限制", i+1),
 				Code:  errs.CodeBadRequest,
 			})
 			return
+		}
+	}
+	if err := s.persistChatAttachments(r.Context(), sessionID, sess, req.Attachments, decodedAttachments); err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{
+			Error: "附件持久化失败: " + err.Error(),
+			Code:  errs.CodeInternal,
+		})
+		return
+	}
+	if s.assetService != nil {
+		for i := range req.Attachments {
+			req.Attachments[i].Data = ""
 		}
 	}
 
@@ -436,21 +455,16 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	var opts []master.MessageOption
 	if len(req.Attachments) > 0 {
 		opts = append(opts, master.WithAttachments(req.Attachments))
-		s.logger.Info("[DEBUG-UPLOAD] API 收到附件",
+		s.logger.Info("API 收到用户附件",
 			zap.String("session_id", sessionID),
 			zap.Int("attachment_count", len(req.Attachments)),
 		)
-		for i, att := range req.Attachments {
-			s.logger.Info("[DEBUG-UPLOAD] 附件详情",
-				zap.Int("index", i),
-				zap.String("filename", att.Filename),
-				zap.String("mime_type", att.MimeType),
-				zap.Int("data_len", len(att.Data)),
-			)
-		}
 	}
 	if req.ReasoningEffort != "" {
 		opts = append(opts, master.WithReasoningEffort(req.ReasoningEffort))
+	}
+	if strings.TrimSpace(req.KBDomainID) != "" {
+		opts = append(opts, master.WithKBDomainID(strings.TrimSpace(req.KBDomainID)))
 	}
 
 	// 使用 ProcessMessageWithOptions 支持附件和推理努力级别
@@ -475,6 +489,57 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		Content:   resp.Content,
 		Completed: resp.Completed,
 	})
+}
+
+func (s *Server) persistChatAttachments(ctx context.Context, sessionID string, sess *store.SessionRecord, attachments []master.FileAttachment, decoded [][]byte) error {
+	if s == nil || s.assetService == nil || len(attachments) == 0 {
+		return nil
+	}
+	ownerID := chatAttachmentOwnerID(ctx, sess)
+	if ownerID == "" {
+		return nil
+	}
+	namespace := "chat/user/" + ownerID + "/session/" + sessionID
+	for i := range attachments {
+		if attachments[i].AssetURI != "" || i >= len(decoded) || len(decoded[i]) == 0 {
+			continue
+		}
+		contentHash := attachmentContentHash(decoded[i])
+		uri, err := s.assetService.Upload(ctx, decoded[i], asset.UploadOpts{
+			Namespace:  namespace,
+			Filename:   attachments[i].Filename,
+			MimeType:   attachments[i].MimeType,
+			OwnerScope: "user",
+			OwnerID:    ownerID,
+			Tags: map[string]string{
+				"source_kind": "chat_attachment",
+				"session_id":  sessionID,
+				"platform":    "web",
+			},
+		})
+		if err != nil {
+			return err
+		}
+		attachments[i].AssetURI = uri.String()
+		attachments[i].ContentHash = contentHash
+		attachments[i].Size = int64(len(decoded[i]))
+	}
+	return nil
+}
+
+func chatAttachmentOwnerID(ctx context.Context, sess *store.SessionRecord) string {
+	if user := auth.UserFrom(ctx); user != nil && strings.TrimSpace(user.ID) != "" {
+		return strings.TrimSpace(user.ID)
+	}
+	if sess != nil && strings.TrimSpace(sess.UserID) != "" {
+		return strings.TrimSpace(sess.UserID)
+	}
+	return "local"
+}
+
+func attachmentContentHash(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 // handleClearSession 处理 POST /api/v1/sessions/:id/clear
@@ -522,21 +587,24 @@ func (s *Server) handleClearSession(w http.ResponseWriter, r *http.Request) {
 
 // MessageResponse 表示单条消息的响应格式
 type MessageResponse struct {
-	ID               int64          `json:"id,omitempty"`
-	Role             string         `json:"role"`
-	Content          string         `json:"content"`
-	ReasoningContent string         `json:"reasoning_content,omitempty"` // 推理内容（仅 reasoning 模型有值）
-	Metadata         map[string]any `json:"metadata,omitempty"`
-	CreatedAt        string         `json:"created_at"`
-	Timestamp        string         `json:"timestamp"`
-	ToolCalls        []ToolCallInfo `json:"tool_calls,omitempty"`
-	ToolCallID       string         `json:"tool_call_id,omitempty"`
-	IsError          bool           `json:"is_error,omitempty"`  // 错误标记（tool 消息）
-	ToolName         string         `json:"tool_name,omitempty"` // 工具名称（tool 消息）
-	Recoverable      bool           `json:"recoverable,omitempty"`
-	Terminal         bool           `json:"terminal,omitempty"`
-	ErrorKind        string         `json:"error_kind,omitempty"`
-	Usage            *UsageInfo     `json:"usage,omitempty"` // token 用量（assistant 消息）
+	ID               int64                   `json:"id,omitempty"`
+	Role             string                  `json:"role"`
+	Content          string                  `json:"content"`
+	ReasoningContent string                  `json:"reasoning_content,omitempty"` // 推理内容（仅 reasoning 模型有值）
+	Metadata         map[string]any          `json:"metadata,omitempty"`
+	CreatedAt        string                  `json:"created_at"`
+	Timestamp        string                  `json:"timestamp"`
+	ToolCalls        []ToolCallInfo          `json:"tool_calls,omitempty"`
+	ToolCallID       string                  `json:"tool_call_id,omitempty"`
+	IsError          bool                    `json:"is_error,omitempty"`  // 错误标记（tool 消息）
+	ToolName         string                  `json:"tool_name,omitempty"` // 工具名称（tool 消息）
+	Recoverable      bool                    `json:"recoverable,omitempty"`
+	Terminal         bool                    `json:"terminal,omitempty"`
+	ErrorKind        string                  `json:"error_kind,omitempty"`
+	Citations        []any                   `json:"citations,omitempty"`   // assistant KB citations
+	Artifacts        []any                   `json:"artifacts,omitempty"`   // assistant artifact manifest
+	Attachments      []master.FileAttachment `json:"attachments,omitempty"` // user attachment manifest
+	Usage            *UsageInfo              `json:"usage,omitempty"`       // token 用量（assistant 消息）
 }
 
 // UsageInfo token 用量信息
@@ -623,6 +691,9 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request) {
 		var recoverable bool
 		var terminal bool
 		var errorKind string
+		var citations []any
+		var artifacts []any
+		var attachments []master.FileAttachment
 		if metadata != nil {
 			if tc, ok := metadata["tool_calls"]; ok {
 				// tool_calls 可能是 JSON 数组（直接解析）或 JSON 字符串（需要二次解析）
@@ -678,6 +749,23 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request) {
 			if ek, ok := metadata["error_kind"].(string); ok {
 				errorKind = ek
 			}
+			if c, ok := metadata["citations"]; ok {
+				switch v := c.(type) {
+				case []any:
+					citations = v
+				case string:
+					_ = json.Unmarshal([]byte(v), &citations)
+				}
+			}
+			if a, ok := metadata["artifacts"]; ok {
+				switch v := a.(type) {
+				case []any:
+					artifacts = v
+				case string:
+					_ = json.Unmarshal([]byte(v), &artifacts)
+				}
+			}
+			attachments = master.AttachmentsFromMetadataForAPI(metadata)
 		}
 		if isError && toolruntime.IsRecoverableToolCallError(msg.Content) {
 			recoverable = true
@@ -717,6 +805,9 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request) {
 			Recoverable:      recoverable,
 			Terminal:         terminal,
 			ErrorKind:        errorKind,
+			Citations:        citations,
+			Artifacts:        artifacts,
+			Attachments:      attachments,
 			Usage:            usage,
 		})
 	}

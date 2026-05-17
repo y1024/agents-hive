@@ -8,6 +8,7 @@ export interface Artifact {
   title: string;        // 标签页标题（语言名或文件名）
   language: string;     // 代码语言标识
   content: string;      // 源码内容
+  assetUri?: string;
   type: ArtifactType;
 }
 
@@ -50,6 +51,7 @@ export const useCanvasStore = create<CanvasState>()((set, get) => ({
     const existing = artifacts.find((a) =>
       a.title === artifact.title &&
       a.language === artifact.language &&
+      (a.assetUri || '') === (artifact.assetUri || '') &&
       a.content.length === artifact.content.length &&
       a.content === artifact.content
     );

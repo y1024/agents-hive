@@ -42,6 +42,10 @@ type SessionState struct {
 	// 会话级主对话模型配置名。空值表示使用全局默认模型。
 	SelectedModel string `json:"selected_model,omitempty"`
 
+	// 会话当前显式选择的 KB domain。由 Web 会话 KB 绑定栏或 IM /kb 命令写入。
+	// KB 工具运行时优先使用该值，避免会话绑定在 support，工具却按 generic 解析。
+	KBDomainID string `json:"kb_domain_id,omitempty"`
+
 	// Spec-driven Phase 2 持久层：user ingress 路径累积的 change 索引
 	// （对应 hive_spec_session_state 行）。
 	// 写入者仅限 session_loop.go:processTask 入口 hook，持锁外写。
@@ -71,6 +75,7 @@ type SessionState struct {
 	pendingAttachments     []FileAttachment             `json:"-"`
 	pendingReasoningEffort string                       `json:"-"`
 	pendingModelOverride   string                       `json:"-"`
+	pendingKBDomainID      string                       `json:"-"`
 	pendingIMContext       *imctx.IMMessageContext      `json:"-"`
 	pendingMemoryInjection memory.InjectionResult       `json:"-"`
 	discoveredTools        map[string]bool              `json:"-"`
@@ -143,9 +148,12 @@ const (
 
 // FileAttachment 文件附件
 type FileAttachment struct {
-	Filename string `json:"filename"`
-	MimeType string `json:"mime_type"`
-	Data     string `json:"data"` // base64
+	Filename    string `json:"filename"`
+	MimeType    string `json:"mime_type"`
+	Data        string `json:"data,omitempty"` // base64，仅用于当前 turn 转换；持久化时不保存
+	Size        int64  `json:"size,omitempty"`
+	AssetURI    string `json:"asset_uri,omitempty"`
+	ContentHash string `json:"content_hash,omitempty"`
 }
 
 // SessionRequest 表示会话请求（替代原来的 string）
@@ -158,6 +166,7 @@ type SessionRequest struct {
 	Attachments       []FileAttachment        `json:"attachments,omitempty"`        // 文件附件
 	ReasoningEffort   string                  `json:"reasoning_effort,omitempty"`   // 推理努力级别: "low"/"medium"/"high"
 	ModelOverride     string                  `json:"model_override,omitempty"`     // 模型覆盖（由 skill/command 设置）
+	KBDomainID        string                  `json:"kb_domain_id,omitempty"`       // 本轮显式 KB domain（Web/SDK 入口设置）
 	ChannelMessageID  string                  `json:"channel_message_id,omitempty"` // IM 平台原消息 ID（供 input_received 事件透传，renderer 基于此做 ack 表情）
 	TurnID            string                  `json:"-"`                            // 当前请求的稳定 turn_id；为空时由 session loop 生成
 	AckAlreadyEmitted bool                    `json:"-"`                            // Router renderer 路径已提前广播 input_received，避免重复 ack
@@ -230,6 +239,49 @@ func (s *SessionState) SetPendingData(
 	s.mu.Unlock()
 }
 
+// SetPendingKBDomainID 设置本轮请求显式 KB domain。
+func (s *SessionState) SetPendingKBDomainID(domainID string) {
+	s.mu.Lock()
+	s.pendingKBDomainID = strings.TrimSpace(domainID)
+	if s.pendingKBDomainID != "" {
+		s.KBDomainID = s.pendingKBDomainID
+	}
+	s.mu.Unlock()
+}
+
+// SetKBDomainID 设置会话级显式 KB domain。
+func (s *SessionState) SetKBDomainID(domainID string) {
+	s.mu.Lock()
+	s.KBDomainID = strings.TrimSpace(domainID)
+	s.mu.Unlock()
+}
+
+// ClearKBDomainID 清理会话级显式 KB domain。
+func (s *SessionState) ClearKBDomainID(domainID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	domainID = strings.TrimSpace(domainID)
+	if domainID == "" || s.KBDomainID == domainID {
+		s.KBDomainID = ""
+	}
+	if domainID == "" || s.pendingKBDomainID == domainID {
+		s.pendingKBDomainID = ""
+	}
+}
+
+// KBDomainIDSnapshot 返回当前会话显式 KB domain。
+func (s *SessionState) KBDomainIDSnapshot() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if strings.TrimSpace(s.pendingKBDomainID) != "" {
+		return strings.TrimSpace(s.pendingKBDomainID)
+	}
+	return strings.TrimSpace(s.KBDomainID)
+}
+
 // GetPendingData 获取临时附件、推理努力级别和模型覆盖（不包含 IMContext，使用 ConsumePendingIMContext）
 func (s *SessionState) GetPendingData() ([]FileAttachment, string, string) {
 	s.mu.RLock()
@@ -243,6 +295,7 @@ func (s *SessionState) ClearPendingData() {
 	s.pendingAttachments = nil
 	s.pendingReasoningEffort = ""
 	s.pendingModelOverride = ""
+	s.pendingKBDomainID = ""
 	s.pendingIMContext = nil
 	s.pendingMemoryInjection = memory.InjectionResult{}
 	s.mu.Unlock()

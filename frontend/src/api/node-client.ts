@@ -97,6 +97,19 @@ import type {
   ScheduledTask,
   ScheduledTaskRun,
   ScheduledTaskUpsertRequest,
+  KBNamespace,
+  KBCreateNamespaceRequest,
+  KBDocument,
+  KBDocumentStatus,
+  KBMarkdownPreviewResponse,
+  KBDocumentTreeResponse,
+  KBDocumentNodeResponse,
+  KBBinding,
+  KBCreateBindingRequest,
+  KBEffectiveBindingsFilter,
+  KBEffectiveBindingsResponse,
+  KBIngestResponse,
+  KBUpdateBindingRequest,
 } from '../types/api';
 import type { JournalResponse, JournalStatsResponse } from '../types/journal';
 import type { TodoResumeResponse, TodoSnapshot } from '../store/todos';
@@ -116,7 +129,7 @@ export interface NodeClient {
   regenerateMessage(sessionId: string): Promise<void>;
   stopTask(sessionId: string): Promise<{ stopped: boolean }>;
   // 消息
-  sendMessage(sessionId: string, content: string, options?: { attachments?: FileAttachment[]; deepThinking?: boolean }): Promise<SendMessageResponse>;
+  sendMessage(sessionId: string, content: string, options?: { attachments?: FileAttachment[]; deepThinking?: boolean; kbDomainId?: string }): Promise<SendMessageResponse>;
   getMessages(sessionId: string, limit?: number): Promise<Message[]>;
   getSessionTrace(sessionId: string, limit?: number): Promise<SessionTraceResponse>;
   getTodoSnapshot(sessionId: string): Promise<TodoSnapshot>;
@@ -247,6 +260,24 @@ export interface NodeClient {
   adminEvaluateRollbackAlert(body: { eval_diff: EvalDiff; thresholds: RollbackAlertThresholds }): Promise<RollbackAlertResponse>;
   adminListRollbackAlerts(): Promise<RollbackAlertsResponse>;
   adminListRollbacks(): Promise<RollbacksResponse>;
+  // KB 管理
+  listKBNamespaces(filter?: { domainId?: string; query?: string; limit?: number }): Promise<{ namespaces: KBNamespace[] }>;
+  createKBNamespace(body: KBCreateNamespaceRequest, domainId?: string): Promise<KBNamespace>;
+  listKBDocuments(namespaceId: string, filter?: { domainId?: string; query?: string; status?: KBDocumentStatus | ''; limit?: number }): Promise<{ documents: KBDocument[] }>;
+  previewKBMarkdown(namespaceId: string, body: FormData, domainId?: string): Promise<KBMarkdownPreviewResponse>;
+  ingestKBDocument(namespaceId: string, body: FormData, domainId?: string): Promise<KBIngestResponse>;
+  getKBDocumentTree(documentId: string, domainId?: string): Promise<KBDocumentTreeResponse>;
+  getKBDocumentNode(documentId: string, nodeId: string, domainId?: string): Promise<KBDocumentNodeResponse>;
+  archiveKBDocument(documentId: string, domainId?: string): Promise<{ status: string }>;
+  listKBBindings(filter?: { domainId?: string; namespaceId?: string; enabled?: boolean }): Promise<{ bindings: KBBinding[] }>;
+  getKBEffectiveBindings(filter?: KBEffectiveBindingsFilter): Promise<KBEffectiveBindingsResponse>;
+  createKBBinding(body: KBCreateBindingRequest, domainId?: string): Promise<KBBinding>;
+  updateKBBinding(id: string, body: KBUpdateBindingRequest, domainId?: string): Promise<KBBinding>;
+  disableKBBinding(id: string, domainId?: string): Promise<KBBinding>;
+  getSessionKBBindings(sessionId: string, domainId?: string): Promise<{ bindings: KBBinding[] }>;
+  setSessionKBBindings(sessionId: string, namespaceIds: string[], domainId?: string): Promise<{ bindings: KBBinding[] }>;
+  deleteSessionKBBinding(sessionId: string, namespaceId: string, domainId?: string): Promise<{ bindings: KBBinding[] }>;
+  resolveAsset(uri: string, options?: { purpose?: string; sessionId?: string; domainId?: string; tenantId?: string; agentId?: string; sessionTemplateId?: string }): Promise<{ url: string; expires_in: number; mime_type: string; filename?: string; size: number }>;
 }
 
 // 本地节点客户端 - 直接调用 /api/v1/*
@@ -295,19 +326,12 @@ export class LocalNodeClient implements NodeClient {
     return this.client.post(`/api/v1/sessions/${sessionId}/stop`);
   }
 
-  sendMessage(sessionId: string, content: string, options?: { attachments?: FileAttachment[]; deepThinking?: boolean }): Promise<SendMessageResponse> {
-    if (options?.attachments?.length) {
-      console.log('[DEBUG-UPLOAD] 发送附件:', options.attachments.map(a => ({
-        filename: a.filename,
-        mime_type: a.mime_type,
-        data_len: a.data.length,
-        size: a.size,
-      })));
-    }
+  sendMessage(sessionId: string, content: string, options?: { attachments?: FileAttachment[]; deepThinking?: boolean; kbDomainId?: string }): Promise<SendMessageResponse> {
     return this.client.postLong(`/api/v1/sessions/${sessionId}/messages`, {
       content,
       attachments: options?.attachments,
       reasoning_effort: options?.deepThinking ? 'high' : undefined,
+      kb_domain_id: options?.kbDomainId,
     });
   }
 
@@ -872,6 +896,123 @@ export class LocalNodeClient implements NodeClient {
   adminListRollbacks(): Promise<RollbacksResponse> {
     return this.client.get('/api/v1/admin/optimization/rollbacks');
   }
+
+  listKBNamespaces(filter: { domainId?: string; query?: string; limit?: number } = {}): Promise<{ namespaces: KBNamespace[] }> {
+    const params = kbParams({ domain_id: filter.domainId, query: filter.query, limit: filter.limit });
+    return this.client.get(`/api/v1/kb/namespaces?${params}`);
+  }
+
+  createKBNamespace(body: KBCreateNamespaceRequest, domainId?: string): Promise<KBNamespace> {
+    const params = kbParams({ domain_id: domainId });
+    return this.client.post(`/api/v1/kb/namespaces?${params}`, body);
+  }
+
+  listKBDocuments(namespaceId: string, filter: { domainId?: string; query?: string; status?: KBDocumentStatus | ''; limit?: number } = {}): Promise<{ documents: KBDocument[] }> {
+    const params = kbParams({
+      domain_id: filter.domainId,
+      query: filter.query,
+      status: filter.status,
+      limit: filter.limit,
+    });
+    return this.client.get(`/api/v1/kb/namespaces/${encodeURIComponent(namespaceId)}/documents?${params}`);
+  }
+
+  previewKBMarkdown(namespaceId: string, body: FormData, domainId?: string): Promise<KBMarkdownPreviewResponse> {
+    const params = kbParams({ domain_id: domainId });
+    return this.client.postFormLong(`/api/v1/kb/namespaces/${encodeURIComponent(namespaceId)}/documents:preview-markdown?${params}`, body);
+  }
+
+  ingestKBDocument(namespaceId: string, body: FormData, domainId?: string): Promise<KBIngestResponse> {
+    const params = kbParams({ domain_id: domainId });
+    return this.client.postFormLong(`/api/v1/kb/namespaces/${encodeURIComponent(namespaceId)}/documents:ingest-markdown?${params}`, body);
+  }
+
+  getKBDocumentTree(documentId: string, domainId?: string): Promise<KBDocumentTreeResponse> {
+    const params = kbParams({ domain_id: domainId });
+    return this.client.get(`/api/v1/kb/documents/${encodeURIComponent(documentId)}/tree?${params}`);
+  }
+
+  getKBDocumentNode(documentId: string, nodeId: string, domainId?: string): Promise<KBDocumentNodeResponse> {
+    const params = kbParams({ domain_id: domainId });
+    return this.client.get(`/api/v1/kb/documents/${encodeURIComponent(documentId)}/nodes/${encodeURIComponent(nodeId)}?${params}`);
+  }
+
+  archiveKBDocument(documentId: string, domainId?: string): Promise<{ status: string }> {
+    const params = kbParams({ domain_id: domainId });
+    return this.client.post(`/api/v1/kb/documents/${encodeURIComponent(documentId)}:archive?${params}`);
+  }
+
+  listKBBindings(filter: { domainId?: string; namespaceId?: string; enabled?: boolean } = {}): Promise<{ bindings: KBBinding[] }> {
+    const params = kbParams({
+      domain_id: filter.domainId,
+      namespace_id: filter.namespaceId,
+      enabled: filter.enabled,
+    });
+    return this.client.get(`/api/v1/kb/bindings?${params}`);
+  }
+
+  getKBEffectiveBindings(filter: KBEffectiveBindingsFilter = {}): Promise<KBEffectiveBindingsResponse> {
+    const params = kbParams({
+      domain_id: filter.domainId,
+      agent_id: filter.agentId,
+      session_template_id: filter.sessionTemplateId,
+      session_id: filter.sessionId,
+      tenant_id: filter.tenantId,
+    });
+    return this.client.get(`/api/v1/kb/effective-bindings?${params}`);
+  }
+
+  createKBBinding(body: KBCreateBindingRequest, domainId?: string): Promise<KBBinding> {
+    const params = kbParams({ domain_id: domainId });
+    return this.client.post(`/api/v1/kb/bindings?${params}`, body);
+  }
+
+  updateKBBinding(id: string, body: KBUpdateBindingRequest, domainId?: string): Promise<KBBinding> {
+    const params = kbParams({ domain_id: domainId });
+    return this.client.patch(`/api/v1/kb/bindings/${encodeURIComponent(id)}?${params}`, body);
+  }
+
+  disableKBBinding(id: string, domainId?: string): Promise<KBBinding> {
+    const params = kbParams({ domain_id: domainId });
+    return this.client.delete(`/api/v1/kb/bindings/${encodeURIComponent(id)}?${params}`);
+  }
+
+  getSessionKBBindings(sessionId: string, domainId?: string): Promise<{ bindings: KBBinding[] }> {
+    const params = kbParams({ domain_id: domainId });
+    return this.client.get(`/api/v1/sessions/${encodeURIComponent(sessionId)}/kb-bindings?${params}`);
+  }
+
+  setSessionKBBindings(sessionId: string, namespaceIds: string[], domainId?: string): Promise<{ bindings: KBBinding[] }> {
+    const params = kbParams({ domain_id: domainId });
+    return this.client.put(`/api/v1/sessions/${encodeURIComponent(sessionId)}/kb-bindings?${params}`, { namespace_ids: namespaceIds });
+  }
+
+  deleteSessionKBBinding(sessionId: string, namespaceId: string, domainId?: string): Promise<{ bindings: KBBinding[] }> {
+    const params = kbParams({ domain_id: domainId });
+    return this.client.delete(`/api/v1/sessions/${encodeURIComponent(sessionId)}/kb-bindings/${encodeURIComponent(namespaceId)}?${params}`);
+  }
+
+  resolveAsset(uri: string, options: { purpose?: string; sessionId?: string; domainId?: string; tenantId?: string; agentId?: string; sessionTemplateId?: string } = {}): Promise<{ url: string; expires_in: number; mime_type: string; filename?: string; size: number }> {
+    const params = kbParams({
+      uri,
+      purpose: options.purpose,
+      session_id: options.sessionId,
+      domain_id: options.domainId,
+      tenant_id: options.tenantId,
+      agent_id: options.agentId,
+      session_template_id: options.sessionTemplateId,
+    });
+    return this.client.get(`/api/v1/assets/resolve?${params}`);
+  }
+}
+
+function kbParams(values: Record<string, string | number | boolean | null | undefined>): URLSearchParams {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(values)) {
+    if (value === undefined || value === null || value === '') continue;
+    params.set(key, String(value));
+  }
+  return params;
 }
 
 function memoryAdminParams(options: MemoryAdminFilter = {}): URLSearchParams {

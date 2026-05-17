@@ -11,13 +11,31 @@ function generateUUID(): string {
     return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
   });
 }
+
+async function loadAssetText(uri: string, sessionId?: string): Promise<string> {
+  const params = new URLSearchParams({ uri, purpose: 'agent_artifact' });
+  if (sessionId) params.set('session_id', sessionId);
+  const headers: Record<string, string> = {};
+  const token = localStorage.getItem('auth_token');
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resolveResp = await fetch(`/api/v1/assets/resolve?${params.toString()}`, { headers });
+  if (!resolveResp.ok) {
+    throw new Error('artifact resolve failed');
+  }
+  const resolved = await resolveResp.json() as { url: string };
+  const assetResp = await fetch(resolved.url, { headers });
+  if (!assetResp.ok) {
+    throw new Error('artifact download failed');
+  }
+  return assetResp.text();
+}
 import { Streamdown } from 'streamdown';
 import { ALLOWED_TAGS, STREAMDOWN_PLUGINS } from '../../utils/streamdownConfig';
 import { useTranslation } from 'react-i18next';
 import {
   Wrench, ChevronRight, ChevronDown,
   Copy, Check, ThumbsUp, ThumbsDown, RefreshCw,
-  ExternalLink, Brain, FileText,
+  ExternalLink, Brain, FileText, Quote,
   ArrowUp, ArrowDown, X, AlertTriangle, Activity, ShieldAlert, PlayCircle,
 } from 'lucide-react';
 import type { Message } from '../../types/api';
@@ -31,8 +49,11 @@ import { useChatStore } from '../../store/chat';
 import { getToolDisplayName } from '../../utils/toolName';
 import { ArtifactCard } from './ArtifactCard';
 import { ToolAdapter } from './ToolAdapter';
-import { parseMessageContent, parseMessageContentWithSkeleton, hasOpenArtifact } from '../../utils/artifactParser';
+import { parseMessageContent, parseMessageContentWithSkeleton, hasOpenArtifact, mergeArtifactManifestSegments } from '../../utils/artifactParser';
 import type { ArtifactType } from '../../store/canvas';
+import { LocalNodeClient } from '../../api/node-client';
+
+const assetClient = new LocalNodeClient();
 
 
 function MonkeyIcon({ className = '' }: { className?: string }) {
@@ -75,10 +96,11 @@ interface Props {
   toolErrorKinds?: Map<string, string>; // tool_call_id → error_kind
   toolNames?: Map<string, string>; // tool_call_id → tool_name
   sessionId?: string;
+  kbDomainId?: string;
 }
 
 export const MessageBubble = memo(function MessageBubble({
-  message, showRole = true, isLast = false, onRegenerate, toolResults, toolErrors, toolRecoverable, toolErrorKinds, toolNames, sessionId,
+  message, showRole = true, isLast = false, onRegenerate, toolResults, toolErrors, toolRecoverable, toolErrorKinds, toolNames, sessionId, kbDomainId,
 }: Props) {
   const { t } = useTranslation();
   const isUser = message.role === 'user';
@@ -95,11 +117,11 @@ export const MessageBubble = memo(function MessageBubble({
 
   const segments = useMemo(() => {
     if (!message.content || message.is_error) return null;
-    if (isThisMessageStreaming && hasOpenArtifact(message.content)) {
-      return parseMessageContentWithSkeleton(message.content);
-    }
-    return parseMessageContent(message.content);
-  }, [message.content, message.is_error, isThisMessageStreaming]);
+    const parsed = isThisMessageStreaming && hasOpenArtifact(message.content)
+      ? parseMessageContentWithSkeleton(message.content)
+      : parseMessageContent(message.content);
+    return mergeArtifactManifestSegments(parsed, message.artifacts);
+  }, [message.content, message.is_error, message.artifacts, isThisMessageStreaming]);
 
   const hasArtifacts = segments?.some((s) => s.type === 'artifact') ?? false;
   const toolCallsForRender = useMemo(() => {
@@ -152,22 +174,7 @@ export const MessageBubble = memo(function MessageBubble({
                 <span className="whitespace-pre-wrap">{message.content}</span>
                 {message.attachments && message.attachments.length > 0 && (
                   <div className="mt-2 flex flex-wrap gap-1.5">
-                    {message.attachments.map((att, i) => (
-                      att.mime_type.startsWith('image/') ? (
-                        <img
-                          key={i}
-                          src={`data:${att.mime_type};base64,${att.data}`}
-                          alt={att.filename}
-                          className="max-h-32 rounded-lg"
-                        />
-                      ) : (
-                        <div key={i} className="flex items-center gap-1.5 px-2 py-1 bg-[var(--bg-secondary)] rounded-lg text-xs text-[var(--text-secondary)]">
-                          <AttachmentIcon mimeType={att.mime_type} />
-                          <span className="truncate max-w-[120px]">{att.filename}</span>
-                          <span>{formatFileSize(att.size)}</span>
-                        </div>
-                      )
-                    ))}
+                    {message.attachments.map((att, i) => <UserAttachmentPreview key={i} attachment={att} sessionId={sessionId} />)}
                   </div>
                 )}
               </div>
@@ -312,17 +319,26 @@ export const MessageBubble = memo(function MessageBubble({
                       content={seg.content}
                       language={seg.language}
                       isLoading={seg.isLoading}
-                      onOpenCanvas={() => {
+                      onOpenCanvas={async () => {
                         const typeMap: Record<string, ArtifactType> = {
                           markdown: 'markdown', html: 'html', code: 'code', ppt: 'ppt',
                         };
                         const artifactStoreType = typeMap[seg.artifactType!] ?? 'markdown';
                         const lang = seg.language ?? (seg.artifactType === 'code' ? 'text' : seg.artifactType ?? 'markdown');
+                        let content = seg.content;
+                        if (seg.assetUri) {
+                          try {
+                            content = await loadAssetText(seg.assetUri, sessionId);
+                          } catch {
+                            content = seg.content;
+                          }
+                        }
                         useCanvasStore.getState().openArtifact({
                           id: generateUUID(),
                           title: seg.title!,
                           language: lang,
-                          content: seg.content,
+                          content,
+                          assetUri: seg.assetUri,
                           type: artifactStoreType,
                         });
                       }}
@@ -345,8 +361,13 @@ export const MessageBubble = memo(function MessageBubble({
                   toolRecoverable={toolRecoverable}
                   toolErrorKinds={toolErrorKinds}
                   sessionId={sessionId}
+                  kbDomainId={kbDomainId}
                 />
               </div>
+            )}
+
+            {message.citations && message.citations.length > 0 && (
+              <CitationStrip citations={message.citations} />
             )}
 
             {/* 底部信息栏：token 用量 + 时长 | 操作按钮（错误消息隐藏） */}
@@ -426,6 +447,96 @@ export const MessageBubble = memo(function MessageBubble({
   );
 });
 
+function UserAttachmentPreview({ attachment, sessionId }: { attachment: NonNullable<Message['attachments']>[number]; sessionId?: string }) {
+  const [url, setURL] = useState(attachment.data ? `data:${attachment.mime_type};base64,${attachment.data}` : '');
+
+  useEffect(() => {
+    if (url || !attachment.asset_uri) return;
+    let cancelled = false;
+    void assetClient.resolveAsset(attachment.asset_uri, { purpose: 'chat_attachment', sessionId })
+      .then((res) => {
+        if (!cancelled) setURL(res.url);
+      })
+      .catch(() => {
+        if (!cancelled) setURL('');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [attachment.asset_uri, sessionId, url]);
+
+  if (attachment.mime_type.startsWith('image/') && url) {
+    return (
+      <img
+        src={url}
+        alt={attachment.filename}
+        className="max-h-32 rounded-lg"
+      />
+    );
+  }
+
+  return (
+    <a
+      href={url || undefined}
+      target="_blank"
+      rel="noreferrer"
+      className="flex items-center gap-1.5 px-2 py-1 bg-[var(--bg-secondary)] rounded-lg text-xs text-[var(--text-secondary)]"
+      onClick={(e) => {
+        if (!url) e.preventDefault();
+      }}
+    >
+      <AttachmentIcon mimeType={attachment.mime_type} />
+      <span className="truncate max-w-[120px]">{attachment.filename}</span>
+      <span>{formatFileSize(attachment.size)}</span>
+    </a>
+  );
+}
+
+function CitationStrip({ citations }: { citations: NonNullable<Message['citations']> }) {
+  const visible = citations.slice(0, 4);
+  const extra = citations.length - visible.length;
+  return (
+    <div className="mt-2.5 flex flex-wrap gap-1.5">
+      {visible.map((citation, index) => {
+        const token = citation.token || citation.Token || '';
+        const docId = citation.document_id || citation.DocumentID || citation.doc_id || '';
+        const nodeId = citation.node_id || citation.NodeID || '';
+        const nodePath = citation.node_path || citation.NodePath || '';
+        const startPage = citation.start_page || citation.StartPage;
+        const endPage = citation.end_page || citation.EndPage;
+        const version = citation.document_version || citation.DocumentVersion || '';
+        const pageLabel = startPage && endPage
+          ? startPage === endPage ? `p.${startPage}` : `p.${startPage}-${endPage}`
+          : '';
+        const title = citation.citation_text || citation.CitationText || nodePath || nodeId || docId || token || `引用 ${index + 1}`;
+        const meta = [
+          docId,
+          nodePath || nodeId,
+          pageLabel,
+          version,
+        ].filter(Boolean).join(' · ');
+        return (
+          <div
+            key={`${token || docId || nodeId || index}`}
+            className="inline-flex max-w-full items-center gap-1.5 rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] px-2 py-1 text-[11px] text-[var(--text-secondary)]"
+            title={meta ? `${title}\n${meta}` : title}
+          >
+            <Quote className="h-3 w-3 shrink-0 text-[var(--accent-600)] dark:text-[var(--accent-300)]" aria-hidden="true" />
+            <span className="max-w-[220px] truncate font-medium text-[var(--text-primary)]">{title}</span>
+            {meta && <span className="max-w-[180px] truncate font-mono text-[10px] opacity-75">{meta}</span>}
+            {(citation.verified || citation.Verified) && <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300">verified</span>}
+          </div>
+        );
+      })}
+      {extra > 0 && (
+        <span className="inline-flex items-center rounded-lg border border-[var(--border-color)] px-2 py-1 text-[11px] text-[var(--text-secondary)]">
+          +{extra}
+        </span>
+      )}
+    </div>
+  );
+}
+
 /* ===== 操作按钮 ===== */
 function ActionBtn({ icon, label, onClick, active, danger }: {
   icon: React.ReactNode;
@@ -483,6 +594,7 @@ function ToolCallsSection({
   toolRecoverable,
   toolErrorKinds,
   sessionId,
+  kbDomainId,
 }: {
   calls: RenderToolCall[];
   toolResults?: Map<string, string>;
@@ -490,6 +602,7 @@ function ToolCallsSection({
   toolRecoverable?: Map<string, boolean>;
   toolErrorKinds?: Map<string, string>;
   sessionId?: string;
+  kbDomainId?: string;
 }) {
   const { t } = useTranslation();
   const liveStatuses = useChatStore((s) => s.toolCallStatuses);
@@ -497,9 +610,9 @@ function ToolCallsSection({
     const live = liveStatuses?.[tc.id];
     const hasError = !!toolErrors?.get(tc.id);
     const isRecoverable = !!toolRecoverable?.get(tc.id) || live?.recoverable === true;
-    return hasError || isRecoverable || live?.status === 'running' || live?.status === 'error' || live?.requires_user_approval === true;
+    return tc.name.startsWith('kb.') || hasError || isRecoverable || live?.status === 'running' || live?.status === 'error' || live?.requires_user_approval === true;
   });
-  const compactCalls = calls.filter((tc) => !diagnosticCalls.some((item) => item.id === tc.id));
+  const compactCalls = calls.filter((tc) => !diagnosticCalls.some((item) => item.id === tc.id) && !tc.name.startsWith('kb.'));
   const compactSummary = getCompactToolSummary(compactCalls, toolResults);
 
   return (
@@ -545,6 +658,8 @@ function ToolCallsSection({
           hasError={!!toolErrors?.get(tc.id)}
           recoverable={!!toolRecoverable?.get(tc.id)}
           errorKind={toolErrorKinds?.get(tc.id)}
+          sessionId={sessionId}
+          kbDomainId={kbDomainId}
         />
       ))}
     </div>
@@ -572,7 +687,7 @@ function DiagnosticLink({ href, icon, children }: {
  * 被收进同一个 Collapsible：header 显示名字 + status badge，content 按 running/其他
  * 分别挂 chip 或 block。hasError 通过 ToolAdapter 映射到 output-error 并默认展开。
  */
-function ToolCallRow({ id, name, args, result, hasError, recoverable, errorKind }: {
+function ToolCallRow({ id, name, args, result, hasError, recoverable, errorKind, sessionId, kbDomainId }: {
   id: string;
   name: string;
   args: string;
@@ -580,9 +695,11 @@ function ToolCallRow({ id, name, args, result, hasError, recoverable, errorKind 
   hasError: boolean;
   recoverable?: boolean;
   errorKind?: string;
+  sessionId?: string;
+  kbDomainId?: string;
 }) {
   return (
-    <ToolAdapter id={id} name={name} args={args} result={result} hasError={hasError} recoverable={recoverable} errorKind={errorKind} />
+    <ToolAdapter id={id} name={name} args={args} result={result} hasError={hasError} recoverable={recoverable} errorKind={errorKind} sessionId={sessionId} kbDomainId={kbDomainId} />
   );
 }
 

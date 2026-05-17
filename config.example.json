@@ -10,7 +10,7 @@
     "_comment_host": "监听地址，默认 0.0.0.0（全部接口）",
     "host": "0.0.0.0",
     "_comment_cors_origins": "允许的 CORS 来源列表，空表示仅允许 localhost。生产环境请显式配置域名",
-    "cors_origins": ["http://localhost:5173"]
+    "cors_origins": ["http://localhost:3000"]
   },
 
   "logging": {
@@ -80,6 +80,66 @@
       "password": "${POSTGRES_PASSWORD}",
       "ssl_mode": "disable",
       "max_conns": 10
+    }
+  },
+
+  "asset": {
+    "_comment": "统一对象存储层。asset:// 是内部 URI，HTTP resolve 会校验 metadata 和权限后返回临时签名 URL。",
+    "_comment_provider": "对象存储 provider：local | minio | s3。开发可用 local，生产可用 MinIO 或 AWS S3。",
+    "provider": "minio",
+    "local": {
+      "_comment": "local provider 只会写入此 base_path，并阻止路径穿越。",
+      "base_path": "./data/assets"
+    },
+    "minio": {
+      "_comment": "Docker Compose 内部 endpoint 使用 minio:9000；本机直连可用 localhost:9000。",
+      "endpoint": "localhost:9000",
+      "access_key": "minioadmin",
+      "secret_key": "minioadmin",
+      "bucket": "hive-assets",
+      "region": "",
+      "use_ssl": false
+    },
+    "s3": {
+      "_comment": "AWS S3 生产配置；endpoint 为空时按 region 使用 AWS 默认 endpoint，也可填 S3 兼容服务地址。",
+      "endpoint": "",
+      "access_key": "",
+      "secret_key": "",
+      "bucket": "hive-assets",
+      "region": "us-east-1",
+      "use_ssl": true
+    }
+  },
+
+  "fileconv": {
+    "_comment": "KB ingest 专用文档转 Markdown 配置；聊天附件 PDF 仍按模型文件输入透传。",
+    "markdown": {
+      "pdf": {
+        "_comment": "PDF 默认走 MinerU provider。也可设为 external 接其他 OCR/模型工具，或 none 显式关闭；关闭或 provider 不可用时 KB PDF ingest 返回 503，不生成降级文档。",
+        "provider": "mineru",
+        "_comment_timeout": "Go time.Duration 纳秒值；5 分钟 = 300000000000。也可用 FILECONV_PDF_TIMEOUT_SECONDS=300 覆盖。",
+        "timeout": 300000000000,
+        "command": {
+          "_comment": "命令参数支持 {input} 和 {output} 占位符。MinerU CLI 版本差异可通过这里或 FILECONV_PDF_ARGS 覆盖。",
+          "name": "mineru",
+          "binary": "mineru",
+          "args": ["-p", "{input}", "-o", "{output}"],
+          "markdown_path": "",
+          "asset_dir": ""
+        },
+        "install": {
+          "_comment": "provider=mineru 时启动期检查命令是否存在；不存在且 enabled=true 时执行安装命令，安装失败则服务 fail-fast。",
+          "enabled": true,
+          "install_dir": "./data/fileconv/mineru",
+          "_comment_timeout": "Go time.Duration 纳秒值；10 分钟 = 600000000000。也可用 FILECONV_PDF_INSTALL_TIMEOUT_SECONDS=600 覆盖。",
+          "timeout": 600000000000,
+          "command": {
+            "_comment": "默认 builtin:python-venv-pip 会在 install_dir 创建隔离 venv 并安装 args 中的包，优先 python -m venv，失败后 fallback 到 python -m virtualenv。企业环境可覆盖为 uv、pip、内部安装脚本或镜像源。",
+            "binary": "builtin:python-venv-pip",
+            "args": ["mineru[all]"]
+          }
+        }
+      }
     }
   }
 }

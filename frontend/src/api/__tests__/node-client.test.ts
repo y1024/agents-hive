@@ -17,12 +17,14 @@ function createApiClientMock() {
     postLong: vi.fn(),
     put: vi.fn(),
     delete: vi.fn(),
+    postFormLong: vi.fn(),
   } as unknown as ApiClient & {
     get: ReturnType<typeof vi.fn>;
     post: ReturnType<typeof vi.fn>;
     postLong: ReturnType<typeof vi.fn>;
     put: ReturnType<typeof vi.fn>;
     delete: ReturnType<typeof vi.fn>;
+    postFormLong: ReturnType<typeof vi.fn>;
   };
 }
 
@@ -122,6 +124,67 @@ describe('LocalNodeClient admin capability endpoints', () => {
       expected_plan_version: 7,
       expected_runtime_epoch: 'epoch-1',
     });
+  });
+
+  it('calls KB effective bindings endpoint with runtime context filters', async () => {
+    const api = createApiClientMock();
+    api.get.mockResolvedValue({ bindings: [] });
+    const client = new LocalNodeClient(api);
+
+    await client.getKBEffectiveBindings({
+      domainId: 'support',
+      agentId: 'master',
+      sessionTemplateId: 'template-1',
+      sessionId: 'sess/1',
+      tenantId: 'tenant-a',
+    });
+
+    expect(api.get).toHaveBeenCalledWith('/api/v1/kb/effective-bindings?domain_id=support&agent_id=master&session_template_id=template-1&session_id=sess%2F1&tenant_id=tenant-a');
+  });
+
+  it('sends explicit KB domain with chat messages', async () => {
+    const api = createApiClientMock();
+    api.postLong.mockResolvedValue({ content: 'ok', completed: true });
+    const client = new LocalNodeClient(api);
+
+    await client.sendMessage('sess-1', 'hello', { kbDomainId: 'support' });
+
+    expect(api.postLong).toHaveBeenCalledWith('/api/v1/sessions/sess-1/messages', {
+      content: 'hello',
+      attachments: undefined,
+      reasoning_effort: undefined,
+      kb_domain_id: 'support',
+    });
+  });
+
+  it('resolves asset URLs through the asset API with KB runtime context', async () => {
+    const api = createApiClientMock();
+    api.get.mockResolvedValue({ url: '/api/v1/assets/proxy?x=1', expires_in: 300, mime_type: 'image/png', size: 3 });
+    const client = new LocalNodeClient(api);
+
+    await client.resolveAsset('asset://kb/user/u1/ns/doc/hash.png', {
+      purpose: 'kb_management',
+      sessionId: 'sess/1',
+      domainId: 'customer_service',
+      tenantId: 'tenant-a',
+      agentId: 'support-agent',
+      sessionTemplateId: 'tmpl-1',
+    });
+
+    expect(api.get).toHaveBeenCalledWith('/api/v1/assets/resolve?uri=asset%3A%2F%2Fkb%2Fuser%2Fu1%2Fns%2Fdoc%2Fhash.png&purpose=kb_management&session_id=sess%2F1&domain_id=customer_service&tenant_id=tenant-a&agent_id=support-agent&session_template_id=tmpl-1');
+  });
+
+  it('uploads KB documents with multipart form data when provided', async () => {
+    const api = createApiClientMock();
+    api.postFormLong.mockResolvedValue({ document: { id: 'doc-1' } });
+    const client = new LocalNodeClient(api);
+    const body = new FormData();
+    body.append('title', 'Doc');
+
+    await client.ingestKBDocument('ns/1', body, 'support');
+
+    expect(api.postFormLong).toHaveBeenCalledWith('/api/v1/kb/namespaces/ns%2F1/documents:ingest-markdown?domain_id=support', body);
+    expect(api.postLong).not.toHaveBeenCalled();
   });
 
   it('calls quality workbench preview, replay fanout, and version diff endpoints', async () => {

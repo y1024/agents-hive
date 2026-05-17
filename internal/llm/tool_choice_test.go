@@ -2,6 +2,8 @@ package llm
 
 import (
 	"testing"
+
+	"github.com/chef-guo/agents-hive/internal/mcphost"
 )
 
 func TestBuildChatCompletionsToolChoice(t *testing.T) {
@@ -43,6 +45,22 @@ func TestBuildChatCompletionsToolChoice(t *testing.T) {
 	}
 }
 
+func TestBuildChatCompletionsToolChoiceUsesProviderAlias(t *testing.T) {
+	aliases := toolNameAliasesForTools([]mcphost.ToolDefinition{
+		{Name: "kb.section.text", InputSchema: []byte(`{"type":"object"}`)},
+	})
+	got, ok := buildChatCompletionsToolChoiceWithAliases("kb.section.text", aliases)
+	if !ok {
+		t.Fatal("expected named tool_choice")
+	}
+	if got.OfChatCompletionNamedToolChoice == nil {
+		t.Fatal("expected named tool_choice branch")
+	}
+	if got.OfChatCompletionNamedToolChoice.Function.Name != "kb_section_text" {
+		t.Fatalf("named tool_choice = %q, want kb_section_text", got.OfChatCompletionNamedToolChoice.Function.Name)
+	}
+}
+
 func TestBuildResponsesToolChoice(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -79,5 +97,21 @@ func TestBuildResponsesToolChoice(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBuildResponsesToolChoiceUsesProviderAlias(t *testing.T) {
+	aliases := toolNameAliasesForTools([]mcphost.ToolDefinition{
+		{Name: "kb.section.text", InputSchema: []byte(`{"type":"object"}`)},
+	})
+	got, ok := buildResponsesToolChoiceWithAliases("kb.section.text", aliases)
+	if !ok {
+		t.Fatal("expected named tool_choice")
+	}
+	if got.OfFunctionTool == nil {
+		t.Fatal("expected function tool_choice branch")
+	}
+	if got.OfFunctionTool.Name != "kb_section_text" {
+		t.Fatalf("named tool_choice = %q, want kb_section_text", got.OfFunctionTool.Name)
 	}
 }

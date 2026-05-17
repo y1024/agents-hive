@@ -19,6 +19,7 @@ import (
 	"github.com/chef-guo/agents-hive/internal/errs"
 	"github.com/chef-guo/agents-hive/internal/imctx"
 	"github.com/chef-guo/agents-hive/internal/journal"
+	"github.com/chef-guo/agents-hive/internal/kb"
 	"github.com/chef-guo/agents-hive/internal/llm"
 	"github.com/chef-guo/agents-hive/internal/master/assistantcap"
 	"github.com/chef-guo/agents-hive/internal/mcphost"
@@ -247,6 +248,7 @@ func (m *Master) processTaskDirectExec(ctx context.Context, request string, sess
 			Role:      "user",
 			Content:   userContent,
 			CreatedAt: userCreatedAt,
+			Metadata:  attachmentMetadata(pendingAttachments),
 		})
 
 		// 广播用户消息确认
@@ -481,6 +483,7 @@ func (m *Master) runReActLoop(
 			// 退化为保守立场（只要命中 whatIs 模式就 required）。
 			skillsIndex := m.buildSkillsIndex(userID)
 			toolChoice = detectToolChoiceWithIntentAndMessages(latestQuery, skillsIndex, refs, turnIntent, preparedMessages)
+			toolChoice = toolChoiceWithDiscoveryFallback(toolChoice, modelVisibleTools, turnIntent, preparedMessages)
 			m.logger.Info("[quality-guards] P0-A tool_choice 决策",
 				zap.String("session_id", session.ID),
 				zap.Int("iteration", i+1),
@@ -499,7 +502,7 @@ func (m *Master) runReActLoop(
 					Labels: map[string]any{"kind": string(turnIntent.Kind)},
 				})
 			}
-			if toolChoice == ToolChoiceRequired {
+			if isForcedToolChoice(toolChoice) {
 				m.enqueueMetric(observability.Metric{
 					Name:   "tool_choice_required_total",
 					Value:  1,
@@ -1024,6 +1027,12 @@ func (m *Master) runReActLoop(
 		if resp.Usage.CompletionTokens > 0 {
 			msgMeta["output_tokens"] = fmt.Sprintf("%d", resp.Usage.CompletionTokens)
 		}
+		if citations := m.kbCitationsForCurrentTurn(ctx, session, userID, sessionTraceID); citations != "" {
+			msgMeta["citations"] = citations
+		}
+		if artifactsJSON := m.persistAssistantArtifacts(ctx, session, userID, resp.Content, assistantCreatedAt); artifactsJSON != "" {
+			msgMeta["artifacts"] = artifactsJSON
+		}
 
 		// pass 分支：persist assistant 消息到 session.Messages（DB 持久化）
 		// P0-A structural lock: 走 persistAssistant + cap 而非 appendSessionMessage。
@@ -1063,6 +1072,18 @@ func (m *Master) runReActLoop(
 				payload["usage"] = map[string]any{
 					"input_tokens":  resp.Usage.PromptTokens,
 					"output_tokens": resp.Usage.CompletionTokens,
+				}
+			}
+			if citationsJSON := msgMeta["citations"]; citationsJSON != "" {
+				var citations []kb.EvidenceRef
+				if err := json.Unmarshal([]byte(citationsJSON), &citations); err == nil {
+					payload["citations"] = citations
+				}
+			}
+			if artifactsJSON := msgMeta["artifacts"]; artifactsJSON != "" {
+				var artifacts []AssistantArtifactManifest
+				if err := json.Unmarshal([]byte(artifactsJSON), &artifacts); err == nil {
+					payload["artifacts"] = artifacts
 				}
 			}
 			// 携带 LLM 请求耗时
@@ -1278,7 +1299,7 @@ func (m *Master) runReActLoop(
 					}
 
 					// 调用级循环检测：同一 tool+args 连续失败 2 次，标记为终端失败
-					if tr.IsError && !tr.Terminal {
+					if tr.IsError && !tr.Terminal && !tr.Recoverable {
 						if detector.recordCallResult(callFP, true) {
 							terminalCache[callFP] = tr.Content
 							terminalFailures = append(terminalFailures, toolCall.Name)
@@ -1294,7 +1315,7 @@ func (m *Master) runReActLoop(
 								zap.String("session_id", session.ID),
 							)
 						}
-					} else if !tr.IsError {
+					} else if !tr.IsError || tr.Recoverable {
 						detector.recordCallResult(callFP, false)
 					}
 				}
@@ -1770,6 +1791,135 @@ func recoverableToolCallErrorContent(kind, detail string) string {
 	return toolruntime.RecoverableToolCallErrorContent(kind, detail)
 }
 
+func recoverableToolCallErrorContentWithHint(hint toolruntime.RecoverableToolCallError) string {
+	return toolruntime.RecoverableToolCallErrorContentWithHint(hint)
+}
+
+func recoverableToolCallErrorHint(session *SessionState, toolName, kind, detail, repairAction string) toolruntime.RecoverableToolCallError {
+	hint := toolruntime.RecoverableToolCallError{
+		Kind:         kind,
+		Detail:       detail,
+		RepairAction: repairAction,
+		ToolName:     strings.TrimSpace(toolName),
+	}
+	if session != nil {
+		hint.AllowedTools = session.AllowedToolsSnapshot()
+		hint.AllowedInputs = session.AllowedToolInputsSnapshot()
+		hint.ActionCapabilities = recoverableActionCapabilitiesFromSession(session)
+		if query := recommendedToolSearchQueryFromSession(session, toolName); query != "" {
+			hint.RecommendedToolSearchQuery = query
+		}
+	}
+	return hint
+}
+
+func recoverableActionCapabilitiesFromSession(session *SessionState) []toolruntime.RecoverableActionCapability {
+	if session == nil {
+		return nil
+	}
+	decision, ok := session.RouteDecisionSnapshot()
+	if !ok {
+		return nil
+	}
+	allowedInputs := session.AllowedToolInputsSnapshot()
+	var out []toolruntime.RecoverableActionCapability
+	for _, rule := range router.ActionCapabilityRulesForIntent(decision.Intent) {
+		actionField := router.MixedActionField(rule.ToolName)
+		if actionField == "" || !recoverableCapabilityAllowedByRoute(rule, actionField, allowedInputs) {
+			continue
+		}
+		out = append(out, toolruntime.RecoverableActionCapability{
+			ToolName:           rule.ToolName,
+			Action:             rule.Action,
+			ActionField:        actionField,
+			CapabilityID:       rule.CapabilityID,
+			RequiredFields:     append([]string(nil), rule.RequiredFields...),
+			PreparatoryActions: append([]string(nil), rule.PreparatoryActions...),
+			ExampleToolCall:    recoverableExampleToolCall(rule, actionField),
+			InvocationHint:     recoverableInvocationHint(rule.ToolName, actionField, rule.Action),
+			RepairHint:         rule.RepairHint,
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func recoverableCapabilityAllowedByRoute(rule router.ActionCapabilityRule, actionField string, allowedInputs map[string]map[string]string) bool {
+	if strings.TrimSpace(rule.ToolName) == "" || strings.TrimSpace(rule.Action) == "" {
+		return false
+	}
+	allowed := allowedInputs[rule.ToolName]
+	if len(allowed) == 0 {
+		return false
+	}
+	allowedActions := allowed[actionField]
+	return matchesAllowedToolInputValue(rule.Action, allowedActions)
+}
+
+func recoverableExampleToolCall(rule router.ActionCapabilityRule, actionField string) map[string]any {
+	toolName := strings.TrimSpace(rule.ToolName)
+	if toolName == "" {
+		return nil
+	}
+	args := make(map[string]any, len(rule.ExampleArgs)+1)
+	for key, value := range rule.ExampleArgs {
+		args[key] = value
+	}
+	if actionField != "" && strings.TrimSpace(rule.Action) != "" {
+		if _, ok := args[actionField]; !ok {
+			args[actionField] = rule.Action
+		}
+	}
+	return map[string]any{
+		"name":      toolName,
+		"arguments": args,
+	}
+}
+
+func recoverableInvocationHint(toolName, actionField, action string) string {
+	toolName = strings.TrimSpace(toolName)
+	actionField = strings.TrimSpace(actionField)
+	action = strings.TrimSpace(action)
+	if toolName == "" || action == "" {
+		return ""
+	}
+	if actionField == "" {
+		return fmt.Sprintf("调用工具 %s；不要把 action capability 当作独立工具名。", toolName)
+	}
+	return fmt.Sprintf("调用工具 %s，并设置 arguments.%s=%s；不要调用 %s.%s。", toolName, actionField, action, toolName, action)
+}
+
+func recommendedToolSearchQueryFromSession(session *SessionState, fallbackTool string) string {
+	if session != nil {
+		if decision, ok := session.RouteDecisionSnapshot(); ok {
+			for _, rule := range router.ActionCapabilityRulesForIntent(decision.Intent) {
+				parts := []string{rule.Action, rule.CapabilityID, rule.Resource, rule.Operation}
+				if len(rule.Platforms) > 0 {
+					parts = append(parts, rule.Platforms...)
+				}
+				return strings.TrimSpace(strings.Join(nonEmptyStrings(parts...), " "))
+			}
+			if len(decision.Intent.AllowedDomainsHint) > 0 {
+				return strings.Join(decision.Intent.AllowedDomainsHint, " ")
+			}
+		}
+	}
+	return strings.TrimSpace(fallbackTool)
+}
+
+func nonEmptyStrings(values ...string) []string {
+	var out []string
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
 func isRecoverableToolCallError(content string) bool {
 	return toolruntime.IsRecoverableToolCallError(content)
 }
@@ -1810,16 +1960,20 @@ func (m *Master) enforceToolExecutionGate(ctx context.Context, session *SessionS
 				allowedTools = append(allowedTools, tool.Name)
 			}
 		}
-		content := recoverableToolCallErrorContent("tool_policy_not_allowed",
-			fmt.Sprintf("工具 %q 不在当前 profile 允许列表中，当前调用未执行。当前 profile 可用工具: %s。请改用可用工具，或先调用 tool_search/question 获取正确工具与参数。", toolName, strings.Join(allowedTools, "|")))
+		hint := recoverableToolCallErrorHint(session, toolName, "tool_policy_not_allowed",
+			fmt.Sprintf("工具 %q 不在当前 profile 允许列表中，当前调用未执行。当前 profile 可用工具: %s。请改用可用工具，或先调用 tool_search/question 获取正确工具与参数。", toolName, strings.Join(allowedTools, "|")),
+			"reselect_tool")
+		hint.AllowedTools = allowedTools
+		content := recoverableToolCallErrorContentWithHint(hint)
 		return m.recoverableToolCallErrorResult(ctx, sessionID, toolCallID, toolName, args, sessionTraceID, content, reason), false
 	}
 
 	if session != nil && session.HasAllowedToolsDecision() && !session.IsAllowedTool(toolName) {
 		allowedTools := session.AllowedToolsSnapshot()
 		reason := fmt.Sprintf("route decision denied tool %q; allowed tools are %q", toolName, strings.Join(allowedTools, "|"))
-		content := recoverableToolCallErrorContent("route_tool_not_allowed",
-			fmt.Sprintf("工具 %q 不在本轮 RouteDecision 允许列表中，当前调用未执行。本轮允许工具: %s。请重新选择允许工具，或先调用 tool_search/question 澄清后再继续。", toolName, strings.Join(allowedTools, "|")))
+		content := recoverableToolCallErrorContentWithHint(recoverableToolCallErrorHint(session, toolName, "route_tool_not_allowed",
+			fmt.Sprintf("工具 %q 不在本轮 RouteDecision 允许列表中，当前调用未执行。本轮允许工具: %s。请重新选择允许工具，或先调用 tool_search/question 澄清后再继续。", toolName, strings.Join(allowedTools, "|")),
+			"reselect_tool"))
 		m.logger.Info("工具不在本轮 RouteDecision 范围内，交回模型自动修复",
 			zap.String("tool", toolName),
 			zap.Strings("allowed_tools", allowedTools),
@@ -1861,8 +2015,9 @@ func (m *Master) enforceToolExecutionGate(ctx context.Context, session *SessionS
 	if session != nil {
 		if allowedInputs := session.AllowedToolInputsSnapshot()[toolName]; len(allowedInputs) > 0 {
 			if reason, actuals, denied := routeInputDenyReason(toolName, args, allowedInputs); denied {
-				content := recoverableToolCallErrorContent("route_input_outside_allowed_values",
-					fmt.Sprintf("%s。当前调用未执行。请按 allowed_inputs 重构参数；如果用户目标需要其他动作，请重新规划到正确工具/意图，不要重复相同工具和参数。", reason))
+				content := recoverableToolCallErrorContentWithHint(recoverableToolCallErrorHint(session, toolName, "route_input_outside_allowed_values",
+					fmt.Sprintf("%s。当前调用未执行。请按 allowed_inputs 重构参数；如果用户目标需要其他动作，请重新规划到正确工具/意图，不要重复相同工具和参数。", reason),
+					"rebuild_arguments"))
 				m.logger.Info("工具输入超出 RouteDecision 参数约束，交回模型自动修复",
 					zap.String("tool", toolName),
 					zap.Any("actual_inputs", actuals),
@@ -1998,6 +2153,7 @@ func (m *Master) executeTool(ctx context.Context, session *SessionState, userID 
 		ToolCallID:   toolCall.ID,
 	})
 	ctx = toolctx.WithTraceContext(ctx, sessionTraceID, toolSpanID, sessionSpanID, toolCall.ID)
+	ctx = tools.WithKBRuntimeContext(ctx, kbRuntimeContextForTool(session, userID))
 
 	if decision := m.evaluatePlanToolGate(ctx, session, toolCall.Name); !decision.Allowed {
 		content := fmt.Sprintf("[plan mode gate denied: %s]", decision.Reason)
@@ -2039,6 +2195,13 @@ func (m *Master) executeTool(ctx context.Context, session *SessionState, userID 
 	// 导致 MCP 报 "未能找到文章标题"。自动检测并注入。
 	if toolCall.Name == "wenyan__publish_article" {
 		args = ensureWenyanTitle(args, m.logger)
+	}
+
+	if len(args) > 0 && !json.Valid(args) {
+		content := recoverableToolCallErrorContentWithHint(recoverableToolCallErrorHint(session, toolCall.Name, "invalid_tool_arguments_json",
+			"工具参数不是合法 JSON，当前调用未执行。请重新构造为合法 JSON 对象；不要把自然语言或半截 JSON 放入 arguments。",
+			"rebuild_arguments_json"))
+		return m.recoverableToolCallErrorResult(ctx, sessionID, toolCall.ID, toolCall.Name, args, sessionTraceID, content, "invalid_tool_arguments_json")
 	}
 
 	actionGuardApproved := make(map[string]bool)
@@ -3224,6 +3387,12 @@ func buildMessageMeta(msg llm.MessageWithTools) map[string]any {
 		meta["created_at"] = msg.CreatedAt
 	}
 	if msg.Metadata != nil {
+		if v, ok := msg.Metadata["attachments"]; ok && v != "" {
+			if meta == nil {
+				meta = map[string]any{}
+			}
+			meta["attachments"] = v
+		}
 		if v, ok := msg.Metadata["input_tokens"]; ok && v != "" {
 			if meta == nil {
 				meta = map[string]any{}
@@ -3254,8 +3423,20 @@ func buildMessageMeta(msg llm.MessageWithTools) map[string]any {
 			}
 			meta["error_kind"] = v
 		}
+		if v, ok := msg.Metadata["citations"]; ok && v != "" {
+			if meta == nil {
+				meta = map[string]any{}
+			}
+			meta["citations"] = v
+		}
+		if v, ok := msg.Metadata["artifacts"]; ok && v != "" {
+			if meta == nil {
+				meta = map[string]any{}
+			}
+			meta["artifacts"] = v
+		}
 	}
-	if msg.Content.IsMultimodal() {
+	if msg.Content.IsMultimodal() && !hasAttachmentManifest(msg.Metadata) {
 		if meta == nil {
 			meta = map[string]any{}
 		}
@@ -3584,6 +3765,10 @@ func (m *Master) executeToolsConcurrent(
 						FailureKind: kind,
 					})
 				}
+			} else if tr.Recoverable {
+				if detector != nil {
+					detector.recordCallResult(callFP, false)
+				}
 			} else if detector != nil && detector.recordCallResult(callFP, true) {
 				terminalCache[callFP] = contentStr
 				*terminalFailures = append(*terminalFailures, toolCall.Name)
@@ -3606,4 +3791,96 @@ func (m *Master) executeToolsConcurrent(
 			}
 		}
 	}
+}
+
+func kbRuntimeContextForTool(session *SessionState, userID string) tools.KBRuntimeContext {
+	ownerID := strings.TrimSpace(userID)
+	domainID := "generic"
+	sessionID := ""
+	if session != nil {
+		session.mu.RLock()
+		sessionID = strings.TrimSpace(session.ID)
+		if strings.TrimSpace(session.UserID) != "" {
+			ownerID = strings.TrimSpace(session.UserID)
+		}
+		if d := strings.TrimSpace(session.pendingKBDomainID); d != "" {
+			domainID = d
+		} else if d := strings.TrimSpace(session.KBDomainID); d != "" {
+			domainID = d
+		} else if session.routeDecisionSet {
+			if d := strings.TrimSpace(session.routeDecision.Intent.DomainID); d != "" {
+				domainID = d
+			}
+		}
+		session.mu.RUnlock()
+	}
+	return tools.KBRuntimeContext{
+		DomainID:   domainID,
+		OwnerScope: kb.OwnerScopeUser,
+		OwnerID:    ownerID,
+		AgentID:    "master",
+		SessionID:  sessionID,
+	}
+}
+
+func (m *Master) kbCitationsForCurrentTurn(ctx context.Context, session *SessionState, userID, traceID string) string {
+	if m == nil || session == nil {
+		return ""
+	}
+	if m.kbEvidenceReader == nil {
+		m.recordKBCitationMissing(session, userID, traceID, "reader_unavailable", "")
+		return ""
+	}
+	runtime := kbRuntimeContextForTool(session, userID)
+	scope := kb.EvidenceScope{
+		SessionID:  session.ID,
+		TurnID:     traceID,
+		TraceID:    traceID,
+		DomainID:   runtime.DomainID,
+		OwnerScope: runtime.OwnerScope,
+		OwnerID:    runtime.OwnerID,
+		Now:        time.Now(),
+	}
+	refs, err := m.kbEvidenceReader.CurrentTurnEvidence(ctx, scope)
+	if err != nil {
+		m.recordKBCitationMissing(session, userID, traceID, "read_error", err.Error())
+		return ""
+	}
+	if len(refs) == 0 {
+		m.recordKBCitationMissing(session, userID, traceID, "empty_current_turn_evidence", "")
+		return ""
+	}
+	data, err := json.Marshal(refs)
+	if err != nil {
+		m.recordKBCitationMissing(session, userID, traceID, "marshal_error", err.Error())
+		return ""
+	}
+	return string(data)
+}
+
+func (m *Master) recordKBCitationMissing(session *SessionState, userID, traceID, reason, errText string) {
+	if m == nil || session == nil {
+		return
+	}
+	runtime := kbRuntimeContextForTool(session, userID)
+	m.emitQualityEvent(traceID, "", session.ID, agentquality.NewKBQualityEvent(agentquality.KBEventInput{
+		Name:       agentquality.EventKBEvidence,
+		TurnID:     traceID,
+		TraceID:    traceID,
+		DomainID:   runtime.DomainID,
+		OwnerScope: agentquality.OwnerScope(runtime.OwnerScope),
+		OwnerID:    runtime.OwnerID,
+		UserID:     userID,
+		Route:      routeFromSession(session),
+		ToolName:   "kb.citations",
+		Status:     agentquality.StatusFail,
+		Failure:    agentquality.FailureKBEvidence,
+		Reason:     agentquality.KBFailureCitationMissing,
+		Error:      errText,
+		Attributes: map[string]any{
+			"operation":       "kb.citations",
+			"missing_reason":  reason,
+			"session_user_id": userID,
+		},
+	}))
 }

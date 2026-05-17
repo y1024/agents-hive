@@ -102,9 +102,9 @@ func TestBenchmarkRunDoesNotAuthorizeRollout(t *testing.T) {
 
 func TestBenchmarkSuiteRecordsSourceAndVersion(t *testing.T) {
 	adapter := GenericBenchmarkAdapter{
-		Route:      "chat",
-		SuiteName:  "versioned-suite",
-		SuiteType:  "external_benchmark",
+		Route:     "chat",
+		SuiteName: "versioned-suite",
+		SuiteType: "external_benchmark",
 	}
 
 	item := BenchmarkItem{

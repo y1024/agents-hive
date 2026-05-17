@@ -231,6 +231,9 @@ loop:
 
 				// 设置临时字段（附件、推理努力级别、模型覆盖和 IM 上下文）到 Session
 				targetSession.SetPendingData(req.Attachments, req.ReasoningEffort, req.ModelOverride, req.IMContext)
+				if req.KBDomainID != "" {
+					targetSession.SetPendingKBDomainID(req.KBDomainID)
+				}
 				m.maybeSetSessionTitle(ctx, targetSession, req.Input)
 
 				// 投递到 worker pool
@@ -492,6 +495,7 @@ func (m *Master) restoreSessionFromStore(ctx context.Context, session *SessionSt
 		session.UserID = record.UserID
 	}
 	session.SelectedModel = record.SelectedModel
+	session.KBDomainID = record.KBDomainID
 	session.Tags = record.Tags
 	session.Stats.MessageCount = record.MessageCount
 	session.Stats.TotalTokens = record.TotalTokens
@@ -537,7 +541,10 @@ func (m *Master) restoreSessionFromStore(ctx context.Context, session *SessionSt
 				if tn, ok := meta["tool_name"].(string); ok {
 					mwt.ToolName = tn
 				}
-				if cpStr, ok := meta["content_parts"].(string); ok {
+				if len(attachmentsFromMetadata(meta)) > 0 {
+					mwt.Content = restoreContentFromMetadata(msg.Content, meta)
+				}
+				if cpStr, ok := meta["content_parts"].(string); ok && len(attachmentsFromMetadata(meta)) == 0 {
 					var parts []llm.ContentPart
 					if err := json.Unmarshal([]byte(cpStr), &parts); err == nil {
 						mwt.Content = llm.NewMultiContent(parts...)

@@ -177,6 +177,8 @@ func RegisterBuiltinTools(host *mcphost.Host, logger *zap.Logger, cfg *config.Co
 	var nestedToolGate NestedToolGate
 	var planRuntimeObserver PlanRuntimeObserver
 	var board taskboard.TaskBoard
+	var kbService KBService
+	var csService customerServiceTool
 	for _, optional := range agentSpawnerI {
 		if optional == nil {
 			continue
@@ -198,6 +200,15 @@ func RegisterBuiltinTools(host *mcphost.Host, logger *zap.Logger, cfg *config.Co
 		}
 		if taskBoard, ok := optional.(taskboard.TaskBoard); ok && board == nil {
 			board = taskBoard
+		}
+		if service, ok := optional.(KBService); ok && kbService == nil {
+			kbService = service
+		}
+		if service, ok := optional.(customerServiceTool); ok && csService == nil {
+			csService = service
+		}
+		if marker, ok := optional.(customerServiceToolMarker); ok && csService == nil {
+			csService = marker.CustomerServiceTool()
 		}
 	}
 
@@ -227,6 +238,9 @@ func RegisterBuiltinTools(host *mcphost.Host, logger *zap.Logger, cfg *config.Co
 	registerBatch(host, logger, nestedToolGate)
 	registerApplyPatch(host, logger)
 	registerToolSearch(host, logger)
+	registerKBTools(host, logger, kbService)
+	registerCustomerServiceTools(host, logger, csService)
+	count += 3
 	registerCreateTool(host, logger, customToolsDir, cfg, globalApprovalBridge)
 	registerRemoveTool(host, logger, customToolsDir)
 

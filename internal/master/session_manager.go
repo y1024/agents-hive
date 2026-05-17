@@ -704,8 +704,11 @@ func (sm *SessionManager) LoadLastActiveSession(ctx context.Context, st store.Se
 					if tn, ok := meta["tool_name"].(string); ok {
 						m.ToolName = tn
 					}
+					if len(attachmentsFromMetadata(meta)) > 0 {
+						m.Content = restoreContentFromMetadata(msg.Content, meta)
+					}
 					// 恢复多模态内容
-					if cpStr, ok := meta["content_parts"].(string); ok {
+					if cpStr, ok := meta["content_parts"].(string); ok && len(attachmentsFromMetadata(meta)) == 0 {
 						var parts []llm.ContentPart
 						if err := json.Unmarshal([]byte(cpStr), &parts); err == nil {
 							m.Content = llm.NewMultiContent(parts...)
@@ -750,6 +753,7 @@ func (sm *SessionManager) SaveSession(ctx context.Context, st store.SessionStore
 		UpdatedAt:      time.Now().Format(time.RFC3339),
 		LastAccessedAt: session.LastAccessed.Format(time.RFC3339),
 		SelectedModel:  session.SelectedModel,
+		KBDomainID:     session.KBDomainID,
 		MessageCount:   len(session.Messages),
 		TotalTokens:    session.Stats.TotalTokens,
 		Deleted:        false,
@@ -813,6 +817,7 @@ func (sm *SessionManager) GetSessionByID(ctx context.Context, sessionID string, 
 			UpdatedAt:      time.Now().Format(time.RFC3339),
 			LastAccessedAt: session.LastAccessed.Format(time.RFC3339),
 			SelectedModel:  session.SelectedModel,
+			KBDomainID:     session.KBDomainID,
 			MessageCount:   len(session.Messages),
 			TotalTokens:    session.Stats.TotalTokens,
 			Tags:           session.Tags,

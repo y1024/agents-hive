@@ -481,6 +481,7 @@ type SessionRecord struct {
 	UpdatedAt      string   `json:"updated_at"`
 	LastAccessedAt string   `json:"last_accessed_at"`
 	SelectedModel  string   `json:"selected_model,omitempty"`
+	KBDomainID     string   `json:"kb_domain_id,omitempty"`
 	MessageCount   int      `json:"message_count"`
 	TotalTokens    int      `json:"total_tokens"`
 	Deleted        bool     `json:"deleted"`

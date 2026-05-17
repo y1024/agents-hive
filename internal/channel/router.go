@@ -2,6 +2,7 @@ package channel
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -238,6 +239,9 @@ type Router struct {
 
 	// metricsWriter：可选指标写入器。nil 时跳过 Phase 1 resolver metrics。
 	metricsWriter observability.MetricsWriter
+
+	kbService              KBCommandService
+	kbSessionDomainUpdater func(sessionID, domainID string, enabled bool)
 }
 
 // NewRouter 创建消息路由器
@@ -367,6 +371,33 @@ func (r *Router) SetMetricsWriter(w observability.MetricsWriter) {
 	r.mu.Lock()
 	r.metricsWriter = w
 	r.mu.Unlock()
+}
+
+func (r *Router) SetKBService(service KBCommandService) {
+	r.mu.Lock()
+	r.kbService = service
+	r.mu.Unlock()
+}
+
+func (r *Router) SetKBSessionDomainUpdater(fn func(sessionID, domainID string, enabled bool)) {
+	r.mu.Lock()
+	r.kbSessionDomainUpdater = fn
+	r.mu.Unlock()
+}
+
+func (r *Router) lookupKBService() KBCommandService {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.kbService
+}
+
+func (r *Router) updateKBSessionDomain(sessionID, domainID string, enabled bool) {
+	r.mu.RLock()
+	fn := r.kbSessionDomainUpdater
+	r.mu.RUnlock()
+	if fn != nil {
+		fn(sessionID, domainID, enabled)
+	}
 }
 
 func (r *Router) MetricsWriter() observability.MetricsWriter {
@@ -550,6 +581,9 @@ func (r *Router) HandleMessage(ctx context.Context, msg InboundMessage) error {
 	// Debounce：同一发送者的快速连续消息合并后异步处理。
 	// gap fetch / 历史回放必须逐条进入标准链路，显式跳过 debounce。
 	// 返回 true 表示消息已缓冲，等待窗口到期后合并处理。
+	if len(msg.Attachments) > 0 {
+		msg.NoDebounce = true
+	}
 	if !msg.NoDebounce && r.debouncer.Add(msg) {
 		return nil
 	}
@@ -588,6 +622,10 @@ func (r *Router) processMessage(msg InboundMessage) {
 	r.processMessageImpl(msg)
 }
 
+func (r *Router) processMessageSync(ctx context.Context, msg InboundMessage) {
+	r.processMessageImplWithContext(ctx, msg)
+}
+
 // processMessageImpl 实际执行消息处理（内部方法，供 goroutine 调用）
 //
 // P0-#7 不变量：
@@ -595,6 +633,10 @@ func (r *Router) processMessage(msg InboundMessage) {
 //     panic 后必须落 retry_queue（reason=handler_panic），不得让 panic 冒出导致 process abort
 //   - processor 失败：在 processViaLegacySend / processViaRenderer 内部各自落队（reason=handler_error）
 func (r *Router) processMessageImpl(msg InboundMessage) {
+	r.processMessageImplWithContext(context.Background(), msg)
+}
+
+func (r *Router) processMessageImplWithContext(baseCtx context.Context, msg InboundMessage) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			r.logger.Error("router.processMessageImpl panic recovered",
@@ -623,7 +665,10 @@ func (r *Router) processMessageImpl(msg InboundMessage) {
 	// 原因：debouncer flush 回调是异步执行的，原始请求 ctx 在 debounce 窗口期间
 	// 可能已经超时或取消。使用 Background() 确保合并后的消息能完整处理。
 	// 已知限制：上游 trace ID 等 context 信息在 debounce 路径下会丢失。
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(baseCtx, 5*time.Minute)
 	defer cancel()
 
 	// IM 用户关联：仅私聊且有 SenderID 时尝试注入用户上下文
@@ -677,6 +722,10 @@ func (r *Router) processMessageImpl(msg InboundMessage) {
 		}
 		sessionID = built
 		r.Bind(Binding{Platform: msg.Platform, TenantKey: tenantKey, ChatID: msg.ChatID, SessionID: sessionID})
+	}
+
+	if handled := r.handleKBCommand(ctx, msg, sessionID); handled {
+		return
 	}
 
 	r.logger.Info("路由消息",
@@ -734,7 +783,17 @@ func (r *Router) processMessageImpl(msg InboundMessage) {
 			r.processViaRenderer(ctx, renderer, plugin, msg, sessionID)
 			return
 		}
+		attachments, err := r.resolveInboundAttachments(ctx, plugin, msg)
+		if err != nil {
+			r.logger.Error("下载 IM 附件失败，落 retry_queue",
+				zap.String("message_id", msg.MessageID),
+				zap.Error(err))
+			r.enqueueRetry(msg, RetryReasonHandlerError, err.Error())
+			r.NotifyError(ctx, msg, err)
+			return
+		}
 		imCtx := r.resolveInboundContext(ctx, &msg)
+		msg.Attachments = attachments
 		r.processViaLegacySend(ctx, plugin, msg, sessionID, modelOverride, imCtx)
 		return
 	}
@@ -742,7 +801,17 @@ func (r *Router) processMessageImpl(msg InboundMessage) {
 		r.processViaRenderer(ctx, renderer, plugin, msg, sessionID)
 		return
 	}
+	attachments, err := r.resolveInboundAttachments(ctx, plugin, msg)
+	if err != nil {
+		r.logger.Error("下载 IM 附件失败，落 retry_queue",
+			zap.String("message_id", msg.MessageID),
+			zap.Error(err))
+		r.enqueueRetry(msg, RetryReasonHandlerError, err.Error())
+		r.NotifyError(ctx, msg, err)
+		return
+	}
 	imCtx := r.resolveInboundContext(ctx, &msg)
+	msg.Attachments = attachments
 	r.processViaLegacySend(ctx, plugin, msg, sessionID, "", imCtx)
 }
 
@@ -792,6 +861,36 @@ func (r *Router) resolveInboundContext(ctx context.Context, msg *InboundMessage)
 		})
 	}
 	return imCtx
+}
+
+func (r *Router) resolveInboundAttachments(ctx context.Context, plugin ChannelPlugin, msg InboundMessage) ([]Attachment, error) {
+	if len(msg.Attachments) == 0 {
+		return nil, nil
+	}
+	downloader, ok := plugin.(AttachmentDownloader)
+	if !ok {
+		return msg.Attachments, nil
+	}
+	out := make([]Attachment, 0, len(msg.Attachments))
+	for _, att := range msg.Attachments {
+		if len(att.Data) > 0 {
+			out = append(out, att)
+			continue
+		}
+		data, err := downloader.DownloadAttachment(ctx, msg, att)
+		if err != nil {
+			return nil, err
+		}
+		att.Data = data.Data
+		if strings.TrimSpace(data.FileName) != "" {
+			att.FileName = data.FileName
+		}
+		if strings.TrimSpace(data.MimeType) != "" {
+			att.MimeType = data.MimeType
+		}
+		out = append(out, att)
+	}
+	return out, nil
 }
 
 func (r *Router) resolveOwnerUser(ctx context.Context, msg InboundMessage) (*auth.User, bool) {
@@ -905,9 +1004,47 @@ func (r *Router) processViaLegacySend(ctx context.Context, plugin ChannelPlugin,
 // 契约：im-streaming-reply spec line 69-73（plugin MUST set req.ChannelMessageID to platform-side message ID）。
 func (r *Router) dispatchProcess(ctx context.Context, sessionID string, msg InboundMessage, modelOverride string, ackAlreadyEmitted bool, imCtx *imctx.IMMessageContext) (master.TaskResponse, error) {
 	if imp, ok := r.processor.(IMMessageProcessor); ok && msg.MessageID != "" {
-		return imp.ProcessMessageFromIM(ctx, sessionID, msg.Content, msg.MessageID, modelOverride, ackAlreadyEmitted, imCtx)
+		return imp.ProcessMessageFromIM(ctx, sessionID, msg.Content, msg.MessageID, inboundAttachmentsToMaster(msg.Attachments), modelOverride, ackAlreadyEmitted, imCtx)
 	}
 	return r.processor.ProcessMessage(ctx, sessionID, msg.Content)
+}
+
+func inboundAttachmentsToMaster(in []Attachment) []master.FileAttachment {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]master.FileAttachment, 0, len(in))
+	for _, att := range in {
+		if len(att.Data) == 0 {
+			continue
+		}
+		filename := strings.TrimSpace(att.FileName)
+		if filename == "" {
+			filename = strings.TrimSpace(att.Key)
+		}
+		out = append(out, master.FileAttachment{
+			Filename: filename,
+			MimeType: imAttachmentMimeType(att),
+			Data:     base64.StdEncoding.EncodeToString(att.Data),
+		})
+	}
+	return out
+}
+
+func imAttachmentMimeType(att Attachment) string {
+	if strings.TrimSpace(att.MimeType) != "" {
+		return strings.TrimSpace(att.MimeType)
+	}
+	switch strings.ToLower(strings.TrimSpace(att.Type)) {
+	case "image":
+		return "image/png"
+	case "audio":
+		return "audio/mpeg"
+	case "video", "media":
+		return "video/mp4"
+	default:
+		return "application/octet-stream"
+	}
 }
 
 func (r *Router) emitInputReceived(sessionID, channelMessageID string) {

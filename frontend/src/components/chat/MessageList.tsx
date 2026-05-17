@@ -47,6 +47,7 @@ interface Props {
   streamingStatus?: string | null;
   onRegenerate?: () => void;
   sessionId?: string;
+  kbDomainId?: string;
 }
 
 function isIntegratedToolResult(msg: Message, assistantToolCallIds: Set<string>): boolean {
@@ -68,7 +69,7 @@ function shouldShowMessageRole(messages: Message[], index: number, assistantTool
   return true;
 }
 
-export function MessageList({ messages, loading, streamingStatus, onRegenerate, sessionId }: Props) {
+export function MessageList({ messages, loading, streamingStatus, onRegenerate, sessionId, kbDomainId }: Props) {
   const { t } = useTranslation();
   const inlineApprovals = useChatStore((s) => s.inlineApprovals);
   const { submitApproval } = useHITLSubmit();
@@ -267,6 +268,7 @@ export function MessageList({ messages, loading, streamingStatus, onRegenerate, 
                   toolErrorKinds={toolErrorKinds}
                   toolNames={toolNames}
                   sessionId={sessionId}
+                  kbDomainId={kbDomainId}
                 />
               </MessageBubbleBoundary>
               {/* 内联审批卡片：紧跟对应的消息渲染 */}

@@ -45,6 +45,8 @@ type Config struct {
 	PromptsDir      string                   `json:"prompts_dir,omitempty"` // 外部 prompt 文件目录（可选，优先于 go:embed）
 	SpecDriven      SpecDrivenConfig         `json:"spec_driven,omitempty"` // Spec-driven Phase 2 总开关（默认 mode=legacy，零成本短路）
 	RuntimePolicy   RuntimePolicyConfig      `json:"runtime_policy,omitempty"`
+	Asset           AssetConfig              `json:"asset,omitempty"`
+	FileConv        FileConvConfig           `json:"fileconv,omitempty"`
 }
 
 // RuntimePolicyConfig 定义运行时 timeout、容量和成本配置。
@@ -164,6 +166,64 @@ type RemoteAgentConfig struct {
 type StoreConfig struct {
 	Type     string         `json:"type,omitempty"`     // 保留用于兼容，实际只支持 postgres
 	Postgres PostgresConfig `json:"postgres,omitempty"` // PostgreSQL 存储配置
+}
+
+// AssetConfig 配置统一对象存储层。
+type AssetConfig struct {
+	Provider string           `json:"provider,omitempty"` // local | minio | s3
+	Local    AssetLocalConfig `json:"local,omitempty"`
+	MinIO    AssetS3Config    `json:"minio,omitempty"`
+	S3       AssetS3Config    `json:"s3,omitempty"`
+}
+
+type AssetLocalConfig struct {
+	BasePath string `json:"base_path,omitempty"`
+}
+
+type AssetS3Config struct {
+	Endpoint  string `json:"endpoint,omitempty"`
+	AccessKey string `json:"access_key,omitempty"`
+	SecretKey string `json:"secret_key,omitempty"`
+	Bucket    string `json:"bucket,omitempty"`
+	Region    string `json:"region,omitempty"`
+	UseSSL    bool   `json:"use_ssl,omitempty"`
+}
+
+// FileConvConfig 配置文档转换层。聊天附件仍走 internal/fileconv.Convert；
+// markdown 子配置仅服务 KB ingest 等需要 Markdown 输出的路径。
+type FileConvConfig struct {
+	Markdown MarkdownConversionConfig `json:"markdown,omitempty"`
+}
+
+type MarkdownConversionConfig struct {
+	PDF PDFMarkdownConfig `json:"pdf,omitempty"`
+}
+
+type PDFMarkdownConfig struct {
+	Provider string                   `json:"provider,omitempty"` // mineru | external | none
+	Timeout  time.Duration            `json:"timeout,omitempty"`
+	Command  ExternalPDFCommandConfig `json:"command,omitempty"`
+	Install  PDFMarkdownInstallConfig `json:"install,omitempty"`
+}
+
+type ExternalPDFCommandConfig struct {
+	Name         string   `json:"name,omitempty"`
+	Binary       string   `json:"binary,omitempty"`
+	Args         []string `json:"args,omitempty"`
+	MarkdownPath string   `json:"markdown_path,omitempty"`
+	AssetDir     string   `json:"asset_dir,omitempty"`
+}
+
+type PDFMarkdownInstallConfig struct {
+	Enabled    *bool         `json:"enabled,omitempty"`
+	InstallDir string        `json:"install_dir,omitempty"`
+	Timeout    time.Duration `json:"timeout,omitempty"`
+	Command    CommandSpec   `json:"command,omitempty"`
+}
+
+type CommandSpec struct {
+	Binary string   `json:"binary,omitempty"`
+	Args   []string `json:"args,omitempty"`
 }
 
 // PostgresConfig PostgreSQL 连接配置
@@ -467,6 +527,8 @@ func Default() *Config {
 			PromptCacheKeyEnabled: DefaultPromptCacheKey,
 		},
 		SpecDriven: DefaultSpecDrivenConfig,
+		Asset:      DefaultAssetConfig,
+		FileConv:   DefaultFileConvConfig,
 		Agent: AgentConfig{
 			ToolRecall:           DefaultToolRecallConfigValue,
 			MaxModelVisibleTools: DefaultMaxModelVisibleTools,
@@ -578,6 +640,8 @@ func (c *Config) CLIDefaults() {
 	c.Agent.ActionGuardEnabled = DefaultActionGuardEnabled
 	c.SessionsDir = DefaultSessionsDir
 	c.SpecDriven = DefaultSpecDrivenConfig
+	c.Asset = DefaultAssetConfig
+	c.FileConv = DefaultFileConvConfig
 }
 
 // Load 读取配置文件并返回 Config，缺失的值使用默认值
@@ -762,6 +826,110 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("CUSTOM_TOOLS_DIR"); v != "" {
 		c.CustomToolsDir = v
 	}
+	if v := os.Getenv("ASSET_PROVIDER"); v != "" {
+		c.Asset.Provider = v
+	}
+	if v := os.Getenv("ASSET_LOCAL_BASE_PATH"); v != "" {
+		c.Asset.Local.BasePath = v
+	}
+	if v := os.Getenv("MINIO_ENDPOINT"); v != "" {
+		c.Asset.MinIO.Endpoint = v
+	}
+	if v := os.Getenv("MINIO_ACCESS_KEY"); v != "" {
+		c.Asset.MinIO.AccessKey = v
+	}
+	if v := os.Getenv("MINIO_SECRET_KEY"); v != "" {
+		c.Asset.MinIO.SecretKey = v
+	}
+	if v := os.Getenv("MINIO_BUCKET"); v != "" {
+		c.Asset.MinIO.Bucket = v
+	}
+	if v := os.Getenv("MINIO_REGION"); v != "" {
+		c.Asset.MinIO.Region = v
+	}
+	if v := os.Getenv("MINIO_USE_SSL"); v != "" {
+		c.Asset.MinIO.UseSSL = parseBoolEnv(v, c.Asset.MinIO.UseSSL)
+	}
+	if v := os.Getenv("S3_ENDPOINT"); v != "" {
+		c.Asset.S3.Endpoint = v
+	}
+	if v := os.Getenv("AWS_ACCESS_KEY_ID"); v != "" {
+		c.Asset.S3.AccessKey = v
+	}
+	if v := os.Getenv("AWS_SECRET_ACCESS_KEY"); v != "" {
+		c.Asset.S3.SecretKey = v
+	}
+	if v := os.Getenv("S3_BUCKET"); v != "" {
+		c.Asset.S3.Bucket = v
+	}
+	if v := os.Getenv("AWS_REGION"); v != "" {
+		c.Asset.S3.Region = v
+	}
+	if v := os.Getenv("S3_USE_SSL"); v != "" {
+		c.Asset.S3.UseSSL = parseBoolEnv(v, c.Asset.S3.UseSSL)
+	}
+	if v := os.Getenv("FILECONV_PDF_PROVIDER"); v != "" {
+		c.FileConv.Markdown.PDF.Provider = v
+	}
+	if v := os.Getenv("KB_PDF_PROVIDER"); v != "" {
+		c.FileConv.Markdown.PDF.Provider = v
+	}
+	if v := os.Getenv("FILECONV_PDF_TIMEOUT_SECONDS"); v != "" {
+		if seconds, err := strconv.Atoi(v); err == nil && seconds > 0 {
+			c.FileConv.Markdown.PDF.Timeout = time.Duration(seconds) * time.Second
+		}
+	}
+	if v := os.Getenv("MINERU_BIN"); v != "" {
+		c.FileConv.Markdown.PDF.Command.Binary = v
+	}
+	if v := os.Getenv("FILECONV_PDF_BIN"); v != "" {
+		c.FileConv.Markdown.PDF.Command.Binary = v
+	}
+	if v := os.Getenv("MINERU_ARGS"); v != "" {
+		c.FileConv.Markdown.PDF.Command.Args = strings.Fields(v)
+	}
+	if v := os.Getenv("FILECONV_PDF_ARGS"); v != "" {
+		c.FileConv.Markdown.PDF.Command.Args = strings.Fields(v)
+	}
+	if v := os.Getenv("MINERU_MARKDOWN_PATH"); v != "" {
+		c.FileConv.Markdown.PDF.Command.MarkdownPath = v
+	}
+	if v := os.Getenv("FILECONV_PDF_MARKDOWN_PATH"); v != "" {
+		c.FileConv.Markdown.PDF.Command.MarkdownPath = v
+	}
+	if v := os.Getenv("MINERU_ASSET_DIR"); v != "" {
+		c.FileConv.Markdown.PDF.Command.AssetDir = v
+	}
+	if v := os.Getenv("FILECONV_PDF_ASSET_DIR"); v != "" {
+		c.FileConv.Markdown.PDF.Command.AssetDir = v
+	}
+	if v := os.Getenv("FILECONV_PDF_INSTALL_ENABLED"); v != "" {
+		enabled := parseBoolEnv(v, true)
+		c.FileConv.Markdown.PDF.Install.Enabled = &enabled
+	}
+	if v := os.Getenv("MINERU_INSTALL_DIR"); v != "" {
+		c.FileConv.Markdown.PDF.Install.InstallDir = v
+	}
+	if v := os.Getenv("FILECONV_PDF_INSTALL_DIR"); v != "" {
+		c.FileConv.Markdown.PDF.Install.InstallDir = v
+	}
+	if v := os.Getenv("FILECONV_PDF_INSTALL_TIMEOUT_SECONDS"); v != "" {
+		if seconds, err := strconv.Atoi(v); err == nil && seconds > 0 {
+			c.FileConv.Markdown.PDF.Install.Timeout = time.Duration(seconds) * time.Second
+		}
+	}
+	if v := os.Getenv("MINERU_INSTALL_BIN"); v != "" {
+		c.FileConv.Markdown.PDF.Install.Command.Binary = v
+	}
+	if v := os.Getenv("FILECONV_PDF_INSTALL_BIN"); v != "" {
+		c.FileConv.Markdown.PDF.Install.Command.Binary = v
+	}
+	if v := os.Getenv("MINERU_INSTALL_ARGS"); v != "" {
+		c.FileConv.Markdown.PDF.Install.Command.Args = strings.Fields(v)
+	}
+	if v := os.Getenv("FILECONV_PDF_INSTALL_ARGS"); v != "" {
+		c.FileConv.Markdown.PDF.Install.Command.Args = strings.Fields(v)
+	}
 	if v := os.Getenv("IM_API_ENABLED"); v != "" {
 		c.Agent.IMAPI.Enabled = parseBoolEnv(v, c.Agent.IMAPI.Enabled)
 	}
@@ -907,10 +1075,72 @@ func (c *Config) Resolve() {
 	if c.Agent.MaxSessionCost < 0 {
 		c.Agent.MaxSessionCost = 0
 	}
+	c.Asset = NormalizeAssetConfig(c.Asset)
+	c.FileConv = NormalizeFileConvConfig(c.FileConv)
 	c.Agent.ToolRecall = NormalizeToolRecallConfig(c.Agent.ToolRecall)
 	c.Agent.FirstToken = NormalizeFirstTokenConfig(c.Agent.FirstToken)
 	c.Agent.IMAPI = NormalizeIMAPIConfig(c.Agent.IMAPI)
 	c.Memory = NormalizeMemoryConfig(c.Memory)
+}
+
+func NormalizeAssetConfig(cfg AssetConfig) AssetConfig {
+	cfg.Provider = strings.ToLower(strings.TrimSpace(cfg.Provider))
+	if cfg.Provider == "" {
+		cfg.Provider = DefaultAssetConfig.Provider
+	}
+	if strings.TrimSpace(cfg.Local.BasePath) == "" {
+		cfg.Local.BasePath = DefaultAssetConfig.Local.BasePath
+	}
+	if strings.TrimSpace(cfg.MinIO.Endpoint) == "" {
+		cfg.MinIO.Endpoint = DefaultAssetConfig.MinIO.Endpoint
+	}
+	if strings.TrimSpace(cfg.MinIO.Bucket) == "" {
+		cfg.MinIO.Bucket = DefaultAssetConfig.MinIO.Bucket
+	}
+	if strings.TrimSpace(cfg.S3.Bucket) == "" {
+		cfg.S3.Bucket = DefaultAssetConfig.S3.Bucket
+	}
+	return cfg
+}
+
+func NormalizeFileConvConfig(cfg FileConvConfig) FileConvConfig {
+	pdf := &cfg.Markdown.PDF
+	pdf.Provider = strings.ToLower(strings.TrimSpace(pdf.Provider))
+	if pdf.Provider == "" {
+		pdf.Provider = DefaultFileConvConfig.Markdown.PDF.Provider
+	}
+	if pdf.Timeout <= 0 {
+		pdf.Timeout = DefaultFileConvConfig.Markdown.PDF.Timeout
+	}
+	if strings.TrimSpace(pdf.Command.Name) == "" {
+		pdf.Command.Name = DefaultFileConvConfig.Markdown.PDF.Command.Name
+	}
+	if strings.TrimSpace(pdf.Command.Binary) == "" {
+		pdf.Command.Binary = DefaultFileConvConfig.Markdown.PDF.Command.Binary
+	}
+	if len(pdf.Command.Args) == 0 {
+		pdf.Command.Args = append([]string(nil), DefaultFileConvConfig.Markdown.PDF.Command.Args...)
+	}
+	if pdf.Install.Enabled == nil {
+		enabled := true
+		if DefaultFileConvConfig.Markdown.PDF.Install.Enabled != nil {
+			enabled = *DefaultFileConvConfig.Markdown.PDF.Install.Enabled
+		}
+		pdf.Install.Enabled = &enabled
+	}
+	if strings.TrimSpace(pdf.Install.InstallDir) == "" {
+		pdf.Install.InstallDir = DefaultFileConvConfig.Markdown.PDF.Install.InstallDir
+	}
+	if pdf.Install.Timeout <= 0 {
+		pdf.Install.Timeout = DefaultFileConvConfig.Markdown.PDF.Install.Timeout
+	}
+	if strings.TrimSpace(pdf.Install.Command.Binary) == "" {
+		pdf.Install.Command.Binary = DefaultFileConvConfig.Markdown.PDF.Install.Command.Binary
+	}
+	if len(pdf.Install.Command.Args) == 0 {
+		pdf.Install.Command.Args = append([]string(nil), DefaultFileConvConfig.Markdown.PDF.Install.Command.Args...)
+	}
+	return cfg
 }
 
 func NormalizeIMAPIConfig(cfg IMAPIConfig) IMAPIConfig {

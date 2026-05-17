@@ -3,7 +3,10 @@ package feishu
 import (
 	"context"
 	"encoding/json"
+	"mime"
 	"net/http"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -118,6 +121,39 @@ func (p *Plugin) WithChatStateRepo(repo ChatStateRepo) *Plugin {
 func (p *Plugin) WithReliabilityLeaderGate(gate ReliabilityLeaderGate) *Plugin {
 	p.leaderGate = gate
 	return p
+}
+
+func (p *Plugin) DownloadAttachment(ctx context.Context, msg channel.InboundMessage, att channel.Attachment) (channel.AttachmentData, error) {
+	if p == nil || p.client == nil {
+		return channel.AttachmentData{}, nil
+	}
+	data, fileName, err := p.client.DownloadMessageResource(ctx, msg.MessageID, att.Key, att.Type)
+	if err != nil {
+		return channel.AttachmentData{}, err
+	}
+	if fileName == "" {
+		fileName = att.FileName
+	}
+	return channel.AttachmentData{
+		Data:     data,
+		FileName: fileName,
+		MimeType: feishuAttachmentMimeType(att.Type, fileName),
+	}, nil
+}
+
+func feishuAttachmentMimeType(kind, filename string) string {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "image":
+		return "image/png"
+	case "audio":
+		return "audio/mpeg"
+	case "video", "media":
+		return "video/mp4"
+	}
+	if mt := mime.TypeByExtension(filepath.Ext(filename)); mt != "" {
+		return mt
+	}
+	return "application/octet-stream"
 }
 
 func (p *Plugin) ReloadFromConfig(cfg config.FeishuConfig) error {

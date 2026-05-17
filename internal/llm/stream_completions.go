@@ -51,6 +51,7 @@ func (c *Client) chatWithToolsStreamViaCompletions(ctx context.Context, req Chat
 	}
 
 	// 1. 转换 mcphost.ToolDefinition → openai.ChatCompletionTool
+	aliases := toolNameAliasesForTools(req.Tools)
 	tools, err := convertToolsForChatCompletions(req.Tools)
 	if err != nil {
 		return nil, err
@@ -90,7 +91,7 @@ func (c *Client) chatWithToolsStreamViaCompletions(ctx context.Context, req Chat
 					toolCalls = append(toolCalls, openai.ChatCompletionMessageToolCallParam{
 						ID: tcID,
 						Function: openai.ChatCompletionMessageToolCallFunctionParam{
-							Name:      tc.Name,
+							Name:      aliases.APIName(tc.Name),
 							Arguments: string(tc.Arguments),
 						},
 					})
@@ -137,7 +138,7 @@ func (c *Client) chatWithToolsStreamViaCompletions(ctx context.Context, req Chat
 		params.Tools = tools
 	}
 	// P0-A：ToolChoice 透传（空字符串时跳过，保持旧 auto 行为）
-	if tc, ok := buildChatCompletionsToolChoice(req.ToolChoice); ok {
+	if tc, ok := buildChatCompletionsToolChoiceWithAliases(req.ToolChoice, aliases); ok {
 		params.ToolChoice = tc
 	}
 	if req.Temperature > 0 {
@@ -328,7 +329,7 @@ func (c *Client) chatWithToolsStreamViaCompletions(ctx context.Context, req Chat
 				pendingCalls[idx].ID = tc.ID
 			}
 			if tc.Function.Name != "" {
-				pendingCalls[idx].Name = tc.Function.Name
+				pendingCalls[idx].Name = aliases.InternalName(tc.Function.Name)
 			}
 			if tc.Function.Arguments != "" {
 				pendingCalls[idx].Arguments.WriteString(tc.Function.Arguments)

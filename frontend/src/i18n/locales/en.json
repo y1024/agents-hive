@@ -19,6 +19,7 @@
     "adminLLM": "LLM Models",
     "adminAuthProviders": "Auth Providers",
     "adminPrompts": "Prompt Manager",
+    "adminKnowledgeBase": "Knowledge Base",
     "adminQualityCandidates": "Quality Candidates",
     "adminQualityWorkbench": "Quality Workbench",
     "adminMemoryGovernance": "Memory Governance",

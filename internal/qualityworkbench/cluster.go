@@ -16,6 +16,7 @@ type ClusterKey string
 
 type GroupingMatch struct {
 	FailureType    string `json:"failure_type,omitempty"`
+	KBFailureType  string `json:"kb_failure_type,omitempty"`
 	Tool           string `json:"tool,omitempty"`
 	Skill          string `json:"skill,omitempty"`
 	PromptKey      string `json:"prompt_key,omitempty"`
@@ -112,6 +113,8 @@ func ComputeClusterKey(rule GroupingRule, rec agentquality.CandidateRecord) Clus
 		switch f {
 		case "failure_type":
 			parts = append(parts, string(firstFailureType(ev.FailureType, rec.FailureType)))
+		case "kb_failure_type":
+			parts = append(parts, kbFailureType(ev))
 		case "tool":
 			parts = append(parts, ev.ToolDecision.Actual)
 		case "skill":
@@ -212,6 +215,9 @@ func matchesRule(match GroupingMatch, rec agentquality.CandidateRecord) bool {
 	if match.FailureType != "" && string(firstFailureType(ev.FailureType, rec.FailureType)) != match.FailureType {
 		return false
 	}
+	if match.KBFailureType != "" && kbFailureType(ev) != match.KBFailureType {
+		return false
+	}
 	if match.Tool != "" && ev.ToolDecision.Actual != match.Tool {
 		return false
 	}
@@ -291,6 +297,23 @@ func stringAttr(ev agentquality.Event, key string) string {
 	}
 	v, _ := ev.Attributes[key].(string)
 	return v
+}
+
+func kbFailureType(ev agentquality.Event) string {
+	if ev.Attributes != nil {
+		if v, ok := ev.Attributes["kb_failure_type"].(string); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	switch ev.FailureType {
+	case agentquality.FailureKBRetrieval:
+		return agentquality.KBFailureSectionText
+	case agentquality.FailureKBEvidence:
+		return agentquality.KBFailureEvidenceViolation
+	case agentquality.FailureKBSummary:
+		return agentquality.KBFailureSummaryGenerator
+	}
+	return ""
 }
 
 func firstNonEmpty(vals ...string) string {

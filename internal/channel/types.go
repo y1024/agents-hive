@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/chef-guo/agents-hive/internal/imctx"
+	"github.com/chef-guo/agents-hive/internal/kb"
 	"github.com/chef-guo/agents-hive/internal/master"
 )
 
@@ -35,6 +36,13 @@ type MessageProcessor interface {
 	ProcessMessage(ctx context.Context, sessionID string, input string) (master.TaskResponse, error)
 }
 
+type KBCommandService interface {
+	ListNamespaces(ctx context.Context, scope kb.ManagementScope, input kb.ListNamespacesInput) ([]kb.Namespace, error)
+	ListBindingsForManagement(ctx context.Context, scope kb.ManagementScope, query kb.BindingQuery) ([]kb.Binding, error)
+	CreateBinding(ctx context.Context, scope kb.ManagementScope, input kb.CreateBindingInput) (*kb.Binding, error)
+	DisableBinding(ctx context.Context, scope kb.ManagementScope, bindingID string) (*kb.Binding, error)
+}
+
 // IMMessageProcessor 是可选扩展接口：支持透传平台原消息 ID（IM 通道独有，Web/CLI 不需要）。
 // Master 实现此接口；更轻量的 processor 可以只实现 MessageProcessor。
 // Router 通过类型断言获取，断言失败时 fallback 到 ProcessMessage（空 channelMessageID）。
@@ -53,6 +61,7 @@ type IMMessageProcessor interface {
 		sessionID string,
 		input string,
 		channelMessageID string,
+		attachments []master.FileAttachment,
 		modelOverride string,
 		ackAlreadyEmitted bool,
 		imCtx *imctx.IMMessageContext,
@@ -129,6 +138,18 @@ type Attachment struct {
 	Type     string `json:"type"`
 	Key      string `json:"key"`
 	FileName string `json:"file_name,omitempty"`
+	Data     []byte `json:"-"`
+	MimeType string `json:"mime_type,omitempty"`
+}
+
+type AttachmentData struct {
+	Data     []byte
+	FileName string
+	MimeType string
+}
+
+type AttachmentDownloader interface {
+	DownloadAttachment(ctx context.Context, msg InboundMessage, att Attachment) (AttachmentData, error)
 }
 
 // MsgType 消息格式类型

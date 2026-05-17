@@ -128,6 +128,94 @@ func TestIntentContract_ExternalSendSatisfiedBySendAttempt(t *testing.T) {
 	}
 }
 
+func TestIntentContract_ExternalBusinessWriteSatisfiedByCreateTask(t *testing.T) {
+	intent := externalSendIntentForTest()
+	intent.AllowedDomainsHint = []string{"feishu"}
+	intent.Signals = []string{externalBusinessWriteSignal}
+	contract := IntentContract{Kind: IntentContractExternalSend, Intent: intent}
+
+	eval := contract.Evaluate([]llm.MessageWithTools{
+		{Role: "user", Content: llm.NewTextContent("创建一个飞书任务")},
+		{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "task-1", Name: "feishu_api", Arguments: json.RawMessage(`{"action":"create_task","summary":"跟进合同"}`)}}},
+		{Role: "tool", ToolCallID: "task-1", ToolName: "feishu_api", Content: llm.NewTextContent(`{"task_id":"task_1"}`)},
+	}, llm.ChatWithToolsResponse{Content: "已创建任务。", FinishReason: "stop"})
+
+	if eval.Status != ContractSatisfied {
+		t.Fatalf("external business write should be satisfied by successful create_task; eval=%+v", eval)
+	}
+	if !eval.Evidence.WriteAttemptValid {
+		t.Fatalf("write evidence missing: %+v", eval.Evidence)
+	}
+}
+
+func TestIntentContract_ExternalBusinessWriteMissingPayloadIncomplete(t *testing.T) {
+	intent := externalSendIntentForTest()
+	intent.AllowedDomainsHint = []string{"feishu"}
+	intent.Signals = []string{externalBusinessWriteSignal}
+	contract := IntentContract{Kind: IntentContractExternalSend, Intent: intent}
+
+	eval := contract.Evaluate([]llm.MessageWithTools{
+		{Role: "user", Content: llm.NewTextContent("创建一个飞书任务")},
+		{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "task-1", Name: "feishu_api", Arguments: json.RawMessage(`{"action":"create_task"}`)}}},
+	}, llm.ChatWithToolsResponse{Content: "已创建任务。", FinishReason: "stop"})
+
+	if eval.Status != ContractIncomplete {
+		t.Fatalf("create_task without summary should be incomplete; eval=%+v", eval)
+	}
+	assertMissingRequirement(t, eval, MissingSendPayload)
+}
+
+func TestIntentContract_ExternalBusinessWriteRequiresAllRegistryFields(t *testing.T) {
+	intent := externalSendIntentForTest()
+	intent.AllowedDomainsHint = []string{"feishu"}
+	intent.Signals = []string{
+		externalBusinessWriteSignal,
+		router.ActionCapabilitySignal(router.ActionCapabilityExternalApprovalSubmit),
+	}
+	contract := IntentContract{Kind: IntentContractExternalSend, Intent: intent}
+
+	eval := contract.Evaluate([]llm.MessageWithTools{
+		{Role: "user", Content: llm.NewTextContent("发起飞书审批")},
+		{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "approval-1", Name: "feishu_api", Arguments: json.RawMessage(`{"action":"create_approval","approval_code":"code_only"}`)}}},
+	}, llm.ChatWithToolsResponse{Content: "已发起审批。", FinishReason: "stop"})
+
+	if eval.Status != ContractIncomplete {
+		t.Fatalf("create_approval without all required fields should be incomplete; eval=%+v", eval)
+	}
+	assertMissingRequirement(t, eval, MissingSendPayload)
+}
+
+func TestIntentContract_RecoverableBusinessWriteErrorKeepsToolChoiceRequired(t *testing.T) {
+	intent := externalSendIntentForTest()
+	intent.AllowedDomainsHint = []string{"feishu"}
+	intent.Signals = []string{
+		externalBusinessWriteSignal,
+		router.ActionCapabilitySignal(router.ActionCapabilityExternalTaskCreate),
+	}
+	contract := IntentContract{Kind: IntentContractExternalSend, Intent: intent}
+
+	messages := []llm.MessageWithTools{
+		{Role: "user", Content: llm.NewTextContent("创建一个飞书任务")},
+		{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "task-1", Name: "feishu_api", Arguments: json.RawMessage(`{"action":"send_message","chat_id":"oc_1","content":"hi"}`)}}},
+		{
+			Role:       "tool",
+			ToolCallID: "task-1",
+			ToolName:   "feishu_api",
+			IsError:    true,
+			Content:    llm.NewTextContent(recoverableToolCallErrorContent("route_input_outside_allowed_values", "send_message 不在 allowed_inputs 中，请重构为 create_task")),
+			Metadata:   map[string]string{"recoverable": "true", "error_kind": "route_input_outside_allowed_values"},
+		},
+	}
+
+	eval := contract.Evaluate(messages, llm.ChatWithToolsResponse{Content: "不能执行。", FinishReason: "stop"})
+	if eval.Status != ContractIncomplete || !eval.Evidence.RepairNeeded {
+		t.Fatalf("recoverable route/action error should stay incomplete for repair; eval=%+v", eval)
+	}
+	if !shouldForceExternalBusinessWriteToolChoice(intent, messages) {
+		t.Fatal("recoverable business-write error must keep tool_choice required so the model repairs the call")
+	}
+}
+
 func TestIntentContract_ExternalSendSuccessfulRetryOverridesEarlierFailure(t *testing.T) {
 	contract := mustExternalSendContract(t)
 	eval := contract.Evaluate([]llm.MessageWithTools{

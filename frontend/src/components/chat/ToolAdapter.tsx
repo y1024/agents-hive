@@ -5,6 +5,7 @@ import { getToolDisplayName } from '../../utils/toolName';
 import { ToolInvocationChip } from './ToolInvocationChip';
 import { ToolExecutionBlock } from './ToolExecutionBlock';
 import { TodoToolResultCard } from './TodoToolResultCard';
+import { KBToolResultCard } from './KBToolResultCard';
 import { isTodoWriteTool, parseTodoToolSnapshot } from './todoToolSnapshot';
 
 type HiveStatus = 'running' | 'success' | 'error';
@@ -33,6 +34,8 @@ interface ToolAdapterProps {
   hasError: boolean;
   recoverable?: boolean;
   errorKind?: string;
+  sessionId?: string;
+  kbDomainId?: string;
 }
 
 /**
@@ -44,7 +47,7 @@ interface ToolAdapterProps {
  *   - running / error 态默认展开（用户需要看到调用上下文 / 错误详情）
  *   - success 态默认折叠（完成后收起省空间，点开查看输入输出）
  */
-export function ToolAdapter({ id, name, args, result, hasError, recoverable, errorKind }: ToolAdapterProps) {
+export function ToolAdapter({ id, name, args, result, hasError, recoverable, errorKind, sessionId, kbDomainId }: ToolAdapterProps) {
   const { t } = useTranslation();
   const liveStatus = useChatStore((s) => s.toolCallStatuses?.[id]);
   const isRecoverable = recoverable || liveStatus?.recoverable === true;
@@ -64,6 +67,9 @@ export function ToolAdapter({ id, name, args, result, hasError, recoverable, err
 
   if (!hasError && resolvedStatus === 'success' && isTodoWriteTool(name) && parseTodoToolSnapshot(result)) {
     return <TodoToolResultCard result={result} />;
+  }
+  if (!hasError && resolvedStatus === 'success' && name.startsWith('kb.')) {
+    return <KBToolResultCard name={displayName} result={result} sessionId={sessionId} domainId={kbDomainId} />;
   }
 
   return (

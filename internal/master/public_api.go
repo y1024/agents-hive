@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -78,6 +79,13 @@ func WithModelOverride(model string) MessageOption {
 	}
 }
 
+// WithKBDomainID 设置本轮会话显式 KB domain。
+func WithKBDomainID(domainID string) MessageOption {
+	return func(req *SessionRequest) {
+		req.KBDomainID = domainID
+	}
+}
+
 // ProcessMessage 向指定会话发送消息并等待响应（委托给 SessionManager）
 // 实现 channel.MessageProcessor 接口
 func (m *Master) ProcessMessage(ctx context.Context, sessionID string, input string) (TaskResponse, error) {
@@ -94,11 +102,16 @@ func (m *Master) ProcessMessageFromIM(
 	sessionID string,
 	input string,
 	channelMessageID string,
+	attachments []FileAttachment,
 	modelOverride string,
 	ackAlreadyEmitted bool,
 	imCtx *imctx.IMMessageContext,
 ) (TaskResponse, error) {
 	opts := []MessageOption{}
+	if len(attachments) > 0 {
+		attachments = m.persistIMAttachments(ctx, sessionID, channelMessageID, attachments)
+		opts = append(opts, WithAttachments(attachments))
+	}
 	if channelMessageID != "" {
 		opts = append(opts, WithChannelMessageID(channelMessageID))
 	}
@@ -286,6 +299,9 @@ func snapshotMessageMeta(msg llm.MessageWithTools) map[string]any {
 		meta["created_at"] = msg.CreatedAt
 	}
 	if msg.Metadata != nil {
+		if v, ok := msg.Metadata["attachments"]; ok && v != "" {
+			meta["attachments"] = v
+		}
 		if v, ok := msg.Metadata["input_tokens"]; ok && v != "" {
 			meta["input_tokens"] = v
 		}
@@ -293,7 +309,7 @@ func snapshotMessageMeta(msg llm.MessageWithTools) map[string]any {
 			meta["output_tokens"] = v
 		}
 	}
-	if msg.Content.IsMultimodal() {
+	if msg.Content.IsMultimodal() && !hasAttachmentManifest(msg.Metadata) {
 		if partsJSON, err := json.Marshal(msg.Content.Parts()); err == nil {
 			meta["content_parts"] = string(partsJSON)
 		}
@@ -324,10 +340,49 @@ func (m *Master) UpdateSession(ctx context.Context, record *store.SessionRecord)
 		session.Tags = record.Tags
 		session.UserID = record.UserID
 		session.SelectedModel = record.SelectedModel
+		session.KBDomainID = record.KBDomainID
 		if t, err := time.Parse(time.RFC3339, record.LastAccessedAt); err == nil {
 			session.LastAccessed = t
 		}
 		session.mu.Unlock()
+	}
+	return nil
+}
+
+// SetSessionKBDomain 保存会话显式 KB domain，并同步内存缓存。
+func (m *Master) SetSessionKBDomain(ctx context.Context, sessionID, domainID string, enabled bool) error {
+	sessionID = strings.TrimSpace(sessionID)
+	domainID = strings.TrimSpace(domainID)
+	if sessionID == "" {
+		return errs.New(errs.CodeBadRequest, "需要会话 ID")
+	}
+	session := m.GetOrCreateSession(sessionID)
+	if enabled {
+		session.SetKBDomainID(domainID)
+	} else {
+		session.ClearKBDomainID(domainID)
+	}
+	if m.store == nil {
+		return nil
+	}
+
+	record, err := m.store.LoadSession(ctx, sessionID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return m.sessionMgr.SaveSession(ctx, m.store, session)
+		}
+		return err
+	}
+	if enabled {
+		record.KBDomainID = domainID
+	} else if domainID == "" || strings.TrimSpace(record.KBDomainID) == domainID {
+		record.KBDomainID = ""
+	}
+	if record.UpdatedAt == "" {
+		record.UpdatedAt = time.Now().Format(time.RFC3339)
+	}
+	if err := m.store.SaveSession(ctx, record); err != nil {
+		return err
 	}
 	return nil
 }

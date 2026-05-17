@@ -66,7 +66,14 @@ const (
 	DefaultCustomToolsDir = ".claw/tools"
 
 	// 会话存储默认值
-	DefaultSessionsDir = "~/.claw/sessions"
+	DefaultSessionsDir               = "~/.claw/sessions"
+	DefaultAssetLocalBasePath        = "./data/assets"
+	DefaultAssetBucket               = "hive-assets"
+	DefaultAssetMinIOEndpoint        = "localhost:9000"
+	DefaultFileConvPDFProvider       = "mineru"
+	DefaultFileConvPDFTimeout        = 5 * time.Minute
+	DefaultFileConvPDFInstallDir     = "./data/fileconv/mineru"
+	DefaultFileConvPDFInstallTimeout = 10 * time.Minute
 
 	// 隐私与远程指令默认值
 	DefaultStorePrivacy   = false // 默认不设置 store=false（不影响 OpenAI 默认行为）
@@ -181,6 +188,44 @@ var DefaultPluginConfig = PluginConfig{
 // WebUI 默认值
 var DefaultWebUIConfig = WebUIConfig{Enabled: true}
 
+var DefaultAssetConfig = AssetConfig{
+	Provider: "local",
+	Local: AssetLocalConfig{
+		BasePath: DefaultAssetLocalBasePath,
+	},
+	MinIO: AssetS3Config{
+		Endpoint: DefaultAssetMinIOEndpoint,
+		Bucket:   DefaultAssetBucket,
+	},
+	S3: AssetS3Config{
+		Bucket: DefaultAssetBucket,
+		UseSSL: true,
+	},
+}
+
+var DefaultFileConvConfig = FileConvConfig{
+	Markdown: MarkdownConversionConfig{
+		PDF: PDFMarkdownConfig{
+			Provider: DefaultFileConvPDFProvider,
+			Timeout:  DefaultFileConvPDFTimeout,
+			Command: ExternalPDFCommandConfig{
+				Name:   "mineru",
+				Binary: "mineru",
+				Args:   []string{"-p", "{input}", "-o", "{output}"},
+			},
+			Install: PDFMarkdownInstallConfig{
+				Enabled:    defaultBoolPtr(true),
+				InstallDir: DefaultFileConvPDFInstallDir,
+				Timeout:    DefaultFileConvPDFInstallTimeout,
+				Command: CommandSpec{
+					Binary: "builtin:python-venv-pip",
+					Args:   []string{"mineru[all]"},
+				},
+			},
+		},
+	},
+}
+
 // ToolPolicy 默认值
 var DefaultToolPolicyConfig = defaultToolPolicyConfig()
 
@@ -241,7 +286,7 @@ func defaultPermissionRules() []skills.PermissionRule {
 func defaultToolPolicyConfig() ToolPolicyConfig {
 	groupMap := router.HostToolPolicyGroups()
 	groups := make([]ToolGroupConfig, 0, len(groupMap))
-	for _, name := range []string{"fs", "runtime", "web", "lsp", "agent", "discovery"} {
+	for _, name := range []string{"fs", "runtime", "web", "lsp", "agent", "discovery", "kb"} {
 		if tools := groupMap[name]; len(tools) > 0 {
 			groups = append(groups, ToolGroupConfig{Name: name, Tools: tools})
 		}

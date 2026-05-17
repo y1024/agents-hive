@@ -143,8 +143,8 @@ func buildMinimalXLSX(t *testing.T, rows [][]string) string {
 	sheetBuf.WriteString("</sheetData></worksheet>")
 
 	return buildZip(t, map[string][]byte{
-		"xl/sharedStrings.xml":      sstBuf.Bytes(),
-		"xl/worksheets/sheet1.xml":  sheetBuf.Bytes(),
+		"xl/sharedStrings.xml":     sstBuf.Bytes(),
+		"xl/worksheets/sheet1.xml": sheetBuf.Bytes(),
 	})
 }
 

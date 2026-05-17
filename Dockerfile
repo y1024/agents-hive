@@ -68,13 +68,14 @@ FROM docker:27-cli AS runtime
 # 安装运行时必要工具
 #   bash / ca-certificates / tzdata  基础
 #   nodejs npm                        agent-browser 通过 npm 安装
+#   python3 py3-pip py3-virtualenv    MinerU PDF Markdown provider
 #   chromium chromium-chromedriver    agent-browser 驱动的真浏览器
 #   nss freetype harfbuzz ttf-freefont  Chromium 渲染依赖
 #   font-noto-cjk                     中文页面截图避免豆腐块
 #   wget                              HEALTHCHECK 已用
 RUN apk add --no-cache \
         bash ca-certificates tzdata wget \
-        nodejs npm \
+        nodejs npm python3 py3-pip py3-virtualenv \
         chromium chromium-chromedriver \
         nss freetype harfbuzz ttf-freefont \
         font-noto-cjk font-noto-emoji
@@ -89,18 +90,27 @@ ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
 RUN npm install -g agent-browser && \
     rm -rf /root/.npm /tmp/*
 
-# 创建应用目录结构
-RUN mkdir -p /app /data/logs /data/tools /opt/hive/workdir
-
-WORKDIR /app
+# KB PDF ingest 默认使用 MinerU。镜像构建时先安装一次；运行时仍会按
+# fileconv.markdown.pdf 配置自检，缺失时可自动安装或 fail-fast。
+RUN python3 -m pip install --break-system-packages --no-cache-dir uv && \
+    uv pip install --system -U "mineru[all]" && \
+    rm -rf /root/.cache/pip /tmp/*
 
 # 创建非 root 用户运行应用
 # hive 需要访问 /var/run/docker.sock，docker.sock 的 gid 在宿主机上通常为 999 或 970，
 # 通过 docker-compose.yml 的 group_add 传入，无需写死在镜像里。
 RUN addgroup -S hive && adduser -S hive -G hive
 
+# 创建应用目录结构。命名卷首次挂载会继承镜像内目录权限；
+# bind mount 的宿主机路径仍需由部署者保证 hive 用户可写。
+RUN mkdir -p /app /data/logs /data/tools /opt/hive/workdir && \
+    chown -R hive:hive /app /data /opt/hive/workdir
+
+WORKDIR /app
+
 # 复制编译好的二进制
 COPY --from=go-builder /hive /app/hive
+COPY docker/config.docker.json /app/config.json
 RUN chmod +x /app/hive && chown hive:hive /app/hive
 
 # 暴露 HTTP API + WebUI 端口
@@ -108,9 +118,9 @@ EXPOSE 8080
 
 # 健康检查
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
-    CMD wget -qO- http://localhost:8080/api/health || exit 1
+    CMD wget -qO- http://localhost:8080/api/v1/health || exit 1
 
 USER hive
 
 ENTRYPOINT ["/app/hive"]
-CMD []
+CMD ["--config", "/app/config.json"]

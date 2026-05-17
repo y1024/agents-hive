@@ -724,6 +724,7 @@ func (c *Client) ChatWithTools(ctx context.Context, req ChatWithToolsRequest) (*
 	}
 
 	// 1. 转换 mcphost.ToolDefinition → openai.ChatCompletionTool
+	aliases := toolNameAliasesForTools(req.Tools)
 	tools, err := convertToolsForChatCompletions(req.Tools)
 	if err != nil {
 		return nil, err
@@ -758,7 +759,7 @@ func (c *Client) ChatWithTools(ctx context.Context, req ChatWithToolsRequest) (*
 					toolCalls = append(toolCalls, openai.ChatCompletionMessageToolCallParam{
 						ID: tcID,
 						Function: openai.ChatCompletionMessageToolCallFunctionParam{
-							Name:      tc.Name,
+							Name:      aliases.APIName(tc.Name),
 							Arguments: string(tc.Arguments),
 						},
 						// Type 字段可以省略 - 默认为 "function"
@@ -807,7 +808,7 @@ func (c *Client) ChatWithTools(ctx context.Context, req ChatWithToolsRequest) (*
 		params.Tools = tools
 	}
 	// P0-A：ToolChoice 透传（空字符串时跳过，保持旧 auto 行为）
-	if tc, ok := buildChatCompletionsToolChoice(req.ToolChoice); ok {
+	if tc, ok := buildChatCompletionsToolChoiceWithAliases(req.ToolChoice, aliases); ok {
 		params.ToolChoice = tc
 	}
 	if req.Temperature > 0 {
@@ -887,13 +888,13 @@ func (c *Client) ChatWithTools(ctx context.Context, req ChatWithToolsRequest) (*
 			if len(tc.ID) > MaxToolCallIDLength {
 				c.logger.Warn("收到超长 tool_call_id，将在发送时截断",
 					zap.Int("id_length", len(tc.ID)),
-					zap.String("tool_name", tc.Function.Name),
+					zap.String("tool_name", aliases.InternalName(tc.Function.Name)),
 					zap.String("id_preview", tc.ID[:64]+"..."),
 				)
 			}
 			result.ToolCalls = append(result.ToolCalls, ToolCall{
 				ID:        tc.ID,
-				Name:      tc.Function.Name,
+				Name:      aliases.InternalName(tc.Function.Name),
 				Arguments: json.RawMessage(tc.Function.Arguments),
 			})
 		}

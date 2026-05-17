@@ -8,28 +8,28 @@ import (
 // TestTruncateOutput 测试输出截断功能
 func TestTruncateOutput(t *testing.T) {
 	tests := []struct {
-		name          string
-		input         string
+		name           string
+		input          string
 		expectTruncate bool
 	}{
 		{
-			name:          "小输出不截断",
-			input:         strings.Repeat("a", 1024), // 1KB
+			name:           "小输出不截断",
+			input:          strings.Repeat("a", 1024), // 1KB
 			expectTruncate: false,
 		},
 		{
-			name:          "正好10MB不截断",
-			input:         strings.Repeat("b", MaxToolOutputSize),
+			name:           "正好10MB不截断",
+			input:          strings.Repeat("b", MaxToolOutputSize),
 			expectTruncate: false,
 		},
 		{
-			name:          "超过10MB应截断",
-			input:         strings.Repeat("c", MaxToolOutputSize+1),
+			name:           "超过10MB应截断",
+			input:          strings.Repeat("c", MaxToolOutputSize+1),
 			expectTruncate: true,
 		},
 		{
-			name:          "大输出应截断",
-			input:         strings.Repeat("d", 20*1024*1024), // 20MB
+			name:           "大输出应截断",
+			input:          strings.Repeat("d", 20*1024*1024), // 20MB
 			expectTruncate: true,
 		},
 	}

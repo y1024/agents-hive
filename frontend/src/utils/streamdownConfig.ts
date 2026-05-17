@@ -17,6 +17,7 @@ export const ALLOWED_TAGS: AllowedTags = {
   pre: ['className'],
   span: ['className', 'style'],
   div: ['className', 'style'],
+  img: ['src', 'alt', 'title'],
   math: ['xmlns', 'display'],
   annotation: ['encoding'],
   semantics: [],

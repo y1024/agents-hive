@@ -11,40 +11,43 @@ import (
 // TestSetPendingData_ConsumePendingIMContext_Race 是 Phase 1 M1 prefix race 蓝军测试。
 //
 // 背景：
-//   ROADMAP Phase 1 "关键不变式"要求 prefix 写入点在 sem gate 之后
-//   (session_loop.go:229 SetPendingData)，consume 在 plugin hook 之后
-//   (react_processor.go:103 ConsumePendingIMContext)。两端并发触点由
-//   session.go 的 s.mu sync.RWMutex 保护。
+//
+//	ROADMAP Phase 1 "关键不变式"要求 prefix 写入点在 sem gate 之后
+//	(session_loop.go:229 SetPendingData)，consume 在 plugin hook 之后
+//	(react_processor.go:103 ConsumePendingIMContext)。两端并发触点由
+//	session.go 的 s.mu sync.RWMutex 保护。
 //
 // 此前遗留：
-//   实现侧有锁，但 _test.go 全树 grep 零引用 SetPendingData / ConsumePendingIMContext。
-//   "锁写了但没并发测试验证"≠ 保证 race-free——任何后续重构去锁、改 RWMutex 为
-//   RLock、把 consume 拆两步都不会被单测捕获。
+//
+//	实现侧有锁，但 _test.go 全树 grep 零引用 SetPendingData / ConsumePendingIMContext。
+//	"锁写了但没并发测试验证"≠ 保证 race-free——任何后续重构去锁、改 RWMutex 为
+//	RLock、把 consume 拆两步都不会被单测捕获。
 //
 // 本测试三重蓝军：
-//   1. -race 下若 SetPendingData/ConsumePendingIMContext 去掉 s.mu.Lock
-//      → race detector 必报 DATA RACE，go test -race 必红；
-//   2. consumeCount 必须 == writesSeen（每个写入至多被 consume 一次）：
-//      若 ConsumePendingIMContext 忘记把 s.pendingIMContext 置 nil → 同一 imCtx
-//      被读多次 → consumeCount > writesSeen → 断言红；
-//   3. consumed 的 imCtx 指针必须来自某个真实 writer（通过 Platform 字段的
-//      writer ID 编码验证），不能撞见 partial-read 的残破结构。
+//  1. -race 下若 SetPendingData/ConsumePendingIMContext 去掉 s.mu.Lock
+//     → race detector 必报 DATA RACE，go test -race 必红；
+//  2. consumeCount 必须 == writesSeen（每个写入至多被 consume 一次）：
+//     若 ConsumePendingIMContext 忘记把 s.pendingIMContext 置 nil → 同一 imCtx
+//     被读多次 → consumeCount > writesSeen → 断言红；
+//  3. consumed 的 imCtx 指针必须来自某个真实 writer（通过 Platform 字段的
+//     writer ID 编码验证），不能撞见 partial-read 的残破结构。
 //
 // 并发规模：
-//   N_WRITE = 50 个 writer，每个 200 次 Set → 总 10000 次写入
-//   N_READ  = 50 个 reader，每个 200 次 Consume → 总 10000 次读取
-//   交织产生 ~100K 次 critical section 竞争——足以在 -race 下暴露任何缺锁 bug。
+//
+//	N_WRITE = 50 个 writer，每个 200 次 Set → 总 10000 次写入
+//	N_READ  = 50 个 reader，每个 200 次 Consume → 总 10000 次读取
+//	交织产生 ~100K 次 critical section 竞争——足以在 -race 下暴露任何缺锁 bug。
 func TestSetPendingData_ConsumePendingIMContext_Race(t *testing.T) {
 	const (
-		nWriters       = 50
-		nReaders       = 50
-		opsPerWriter   = 200
-		opsPerReader   = 200
+		nWriters     = 50
+		nReaders     = 50
+		opsPerWriter = 200
+		opsPerReader = 200
 	)
 
 	s := &SessionState{}
 
-	var writesIssued int64  // 调用 SetPendingData 的次数
+	var writesIssued int64   // 调用 SetPendingData 的次数
 	var consumedNonNil int64 // Consume 返回非 nil 的次数
 	var consumedNil int64    // Consume 返回 nil（无 pending）的次数
 	var badReads int64       // 读到但字段不自洽的次数（partial read 证据）

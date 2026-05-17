@@ -9,6 +9,9 @@ import (
 // SDKMessage 是官方 SDK 入站消息的最小别名，避免上层包直接依赖 SDK 细节。
 type SDKMessage = sdk.IncomingMessage
 
+// DownloadedMedia 是官方 SDK 下载结果的别名，避免上层直接依赖 SDK 细节。
+type DownloadedMedia = sdk.DownloadedMedia
+
 // Credentials 是登录后可持久化/展示的账号身份。
 type Credentials struct {
 	AccountID string
@@ -27,6 +30,7 @@ type Backend interface {
 	SendWithContextToken(ctx context.Context, userID, contextToken, text string) error
 	SendTyping(ctx context.Context, userID string) error
 	StopTyping(ctx context.Context, userID string) error
+	Download(ctx context.Context, msg *SDKMessage) (*DownloadedMedia, error)
 }
 
 // BackendOptions 是官方 SDK adapter 的构造参数。
@@ -100,4 +104,8 @@ func (b *sdkBackend) SendTyping(ctx context.Context, userID string) error {
 
 func (b *sdkBackend) StopTyping(ctx context.Context, userID string) error {
 	return b.bot.StopTyping(ctx, userID)
+}
+
+func (b *sdkBackend) Download(ctx context.Context, msg *SDKMessage) (*DownloadedMedia, error) {
+	return b.bot.Download(ctx, msg)
 }

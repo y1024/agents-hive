@@ -10,9 +10,9 @@ import (
 
 func TestJudgeInputRedactsSecrets(t *testing.T) {
 	input := JudgeInput{
-		CaseID:    "test-case-1",
-		UserInput: "请帮我调用 API，token: sk-abc123456789012345678901234567890",
-		FinalOutput: `调用成功，使用了 Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc123`,
+		CaseID:         "test-case-1",
+		UserInput:      "请帮我调用 API，token: sk-abc123456789012345678901234567890",
+		FinalOutput:    `调用成功，使用了 Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc123`,
 		ExpectedAnswer: "api_key: my-secret-key-that-is-very-long-and-should-be-redacted",
 		TraceSummary: TraceSummary{
 			ToolsCalled: []string{"http_request"},
@@ -259,8 +259,8 @@ func TestHeuristicEvaluatorRemainsFallbackOnly(t *testing.T) {
 	heuristic := HeuristicJudgeEvaluator{}
 
 	input := JudgeInput{
-		CaseID:    "test-heuristic",
-		UserInput: "帮我查询订单状态",
+		CaseID:      "test-heuristic",
+		UserInput:   "帮我查询订单状态",
 		FinalOutput: "您的订单已发货",
 		TraceSummary: TraceSummary{
 			ToolsCalled: []string{"order_query"},
@@ -289,8 +289,8 @@ func TestHeuristicJudgeFailsOnToolAssertionMismatch(t *testing.T) {
 	heuristic := HeuristicJudgeEvaluator{}
 
 	input := JudgeInput{
-		CaseID:    "test-tool-mismatch",
-		UserInput: "帮我发送邮件",
+		CaseID:      "test-tool-mismatch",
+		UserInput:   "帮我发送邮件",
 		FinalOutput: "邮件已发送",
 		TraceSummary: TraceSummary{
 			ToolsCalled: []string{"search"},
@@ -315,8 +315,8 @@ func TestHeuristicJudgeFailsOnEmptyOutput(t *testing.T) {
 	heuristic := HeuristicJudgeEvaluator{}
 
 	input := JudgeInput{
-		CaseID:    "test-empty-output",
-		UserInput: "帮我查询天气",
+		CaseID:      "test-empty-output",
+		UserInput:   "帮我查询天气",
 		FinalOutput: "",
 		TraceSummary: TraceSummary{
 			ToolsCalled: []string{},
@@ -364,8 +364,8 @@ func TestFakeJudgeEvaluatorReturnsConfiguredError(t *testing.T) {
 
 func TestRubricCriterionInPrompt(t *testing.T) {
 	input := JudgeInput{
-		CaseID:    "rubric-test",
-		UserInput: "帮我写一个函数",
+		CaseID:      "rubric-test",
+		UserInput:   "帮我写一个函数",
 		FinalOutput: "def hello(): pass",
 		Rubric: []RubricCriterion{
 			{Name: "正确性", Description: "代码能正确运行", Weight: 8},

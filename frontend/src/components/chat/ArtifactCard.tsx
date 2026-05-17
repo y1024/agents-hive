@@ -69,7 +69,7 @@ export function ArtifactCard({ title, artifactType, content, language, isLoading
         </div>
       ) : (
         <div
-          className="artifact-card-preview px-3 py-2 max-h-[120px] overflow-hidden text-[12px] leading-[1.5]"
+          className="artifact-card-preview markdown-prose prose prose-sm max-w-none compact px-3 py-2 max-h-[120px] overflow-hidden text-[12px] leading-[1.5] dark:prose-invert"
           style={{ maskImage: 'linear-gradient(to bottom, black 70%, transparent)' }}
         >
           <Streamdown plugins={STREAMDOWN_PREVIEW_PLUGINS} allowedTags={ALLOWED_TAGS}>

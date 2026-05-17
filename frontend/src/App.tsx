@@ -24,6 +24,7 @@ const UserList = lazy(() => import('./pages/admin/UserList').then(({ UserList })
 const UsageStats = lazy(() => import('./pages/admin/UsageStats').then(({ UsageStats }) => ({ default: UsageStats })));
 const AuthProviders = lazy(() => import('./pages/admin/AuthProviders').then(({ AuthProviders }) => ({ default: AuthProviders })));
 const PromptManager = lazy(() => import('./pages/admin/PromptManager').then(({ PromptManager }) => ({ default: PromptManager })));
+const KnowledgeBase = lazy(() => import('./pages/admin/KnowledgeBase').then(({ KnowledgeBase }) => ({ default: KnowledgeBase })));
 const QualityCandidates = lazy(() => import('./pages/admin/QualityCandidates').then(({ QualityCandidates }) => ({ default: QualityCandidates })));
 const QualityWorkbench = lazy(() => import('./pages/admin/qualityworkbench/QualityWorkbench').then(({ QualityWorkbench }) => ({ default: QualityWorkbench })));
 const MemoryGovernance = lazy(() => import('./pages/admin/MemoryGovernance').then(({ MemoryGovernance }) => ({ default: MemoryGovernance })));
@@ -99,6 +100,7 @@ export default function App() {
                 <Route path="/admin/usage" element={<UsageStats />} />
                 <Route path="/admin/auth-providers" element={<AuthProviders />} />
                 <Route path="/admin/prompts" element={<PromptManager />} />
+                <Route path="/admin/kb" element={<KnowledgeBase />} />
                 <Route path="/admin/quality-candidates" element={<QualityCandidates />} />
                 <Route path="/admin/quality-workbench" element={<QualityWorkbench />} />
                 <Route path="/admin/memory-governance" element={<MemoryGovernance />} />

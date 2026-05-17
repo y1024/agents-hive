@@ -38,7 +38,11 @@ bin/.worktrees/
 ~/.claw/
 config.json
 .gstack/
-docs/
+docs/*
+!docs/计划与路线/
+!docs/计划与路线/2026-05-16-PPT生成工具与HTML预览实施计划.md
+!docs/计划与路线/2026-05-16-PPT生成工具与HTML预览实施计划/
+!docs/计划与路线/2026-05-16-PPT生成工具与HTML预览实施计划/**
 TODOs.md
 MEMORY.md
 DESIGN.md
@@ -53,3 +57,4 @@ scripts/*
 openspec/
 config.prd.json
 hive-linux
+agentquality-benchmark

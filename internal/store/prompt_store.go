@@ -36,7 +36,7 @@ func (s *PromptStore) SetInvalidate(fn func(key string)) {
 	s.invalidate = fn
 }
 
-// Get 查询指定 key 的 prompt（优先精确语言匹配，fallback 到通用覆盖 language=''）
+// Get 查询指定 key 的 prompt（优先精确语言匹配，fallback 到通用覆盖 language=”）
 // 返回 (content, found, error)
 func (s *PromptStore) Get(ctx context.Context, key, language string) (string, bool, error) {
 	// 先尝试精确语言匹配，再 fallback 到通用覆盖

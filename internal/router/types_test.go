@@ -406,6 +406,58 @@ func TestBuildRouteDecisionMixedFeishuExternalSendConstrainsActions(t *testing.T
 	}
 }
 
+func TestBuildRouteDecisionMixedFeishuExternalBusinessWriteConstrainsActions(t *testing.T) {
+	profile := InferToolProfile(mcphost.ToolDefinition{
+		Name:        "feishu_api",
+		Description: "飞书应用 API 工具。search_contacts send_message create_task write_sheet",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["search_contacts","send_message","create_task","write_sheet"]}}}`),
+	}, ProfileHint{})
+
+	decision := BuildRouteDecision(IntentFrame{
+		Kind:              IntentExternalWrite,
+		RequiresExternal:  true,
+		AllowsSideEffects: true,
+		Signals:           []string{IntentSignalExternalBusinessWrite, ActionCapabilitySignal(ActionCapabilityExternalTaskCreate)},
+	}, []ToolProfile{profile})
+
+	if !containsString(decision.AllowedTools, "feishu_api") {
+		t.Fatalf("feishu_api should be callable for external business write intent: %+v", decision)
+	}
+	allowedActions := decision.AllowedToolInputs["feishu_api"]["action"]
+	for _, action := range []string{"search_contacts", "get_user_info", "list_tasks", "create_task"} {
+		if !strings.Contains(allowedActions, action) {
+			t.Fatalf("external business write actions missing %q: %+v", action, decision.AllowedToolInputs)
+		}
+	}
+	for _, action := range []string{"send_message", "write_sheet", "create_approval"} {
+		if strings.Contains(allowedActions, action) {
+			t.Fatalf("task.create intent must not allow unrelated action %q: %q", action, allowedActions)
+		}
+	}
+}
+
+func TestBuildRouteDecisionGenericExternalBusinessWriteRetainsCompatibility(t *testing.T) {
+	profile := InferToolProfile(mcphost.ToolDefinition{
+		Name:        "feishu_api",
+		Description: "飞书应用 API 工具。search_contacts send_message create_task write_sheet",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["search_contacts","send_message","create_task","write_sheet"]}}}`),
+	}, ProfileHint{})
+
+	decision := BuildRouteDecision(IntentFrame{
+		Kind:              IntentExternalWrite,
+		RequiresExternal:  true,
+		AllowsSideEffects: true,
+		Signals:           []string{IntentSignalExternalBusinessWrite},
+	}, []ToolProfile{profile})
+
+	allowedActions := decision.AllowedToolInputs["feishu_api"]["action"]
+	for _, action := range []string{"search_contacts", "send_message", "create_task", "write_sheet"} {
+		if !strings.Contains(allowedActions, action) {
+			t.Fatalf("generic business write compatibility missing %q: %+v", action, decision.AllowedToolInputs)
+		}
+	}
+}
+
 func TestBuildRouteDecisionExternalSendPlatformWechatbotBlocksFeishu(t *testing.T) {
 	decision := BuildRouteDecision(IntentFrame{
 		Kind:               IntentExternalWrite,
@@ -1045,6 +1097,41 @@ func TestCustomerServiceToolsDeclareRouterCapabilities(t *testing.T) {
 		if !containsString(groups["customer_service"], want) {
 			t.Fatalf("customer_service host group = %+v, missing %s", groups["customer_service"], want)
 		}
+	}
+}
+
+func TestKBTreeModeToolsDeclarePlatformReadCapability(t *testing.T) {
+	for _, name := range []string{"kb.doc.meta", "kb.doc.structure", "kb.section.text"} {
+		t.Run(name, func(t *testing.T) {
+			profile, ok := BuiltinToolProfile(name)
+			if !ok {
+				t.Fatalf("BuiltinToolProfile(%q) ok=false", name)
+			}
+			if profile.Domain != "kb" || profile.Risk != RiskReadOnly || !profile.ReadOnly || profile.Kind != CapabilityKindBuiltinTool || profile.Source != CapabilitySourceBuiltin {
+				t.Fatalf("profile = %+v, want read-only builtin kb profile", profile)
+			}
+			if !containsCapability(profile.Capabilities, CapabilityKBRead) {
+				t.Fatalf("profile capabilities = %+v, want %s", profile.Capabilities, CapabilityKBRead)
+			}
+			if containsCapability(profile.Capabilities, CapabilityCustomerServiceKBRead) {
+				t.Fatalf("tree-mode KB tools must not use customer_service capability: %+v", profile.Capabilities)
+			}
+		})
+	}
+
+	groups := HostToolPolicyGroups()
+	for _, want := range []string{"kb.doc.meta", "kb.doc.structure", "kb.section.text"} {
+		if !containsString(groups["kb"], want) {
+			t.Fatalf("kb host group = %+v, missing %s", groups["kb"], want)
+		}
+		if containsString(groups["customer_service"], want) {
+			t.Fatalf("customer_service host group must not include %s: %+v", want, groups["customer_service"])
+		}
+	}
+
+	profiles := HostToolPolicyProfiles()
+	if !containsString(profiles["master_direct"], "group:kb") {
+		t.Fatalf("master_direct profile = %+v, want group:kb", profiles["master_direct"])
 	}
 }
 

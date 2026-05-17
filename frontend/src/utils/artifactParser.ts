@@ -1,6 +1,7 @@
 export interface ContentSegment {
   type: 'text' | 'artifact';
   content: string;
+  assetUri?: string;
   // artifact 专属
   artifactType?: 'markdown' | 'html' | 'code' | 'ppt';
   language?: string;
@@ -58,6 +59,33 @@ export function parseMessageContent(raw: string): ContentSegment[] {
   const tail = raw.slice(lastIndex).replace(/^\n+|\n+$/g, '');
   if (tail) segments.push({ type: 'text', content: tail });
   return segments;
+}
+
+export interface ArtifactManifest {
+  uri: string;
+  title: string;
+  type: 'markdown' | 'html' | 'code' | 'ppt';
+  language?: string;
+}
+
+export function mergeArtifactManifestSegments(
+  segments: ContentSegment[],
+  artifacts?: ArtifactManifest[],
+): ContentSegment[] {
+  if (!artifacts?.length) return segments;
+  let artifactIndex = 0;
+  return segments.map((seg) => {
+    if (seg.type !== 'artifact') return seg;
+    const manifest = artifacts[artifactIndex++];
+    if (!manifest) return seg;
+    return {
+      ...seg,
+      assetUri: manifest.uri,
+      title: manifest.title || seg.title,
+      artifactType: manifest.type || seg.artifactType,
+      language: manifest.language || seg.language,
+    };
+  });
 }
 
 // 流式传输中：检测是否有未闭合的 <artifact> 标签

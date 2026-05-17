@@ -15,6 +15,7 @@ import (
 	"github.com/chef-guo/agents-hive/internal/skills"
 	"github.com/chef-guo/agents-hive/internal/store"
 	"github.com/chef-guo/agents-hive/internal/subagent"
+	"github.com/chef-guo/agents-hive/internal/toolruntime"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -275,6 +276,130 @@ func TestExecuteTool_ActionGuardRepairsIMSendWithEmptyContentBeforeHITL(t *testi
 	assert.False(t, called, "缺少发送内容时不应执行底层工具，应交回模型重构参数")
 	assert.Contains(t, result.Content, recoverableToolCallErrorMarker)
 	assert.Contains(t, result.Content, "im_send_missing_content")
+}
+
+func TestExecuteTool_InvalidJSONArgumentsReturnsRecoverableHint(t *testing.T) {
+	m := newPhase6MasterWithMCPHost(t)
+	m.config.ActionGuardEnabled = true
+	called := false
+	m.mcpHost.RegisterTool(
+		mcphost.ToolDefinition{Name: "feishu_api", Description: "feishu", Core: true},
+		func(context.Context, json.RawMessage) (*mcphost.ToolResult, error) {
+			called = true
+			return &mcphost.ToolResult{Content: jsonTestText("should not run")}, nil
+		},
+	)
+	session := newTestSession("ag-invalid-json")
+	session.SetAllowedTools([]string{"feishu_api"})
+	session.SetAllowedToolInputs(map[string]map[string]string{"feishu_api": {"action": "create_task"}})
+
+	result := m.executeTool(context.Background(), session, "user-1", llm.ToolCall{
+		ID:        "ag-invalid-json-1",
+		Name:      "feishu_api",
+		Arguments: json.RawMessage(`{"action":"create_task",`),
+	}, "trace-ag-invalid-json", "span-parent")
+
+	require.True(t, result.IsError)
+	require.True(t, result.Recoverable)
+	require.False(t, result.Terminal)
+	assert.False(t, called, "JSON 无效时必须在 Master 层交回模型修复，不能进入工具执行")
+	assert.Equal(t, "invalid_tool_arguments_json", result.ErrorKind)
+	hint, ok := toolruntime.ParseRecoverableToolCallError(result.Content)
+	require.True(t, ok, "recoverable content should include structured JSON hint: %s", result.Content)
+	assert.Equal(t, "invalid_tool_arguments_json", hint.Kind)
+	assert.Equal(t, "rebuild_arguments_json", hint.RepairAction)
+	assert.Equal(t, "feishu_api", hint.ToolName)
+	assert.Contains(t, hint.AllowedTools, "feishu_api")
+	assert.Equal(t, "create_task", hint.AllowedInputs["feishu_api"]["action"])
+}
+
+func TestRecoverableHintCarriesActionCapabilityInvocationContract(t *testing.T) {
+	session := newTestSession("recoverable-action-contract")
+	session.SetAllowedTools([]string{"feishu_api"})
+	session.SetAllowedToolInputs(map[string]map[string]string{"feishu_api": {"action": "create_task"}})
+	session.SetRouteDecision(router.RouteDecision{
+		Intent: router.IntentFrame{
+			Kind:              router.IntentExternalWrite,
+			RequiresExternal:  true,
+			AllowsSideEffects: true,
+			Signals: []string{
+				router.IntentSignalExternalBusinessWrite,
+				router.ActionCapabilitySignal(router.ActionCapabilityExternalTaskCreate),
+			},
+		},
+		AllowedTools: []string{"feishu_api"},
+		AllowedToolInputs: map[string]map[string]string{
+			"feishu_api": {"action": "create_task"},
+		},
+		Mode: router.DecisionModeAllow,
+	})
+
+	content := recoverableToolCallErrorContentWithHint(recoverableToolCallErrorHint(
+		session,
+		"feishu_api",
+		"route_input_outside_allowed_values",
+		"send_message 不在 allowed_inputs 中，请重构为 create_task",
+		"rebuild_arguments",
+	))
+
+	hint, ok := toolruntime.ParseRecoverableToolCallError(content)
+	require.True(t, ok, "recoverable content should parse: %s", content)
+	require.Len(t, hint.ActionCapabilities, 1)
+	capability := hint.ActionCapabilities[0]
+	assert.Equal(t, "feishu_api", capability.ToolName)
+	assert.Equal(t, "create_task", capability.Action)
+	assert.Equal(t, "action", capability.ActionField)
+	assert.Equal(t, router.ActionCapabilityExternalTaskCreate, capability.CapabilityID)
+	assert.Contains(t, capability.RequiredFields, "summary")
+	assert.Equal(t, "feishu_api", capability.ExampleToolCall["name"])
+	args, ok := capability.ExampleToolCall["arguments"].(map[string]any)
+	require.True(t, ok, "example_tool_call.arguments should be an object: %#v", capability.ExampleToolCall)
+	assert.Equal(t, "create_task", args["action"])
+	assert.Contains(t, capability.InvocationHint, "调用工具 feishu_api")
+	assert.Contains(t, capability.InvocationHint, "arguments.action=create_task")
+	assert.Contains(t, capability.InvocationHint, "不要调用 feishu_api.create_task")
+}
+
+func TestExecuteTool_ActionGuardUserDenyIsRecoverableNotTerminal(t *testing.T) {
+	m, cancel := setupHITLMaster(t, config.HITLConfig{Enabled: true})
+	defer cancel()
+	defer m.Stop()
+	m.config.ActionGuardEnabled = true
+	m.mcpHost = mcphost.NewHost(zap.NewNop())
+	called := false
+	m.mcpHost.RegisterTool(
+		mcphost.ToolDefinition{Name: "feishu_api", Description: "feishu", Core: true},
+		func(context.Context, json.RawMessage) (*mcphost.ToolResult, error) {
+			called = true
+			return &mcphost.ToolResult{Content: jsonTestText("sent")}, nil
+		},
+	)
+	session := newTestSession("ag-user-deny")
+	session.SetAllowedTools([]string{"feishu_api"})
+	subID, ch := m.SubscribeWSBroadcast()
+	defer m.UnsubscribeWSBroadcast(subID)
+
+	done := make(chan toolResult, 1)
+	go func() {
+		done <- m.executeTool(context.Background(), session, "user-1", llm.ToolCall{
+			ID:        "ag-user-deny-1",
+			Name:      "feishu_api",
+			Arguments: json.RawMessage(`{"action":"create_approval","approval_code":"code","open_id":"ou_1","form":"{}"}`),
+		}, "trace-ag-user-deny", "span-parent")
+	}()
+	denyPermissionRequest(t, m, ch, "ag-user-deny", "feishu_api")
+
+	select {
+	case result := <-done:
+		require.True(t, result.IsError)
+		require.True(t, result.Recoverable)
+		require.False(t, result.Terminal)
+		assert.False(t, called, "用户拒绝后不应执行底层工具")
+		assert.Equal(t, "user_denied_tool_approval", result.ErrorKind)
+		assert.Contains(t, result.Content, recoverableToolCallErrorMarker)
+	case <-time.After(2 * time.Second):
+		t.Fatal("executeTool 未在 deny 后返回")
+	}
 }
 
 func TestExecuteTool_ActionGuardAsksExternalMediaSendAndRunsAfterApprove(t *testing.T) {
@@ -550,6 +675,16 @@ func TestExecuteTool_StrictModeWithHITLEnabledUsesLegacyApproval(t *testing.T) {
 
 func approvePermissionRequest(t *testing.T, m *Master, ch <-chan BroadcastMessage, wantSessionID, wantToolName string) {
 	t.Helper()
+	respondPermissionRequest(t, m, ch, wantSessionID, wantToolName, "approve")
+}
+
+func denyPermissionRequest(t *testing.T, m *Master, ch <-chan BroadcastMessage, wantSessionID, wantToolName string) {
+	t.Helper()
+	respondPermissionRequest(t, m, ch, wantSessionID, wantToolName, "reject")
+}
+
+func respondPermissionRequest(t *testing.T, m *Master, ch <-chan BroadcastMessage, wantSessionID, wantToolName, action string) {
+	t.Helper()
 	select {
 	case msg := <-ch:
 		if msg.Type != EventTypeInputRequest {
@@ -568,7 +703,7 @@ func approvePermissionRequest(t *testing.T, m *Master, ch <-chan BroadcastMessag
 		if inputReq.ToolName != wantToolName {
 			t.Fatalf("want ToolName %q, got %q", wantToolName, inputReq.ToolName)
 		}
-		if err := m.SubmitInput(InputResponse{RequestID: inputReq.ID, TaskID: inputReq.TaskID, Action: "approve"}); err != nil {
+		if err := m.SubmitInput(InputResponse{RequestID: inputReq.ID, TaskID: inputReq.TaskID, Action: action}); err != nil {
 			t.Fatalf("SubmitInput: %v", err)
 		}
 	case <-time.After(2 * time.Second):

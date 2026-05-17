@@ -75,13 +75,13 @@ func (s *testStore) GetMessages(_ context.Context, _ string, _ int) ([]store.Mes
 func (s *testStore) ForkSession(_ context.Context, parentID string, forkPoint int, newSessionID, newName, userID string) error {
 	return nil
 }
-func (s *testStore) RevertSession(_ context.Context, _ string, _ int) error { return nil }
+func (s *testStore) RevertSession(_ context.Context, _ string, _ int) error         { return nil }
 func (s *testStore) UpsertSessionPref(_ context.Context, _, _ string, _ bool) error { return nil }
 func (s *testStore) GetSessionStarred(_ context.Context, _, _ string) (bool, error) {
 	return false, nil
 }
 func (s *testStore) UpdateSessionTags(_ context.Context, _ string, _ []string) error { return nil }
-func (s *testStore) Close() error                                                     { return nil }
+func (s *testStore) Close() error                                                    { return nil }
 
 func newMasterForAccessTest(t *testing.T, st store.SessionStore) *Master {
 	t.Helper()

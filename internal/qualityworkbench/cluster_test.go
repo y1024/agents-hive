@@ -118,6 +118,26 @@ func TestClusterKeyV2IncludesVersionWithoutBreakingLegacyID(t *testing.T) {
 	assert.NotEqual(t, clusterIDFromKey(legacyKey), clusterIDFromKey(v2Key))
 }
 
+func TestGroupingRuleRecognizesKBFailureType(t *testing.T) {
+	rec := clusterTestCandidate("candidate-kb", time.Now(), "kb citation missing")
+	rec.FailureType = agentquality.FailureKBEvidence
+	rec.SourceEvent.Name = agentquality.EventKBEvidence
+	rec.SourceEvent.FailureType = agentquality.FailureKBEvidence
+	rec.SourceEvent.ToolDecision.Actual = "kb.citations"
+	rec.SourceEvent.Attributes["kb_failure_type"] = agentquality.KBFailureCitationMissing
+	rule := GroupingRule{
+		ID:        "kb_citation_missing",
+		Name:      "KB Citation Missing",
+		Priority:  1,
+		Enabled:   true,
+		Match:     GroupingMatch{KBFailureType: agentquality.KBFailureCitationMissing},
+		KeyFields: []string{"failure_type", "kb_failure_type", "tool"},
+	}
+
+	assert.Equal(t, "kb_citation_missing", MatchGroupingRule([]GroupingRule{rule, DefaultGroupingRule()}, rec).ID)
+	assert.Equal(t, ClusterKey("kb_evidence|kb_citation_missing|kb.citations"), ComputeClusterKey(rule, rec))
+}
+
 func clusterTestCandidate(id string, ts time.Time, errText string) agentquality.CandidateRecord {
 	return agentquality.CandidateRecord{
 		ID:          id,

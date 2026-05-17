@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"net/http"
 	"sync"
@@ -12,13 +13,17 @@ import (
 	"github.com/chef-guo/agents-hive/internal/accounting"
 	"github.com/chef-guo/agents-hive/internal/agentquality"
 	"github.com/chef-guo/agents-hive/internal/airouter"
+	"github.com/chef-guo/agents-hive/internal/asset"
 	"github.com/chef-guo/agents-hive/internal/auth"
 	"github.com/chef-guo/agents-hive/internal/channel"
 	"github.com/chef-guo/agents-hive/internal/channel/feishu"
 	"github.com/chef-guo/agents-hive/internal/channel/push"
 	"github.com/chef-guo/agents-hive/internal/channel/wechatbot"
 	"github.com/chef-guo/agents-hive/internal/config"
+	"github.com/chef-guo/agents-hive/internal/cs"
+	"github.com/chef-guo/agents-hive/internal/fileconv"
 	"github.com/chef-guo/agents-hive/internal/gateway"
+	"github.com/chef-guo/agents-hive/internal/kb"
 	"github.com/chef-guo/agents-hive/internal/master"
 	"github.com/chef-guo/agents-hive/internal/memory"
 	"github.com/chef-guo/agents-hive/internal/memoryobs"
@@ -93,6 +98,10 @@ type Server struct {
 	store                         store.Store                 // 统一存储（PG），用于模型/配置管理
 	reloadProtocolFunc            func(protocol string) error // 通道热加载回调
 	authEngine                    *auth.Engine
+	assetService                  *asset.AssetService
+	kbService                     kbManagementService
+	kbMarkdownRegistry            *fileconv.MarkdownRegistry
+	assetAccessResolver           asset.AccessResolver
 	costTracker                   accounting.CostTracker
 	promptStore                   promptStoreInterface  // Prompt CRUD 存储（可选）
 	promptLoader                  promptLoaderInterface // PromptLoader 缓存失效（可选）
@@ -123,6 +132,8 @@ type Server struct {
 	traceReader                   observability.TraceReader
 	memoryInjectionExplainReader  memoryInjectionExplainReader
 	memoryProductionMetricsReader memoryProductionMetricsReader
+	customerServiceBackend        *cs.Service
+	assetProxySecret              []byte
 }
 
 type sessionTodoOpsReader interface {
@@ -180,10 +191,23 @@ func NewServer(
 		logger:        logger,
 		webuiEnabled:  webuiCfg.Enabled,
 		config:        fullCfg,
+		kbMarkdownRegistry: func() *fileconv.MarkdownRegistry {
+			if fullCfg == nil {
+				return fileconv.DefaultMarkdownRegistry()
+			}
+			return markdownRegistryFromConfig(fullCfg.FileConv)
+		}(),
 		configPath:    configPath,
 		channelRouter: channelRouter,
 		store:         db,
 		authEngine:    authEngine,
+		assetProxySecret: func() []byte {
+			secret := make([]byte, 32)
+			if _, err := rand.Read(secret); err != nil {
+				return []byte(uuid.NewString())
+			}
+			return secret
+		}(),
 	}
 	s.optimizationStore = agentquality.NewInMemoryOptimizationSuggestionStore()
 	s.optimizationRolloutStore = agentquality.NewInMemoryOptimizationRolloutStore()
@@ -199,6 +223,7 @@ func NewServer(
 	s.workbenchBatchEvalStore = qualityworkbench.NewMemoryBatchEvalRunStore(time.Now)
 	s.workbenchReportStore = qualityworkbench.NewMemoryWeeklyReportStore(time.Now)
 	s.qualityShadowEvalStore = agentquality.NewInMemoryShadowEvalResultStore()
+	s.customerServiceBackend = cs.NewService(cs.NewMemoryStore())
 	if pgStore, ok := db.(*store.PostgresStore); ok && pgStore.Pool() != nil {
 		s.workbenchReplayStore = qualityworkbench.NewPGReplayJobStore(pgStore.Pool())
 		s.workbenchGroupingRuleStore = qualityworkbench.NewPGGroupingRuleStore(pgStore.Pool())
@@ -221,6 +246,7 @@ func NewServer(
 		s.traceReader = observability.NewPgTracer(pgStore.Pool(), logger)
 		s.memoryInjectionExplainReader = &pgMemoryInjectionExplainReader{pool: pgStore.Pool()}
 		s.memoryProductionMetricsReader = memoryobs.NewPGMetricsReader(pgStore.Pool())
+		s.customerServiceBackend = cs.NewService(cs.NewPGStore(pgStore.Pool()))
 	}
 	if s.master != nil {
 		s.master.SetTrajectoryStore(s.getTrajectoryStore())
@@ -331,6 +357,10 @@ func (s *Server) SetReloadProtocolFunc(fn func(protocol string) error) {
 	s.reloadProtocolFunc = fn
 }
 
+func (s *Server) SetKBMarkdownRegistry(registry *fileconv.MarkdownRegistry) {
+	s.kbMarkdownRegistry = registry
+}
+
 // SetCostTracker 注入成本追踪器（Admin 用量统计 API 使用）
 func (s *Server) SetCostTracker(ct accounting.CostTracker) {
 	s.costTracker = ct
@@ -422,6 +452,31 @@ func (s *Server) SetOptimizationWritableStores(toolStore toolDescriptionStore, m
 
 func (s *Server) SetMemoryStore(store memory.MemoryStore) {
 	s.memoryStore = store
+}
+
+func (s *Server) SetAssetService(service *asset.AssetService) {
+	s.assetService = service
+	if s.master != nil {
+		s.master.SetAssetService(service)
+	}
+}
+
+func (s *Server) SetKBService(service *kb.Service) {
+	s.kbService = service
+}
+
+func (s *Server) SetCustomerService(service *cs.Service) {
+	if service != nil {
+		s.customerServiceBackend = service
+	}
+}
+
+func (s *Server) CustomerServiceTool() *cs.Service {
+	return s.customerServiceBackend
+}
+
+func (s *Server) SetAssetAccessResolver(resolver asset.AccessResolver) {
+	s.assetAccessResolver = resolver
 }
 
 func (s *Server) SetFeishuHealthClient(client *feishu.Client) {

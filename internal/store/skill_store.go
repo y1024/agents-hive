@@ -15,8 +15,8 @@ type SkillRecord struct {
 	Name      string    `json:"name"`
 	UserID    string    `json:"user_id"` // "" 表示 public skill；非空表示 personal skill
 	Content   string    `json:"content"`
-	Level     string    `json:"level"`   // "user" | "workspace" | "global"
-	Path      string    `json:"path"`    // 原始 FS 路径（可为空）
+	Level     string    `json:"level"` // "user" | "workspace" | "global"
+	Path      string    `json:"path"`  // 原始 FS 路径（可为空）
 	Revision  int       `json:"revision"`
 	UpdatedBy string    `json:"updated_by"`
 	CreatedAt time.Time `json:"created_at"`

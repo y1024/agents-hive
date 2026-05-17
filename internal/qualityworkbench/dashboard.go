@@ -68,6 +68,7 @@ type DashboardSnapshot struct {
 	OpenClusters          int                                  `json:"open_clusters"`
 	CandidateStatusCounts map[agentquality.CandidateStatus]int `json:"candidate_status_counts"`
 	FailureTypeCounts     map[agentquality.FailureType]int     `json:"failure_type_counts"`
+	KBFailureTypeCounts   map[string]int                       `json:"kb_failure_type_counts"`
 	VerifyResultCounts    map[string]int                       `json:"verify_result_counts"`
 	DomainCounts          map[string]int                       `json:"domain_counts"`
 	SourceKindCounts      map[string]int                       `json:"source_kind_counts"`
@@ -79,6 +80,7 @@ type DashboardSeriesPoint struct {
 	Until                 time.Time                            `json:"until"`
 	CandidateStatusCounts map[agentquality.CandidateStatus]int `json:"candidate_status_counts"`
 	FailureTypeCounts     map[agentquality.FailureType]int     `json:"failure_type_counts"`
+	KBFailureTypeCounts   map[string]int                       `json:"kb_failure_type_counts"`
 	VerifyResultCounts    map[string]int                       `json:"verify_result_counts"`
 	DomainCounts          map[string]int                       `json:"domain_counts"`
 	SourceKindCounts      map[string]int                       `json:"source_kind_counts"`
@@ -92,6 +94,7 @@ func BuildDashboardSnapshot(input DashboardInput) DashboardSnapshot {
 		Until:                 until,
 		CandidateStatusCounts: map[agentquality.CandidateStatus]int{},
 		FailureTypeCounts:     map[agentquality.FailureType]int{},
+		KBFailureTypeCounts:   map[string]int{},
 		VerifyResultCounts:    map[string]int{},
 		DomainCounts:          map[string]int{},
 		SourceKindCounts:      map[string]int{},
@@ -108,6 +111,9 @@ func BuildDashboardSnapshot(input DashboardInput) DashboardSnapshot {
 		}
 		out.CandidateStatusCounts[c.Status]++
 		out.FailureTypeCounts[firstFailureType(c.SourceEvent.FailureType, c.FailureType)]++
+		if failure := kbFailureType(c.SourceEvent); failure != "" {
+			out.KBFailureTypeCounts[failure]++
+		}
 		out.VerifyResultCounts[dashboardVerifyResult(c.VerifyResult)]++
 		out.DomainCounts[sourceBreakdownValue(c.SourceEvent.DomainID)]++
 		out.SourceKindCounts[sourceBreakdownValue(c.SourceEvent.SourceKind)]++
@@ -132,6 +138,7 @@ func BuildDashboardSeries(input DashboardInput, bucketSize time.Duration) []Dash
 			Until:                 end,
 			CandidateStatusCounts: map[agentquality.CandidateStatus]int{},
 			FailureTypeCounts:     map[agentquality.FailureType]int{},
+			KBFailureTypeCounts:   map[string]int{},
 			VerifyResultCounts:    map[string]int{},
 			DomainCounts:          map[string]int{},
 			SourceKindCounts:      map[string]int{},
@@ -143,6 +150,9 @@ func BuildDashboardSeries(input DashboardInput, bucketSize time.Duration) []Dash
 			}
 			point.CandidateStatusCounts[c.Status]++
 			point.FailureTypeCounts[firstFailureType(c.SourceEvent.FailureType, c.FailureType)]++
+			if failure := kbFailureType(c.SourceEvent); failure != "" {
+				point.KBFailureTypeCounts[failure]++
+			}
 			point.VerifyResultCounts[dashboardVerifyResult(c.VerifyResult)]++
 			point.DomainCounts[sourceBreakdownValue(c.SourceEvent.DomainID)]++
 			point.SourceKindCounts[sourceBreakdownValue(c.SourceEvent.SourceKind)]++
@@ -192,13 +202,13 @@ func dashboardVerifyResult(result string) string {
 
 // ShadowEvalMetrics 表示单个业务域的影子评测指标。
 type ShadowEvalMetrics struct {
-	DomainID         string                          `json:"domain_id"`
-	SampleCount      int                             `json:"sample_count"`
-	PassRate         float64                         `json:"pass_rate"`
-	AvgSemanticScore float64                         `json:"avg_semantic_score"`
-	SafetyFailures   int                             `json:"safety_failures"`
-	ToolMisuses      int                             `json:"tool_misuses"`
-	RecentAlerts     []agentquality.RollbackAlert    `json:"recent_alerts"`
+	DomainID         string                       `json:"domain_id"`
+	SampleCount      int                          `json:"sample_count"`
+	PassRate         float64                      `json:"pass_rate"`
+	AvgSemanticScore float64                      `json:"avg_semantic_score"`
+	SafetyFailures   int                          `json:"safety_failures"`
+	ToolMisuses      int                          `json:"tool_misuses"`
+	RecentAlerts     []agentquality.RollbackAlert `json:"recent_alerts"`
 }
 
 // BuildShadowEvalMetrics 从影子评测结果构建指标。

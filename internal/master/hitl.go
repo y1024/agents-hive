@@ -10,10 +10,10 @@ type InputRequestType string
 
 const (
 	InputApproval      InputRequestType = "approval"      // approve/reject/modify
-	InputClarification InputRequestType = "clarification"  // free-text answer
-	InputConfirmation  InputRequestType = "confirmation"   // proceed/skip/cancel
-	InputChoice        InputRequestType = "choice"         // select from options
-	InputPermission    InputRequestType = "permission"     // tool permission request
+	InputClarification InputRequestType = "clarification" // free-text answer
+	InputConfirmation  InputRequestType = "confirmation"  // proceed/skip/cancel
+	InputChoice        InputRequestType = "choice"        // select from options
+	InputPermission    InputRequestType = "permission"    // tool permission request
 )
 
 // InputRequest 是系统向用户请求输入
@@ -39,7 +39,7 @@ type InputResponse struct {
 	RequestID string `json:"request_id"`
 	TaskID    string `json:"task_id"`
 	Value     string `json:"value"`
-	Action    string `json:"action"` // "approve","reject","modify","proceed","skip","cancel"
+	Action    string `json:"action"`             // "approve","reject","modify","proceed","skip","cancel"
 	Remember  bool   `json:"remember,omitempty"` // for permission requests
 }
 

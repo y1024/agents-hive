@@ -51,15 +51,31 @@ The current `nodes` / `task_queue` tables are reserved schema for this direction
 
 ## Preview
 
-![agents-hive overview](assets/diagrams/hive-overview.svg)
+<p align="center">
+  <img src="assets/diagrams/hive-overview.svg" alt="agents-hive overview" width="100%">
+</p>
 
 agents-hive is not just a chat UI. It is a control plane for real agent work: ingress, runtime, permission, tools, knowledge, object storage, quality evaluation, and Worker nodes all flow through the same governable chain.
 
-| Diagram | What It Shows |
-|---------|---------------|
-| ![Runtime Flow](assets/diagrams/runtime-flow.svg) | Runtime Flow: user requests enter the Plan / ReAct loop, tool calls pass through policy, HITL, and sandbox controls, and execution traces feed replay, eval, and rollback loops. |
-| ![Local Worker Hive](assets/diagrams/worker-hive.svg) | Local Worker Hive: local CLI / daemon workers, intranet machines, and compute nodes connect outbound to the central control plane, claim tasks under policy, and return artifacts. |
-| ![Knowledge Base and Unified Storage](assets/diagrams/kb-storage.svg) | Knowledge Base + Unified Storage: Markdown, PDF/OCR, images, and attachments enter the KB, embedding, evidence citation, and S3/MinIO object storage pipeline. |
+<table>
+  <tr>
+    <td width="33%" valign="top">
+      <img src="assets/diagrams/runtime-flow.svg" alt="Runtime Flow"><br>
+      <strong>Runtime Flow</strong><br>
+      User requests enter the Plan / ReAct loop, tool calls pass through policy, HITL, and sandbox controls, and execution traces feed replay, eval, and rollback loops.
+    </td>
+    <td width="33%" valign="top">
+      <img src="assets/diagrams/worker-hive.svg" alt="Local Worker Hive"><br>
+      <strong>Local Worker Hive</strong><br>
+      Local CLI / daemon workers, intranet machines, and compute nodes connect outbound to the central control plane, claim tasks under policy, and return artifacts.
+    </td>
+    <td width="33%" valign="top">
+      <img src="assets/diagrams/kb-storage.svg" alt="Knowledge Base and Unified Storage"><br>
+      <strong>Knowledge Base + Unified Storage</strong><br>
+      Markdown, PDF/OCR, images, and attachments enter the KB, embedding, evidence citation, and S3/MinIO object storage pipeline.
+    </td>
+  </tr>
+</table>
 
 These SVGs are product and architecture diagrams for the target shape and core execution paths. The actual UI remains the Web console, Chat Runtime, IM channels, and Replay pages.
 

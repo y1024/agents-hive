@@ -77,7 +77,7 @@
   <path class="dash" d="M1035 375 C978 460 792 488 620 452 C480 423 372 379 270 340"/>
 
   <g filter="url(#shadow)">
-    <rect class="store" x="360" y="420" width="480" height="58" rx="16"/>
-    <text class="label" x="401" y="455">Images stay as assets; Markdown keeps stable object references instead of base64.</text>
+    <rect class="store" x="280" y="420" width="640" height="58" rx="16"/>
+    <text class="label" x="323" y="455">Images stay as assets; Markdown keeps stable object references instead of base64.</text>
   </g>
 </svg>

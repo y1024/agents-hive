@@ -51,15 +51,31 @@ Hive 的长期目标不是只在服务器里运行一个 Agent，而是形成一
 
 ## 效果预览
 
-![agents-hive 总览](assets/diagrams/hive-overview.svg)
+<p align="center">
+  <img src="assets/diagrams/hive-overview.svg" alt="agents-hive 总览" width="100%">
+</p>
 
 agents-hive 的核心不是单个聊天界面，而是一套面向真实任务的 Agent 控制面：入口、运行时、权限、工具、知识库、对象存储、质量评测和 Worker 节点都进入同一条可治理链路。
 
-| 图示 | 说明 |
-|------|------|
-| ![Runtime Flow](assets/diagrams/runtime-flow.svg) | Runtime Flow：用户请求进入 Plan / ReAct 主循环，工具调用经过策略、HITL 和 sandbox，执行轨迹进入 replay、eval 和 rollback 闭环。 |
-| ![Local Worker Hive](assets/diagrams/worker-hive.svg) | Local Worker Hive：用户本地 CLI / daemon、内网机器和算力节点主动连接中心控制面，按能力、权限和审计要求领取任务并回传产物。 |
-| ![Knowledge Base and Unified Storage](assets/diagrams/kb-storage.svg) | Knowledge Base + Unified Storage：Markdown、PDF/OCR、图片和附件统一进入 KB、Embedding、证据引用和 S3/MinIO 对象存储链路。 |
+<table>
+  <tr>
+    <td width="33%" valign="top">
+      <img src="assets/diagrams/runtime-flow.svg" alt="Runtime Flow"><br>
+      <strong>Runtime Flow</strong><br>
+      用户请求进入 Plan / ReAct 主循环，工具调用经过策略、HITL 和 sandbox，执行轨迹进入 replay、eval 和 rollback 闭环。
+    </td>
+    <td width="33%" valign="top">
+      <img src="assets/diagrams/worker-hive.svg" alt="Local Worker Hive"><br>
+      <strong>Local Worker Hive</strong><br>
+      用户本地 CLI / daemon、内网机器和算力节点主动连接中心控制面，按能力、权限和审计要求领取任务并回传产物。
+    </td>
+    <td width="33%" valign="top">
+      <img src="assets/diagrams/kb-storage.svg" alt="Knowledge Base and Unified Storage"><br>
+      <strong>Knowledge Base + Unified Storage</strong><br>
+      Markdown、PDF/OCR、图片和附件统一进入 KB、Embedding、证据引用和 S3/MinIO 对象存储链路。
+    </td>
+  </tr>
+</table>
 
 这些 SVG 是产品和架构示意图，用来说明 Hive 的目标形态与核心链路；真实界面仍以 Web 控制台、Chat Runtime、IM Channel 和 Replay 页面为准。
 

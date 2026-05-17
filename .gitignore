@@ -39,11 +39,6 @@ bin/.worktrees/
 config.json
 .gstack/
 docs/
-!docs/
-docs/*
-!docs/计划与路线/
-docs/计划与路线/*
-!docs/计划与路线/2026-05-17-Hive-native-Deep-Research实施计划.md
 TODOs.md
 MEMORY.md
 DESIGN.md

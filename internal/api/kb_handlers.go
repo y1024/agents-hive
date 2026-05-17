@@ -291,6 +291,7 @@ func (s *Server) handleKBPreviewMarkdown(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusRequestEntityTooLarge, ErrorResponse{Error: "转换后的 markdown 超过 2MB", Code: errs.CodeBadRequest})
 		return
 	}
+	converted.Content = kb.NormalizeMarkdownLineEndings(converted.Content)
 	writeJSON(w, http.StatusOK, kbMarkdownPreviewToResponse(converted))
 }
 
@@ -354,6 +355,7 @@ func (s *Server) handleKBIngestMarkdownMultipart(w http.ResponseWriter, r *http.
 		report.ConvertedAssets = len(converted.Assets)
 		provider = converted.Provider
 		quality = string(converted.Quality)
+		converted.Content = kb.NormalizeMarkdownLineEndings(converted.Content)
 		if strings.TrimSpace(content) == "" {
 			content = converted.Content
 		}
@@ -381,6 +383,7 @@ func (s *Server) handleKBIngestMarkdownMultipart(w http.ResponseWriter, r *http.
 		writeJSON(w, http.StatusRequestEntityTooLarge, ErrorResponse{Error: "markdown 超过 2MB", Code: errs.CodeBadRequest})
 		return
 	}
+	content = kb.NormalizeMarkdownLineEndings(content)
 	report.ContentBytes = len([]byte(content))
 	report.MarkdownLines = markdownLineCount(content)
 	report.ImageRefs = countMarkdownImageRefs(content)
@@ -704,7 +707,7 @@ func kbMarkdownPreviewToResponse(doc *fileconv.MarkdownDocument) kbMarkdownPrevi
 	}
 	return kbMarkdownPreviewResponse{
 		Title:    strings.TrimSpace(doc.Title),
-		Markdown: doc.Content,
+		Markdown: kb.NormalizeMarkdownLineEndings(doc.Content),
 		Assets:   assets,
 		Quality:  string(doc.Quality),
 		Provider: strings.TrimSpace(doc.Provider),
@@ -833,6 +836,7 @@ func newShortID(prefix string) string {
 }
 
 func markdownLineCount(content string) int {
+	content = kb.NormalizeMarkdownLineEndings(content)
 	if content == "" {
 		return 0
 	}

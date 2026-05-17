@@ -20,6 +20,14 @@ The hard production problems are not just "how does the model call a function?" 
 
 In one line: **agents-hive = Agent Runtime + Agent Harness + Quality Control Plane + Ops Workbench**.
 
+## Long-Term Goal: Control Plane + Local Worker Hive
+
+Hive is not meant to be only a server-side agent runtime. The long-term goal is a governed agent control plane: the central system owns users, sessions, task orchestration, policy, audit, quality evaluation, and artifact storage; users can install a Hive CLI / Worker daemon on their own machines, intranet hosts, or dedicated compute nodes, and those nodes connect outbound to Hive as workers in the hive.
+
+This lets agents use local environments under explicit control: local projects, shell commands, private networks, private models, or heavy compute. These capabilities must remain governed by central identity, policy, HITL, logs, and object storage, rather than becoming unaudited remote control of user machines.
+
+The current `nodes` / `task_queue` tables are reserved schema for this direction: future worker registration, heartbeat, capability reporting, task claim, lease, retry, and result return. The generic Worker mode is not yet a complete production loop today; current background execution still lives in domain-specific systems such as scheduled tasks, Feishu retry/reclaim, embedding backlog, and Master internal queues.
+
 ## Why Hive
 
 - **Not just a chat shell**: Web, CLI, HTTP API, and IM channels all enter the same session, permission, tool, memory, and audit pipeline.
@@ -38,39 +46,22 @@ In one line: **agents-hive = Agent Runtime + Agent Harness + Quality Control Pla
 | Memory / Context | PostgreSQL persistence, memory governance, context injection, usage statistics, and token accounting |
 | SubAgent / ACP | Built-in SubAgents for exploration, summary, title generation, and compaction, plus remote agent / ACP integration |
 | IM Channel | Feishu, DingTalk, WeCom, WeChat, and other channels reuse the same session, permission, HITL, and audit pipeline |
+| Worker / Node | Target direction: local CLI / daemon workers connect to the central control plane as hive nodes; current `nodes` / `task_queue` schema is reserved and the full generic worker loop is still under development |
 | Ops Workbench | Web console for LLM, Prompt, Skill, Channel, users, quota, scheduled tasks, quality governance, and runtime configuration |
 
 ## Preview
 
-**Chat Runtime**
+![agents-hive overview](assets/diagrams/hive-overview.svg)
 
-![Chat Runtime](assets/screenshots/chat-runtime.png)
+agents-hive is not just a chat UI. It is a control plane for real agent work: ingress, runtime, permission, tools, knowledge, object storage, quality evaluation, and Worker nodes all flow through the same governable chain.
 
-The main chat workspace hosts sessions, streaming replies, tool calls, HITL, attachments, Todos, and execution status.
+| Diagram | What It Shows |
+|---------|---------------|
+| ![Runtime Flow](assets/diagrams/runtime-flow.svg) | Runtime Flow: user requests enter the Plan / ReAct loop, tool calls pass through policy, HITL, and sandbox controls, and execution traces feed replay, eval, and rollback loops. |
+| ![Local Worker Hive](assets/diagrams/worker-hive.svg) | Local Worker Hive: local CLI / daemon workers, intranet machines, and compute nodes connect outbound to the central control plane, claim tasks under policy, and return artifacts. |
+| ![Knowledge Base and Unified Storage](assets/diagrams/kb-storage.svg) | Knowledge Base + Unified Storage: Markdown, PDF/OCR, images, and attachments enter the KB, embedding, evidence citation, and S3/MinIO object storage pipeline. |
 
-**Feishu Channel**
-
-![Feishu Channel](assets/screenshots/feishu-chat.jpg)
-
-Feishu ingress reuses the same session, permission, tool-call, and audit pipeline, so teams can trigger and track agent tasks directly in IM.
-
-**WeChat Channel**
-
-![WeChat Channel](assets/screenshots/wechat-chat.jpg)
-
-WeChat ingress connects through the unified Channel Runtime. IM messages, agent replies, and execution history still flow into the same traceable chain.
-
-**Session Replay**
-
-![Session Replay](assets/screenshots/session-replay.png)
-
-Session Replay shows messages, tool calls, quality events, trace data, and key decisions on a timeline for agent behavior review.
-
-**Control Plane**
-
-![Control Plane](assets/screenshots/settings-control-plane.png)
-
-The console centralizes LLM, Prompt, Skill, Channel, permission, Memory, quality governance, and runtime configuration.
+These SVGs are product and architecture diagrams for the target shape and core execution paths. The actual UI remains the Web console, Chat Runtime, IM channels, and Replay pages.
 
 ## Quick Start
 

@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="675" viewBox="0 0 1200 675" role="img" aria-labelledby="title desc">
+  <title id="title">agents-hive product overview</title>
+  <desc id="desc">A high-level architecture diagram showing user entry points, the Hive control plane, agent runtime, knowledge base, object storage, quality governance, and local worker nodes.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f7efe4"/>
+      <stop offset="0.42" stop-color="#eef5f1"/>
+      <stop offset="1" stop-color="#eaf0f8"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#f8fafc"/>
+    </linearGradient>
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#314151" flood-opacity="0.14"/>
+    </filter>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="9" refY="6" orient="auto">
+      <path d="M2 2 L10 6 L2 10 Z" fill="#365365"/>
+    </marker>
+    <style>
+      text { font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #1f2933; }
+      .eyebrow { font-size: 13px; font-weight: 700; letter-spacing: 1.4px; text-transform: uppercase; fill: #7b5d35; }
+      .title { font-size: 44px; font-weight: 800; letter-spacing: 0; }
+      .subtitle { font-size: 18px; fill: #4b5b68; }
+      .section { font-size: 17px; font-weight: 800; }
+      .label { font-size: 15px; font-weight: 700; }
+      .small { font-size: 13px; fill: #52616d; }
+      .tiny { font-size: 12px; fill: #64727d; }
+      .card { fill: url(#panel); stroke: #d7e0e6; stroke-width: 1.2; }
+      .accentCard { fill: #fff8eb; stroke: #e4c77c; stroke-width: 1.2; }
+      .greenCard { fill: #eef9f3; stroke: #9fcdb2; stroke-width: 1.2; }
+      .blueCard { fill: #eef6ff; stroke: #a7c6e7; stroke-width: 1.2; }
+      .darkCard { fill: #22323d; stroke: #334957; stroke-width: 1.2; }
+      .darkText { fill: #edf6fb; }
+      .darkMuted { fill: #b9c8d2; }
+      .line { fill: none; stroke: #365365; stroke-width: 2.2; marker-end: url(#arrow); }
+      .softLine { fill: none; stroke: #8ba2af; stroke-width: 1.6; stroke-dasharray: 6 7; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <rect width="1200" height="675" rx="34" fill="url(#bg)"/>
+  <path d="M88 112 C210 56 328 64 434 113 C528 157 628 160 734 115 C862 61 1002 72 1120 142" fill="none" stroke="#d6c6a5" stroke-width="2" opacity="0.45"/>
+  <path d="M92 588 C230 520 344 534 470 578 C612 628 736 624 870 565 C976 518 1078 519 1136 548" fill="none" stroke="#afc2cc" stroke-width="2" opacity="0.5"/>
+
+  <text class="eyebrow" x="70" y="76">agents-hive</text>
+  <text class="title" x="70" y="124">Agent Control Plane for Real Work</text>
+  <text class="subtitle" x="72" y="160">统一入口、运行时、知识库、对象存储、质量治理与本地 Worker 节点</text>
+
+  <g filter="url(#softShadow)">
+    <rect class="darkCard" x="395" y="215" width="410" height="250" rx="18"/>
+    <text class="section darkText" x="430" y="254">Hive Control Plane</text>
+    <text class="small darkMuted" x="430" y="281">sessions · policy · HITL · audit · quotas</text>
+
+    <rect x="430" y="312" width="150" height="78" rx="12" fill="#2f4653" stroke="#4e6978"/>
+    <text class="label darkText" x="454" y="344">Agent Runtime</text>
+    <text class="tiny darkMuted" x="454" y="367">ReAct · tools · todos</text>
+
+    <rect x="620" y="312" width="150" height="78" rx="12" fill="#2f4653" stroke="#4e6978"/>
+    <text class="label darkText" x="648" y="344">Quality Plane</text>
+    <text class="tiny darkMuted" x="648" y="367">replay · eval · rollback</text>
+
+    <rect x="430" y="410" width="340" height="24" rx="12" fill="#deb965"/>
+    <text class="tiny" x="509" y="427" fill="#2a261c">Traceable execution chain</text>
+  </g>
+
+  <g filter="url(#softShadow)">
+    <rect class="card" x="70" y="230" width="230" height="220" rx="18"/>
+    <text class="section" x="100" y="270">Entry Points</text>
+    <rect class="accentCard" x="100" y="302" width="170" height="36" rx="10"/>
+    <text class="label" x="127" y="326">Web Chat</text>
+    <rect class="accentCard" x="100" y="352" width="170" height="36" rx="10"/>
+    <text class="label" x="144" y="376">CLI / API</text>
+    <rect class="accentCard" x="100" y="402" width="170" height="36" rx="10"/>
+    <text class="label" x="121" y="426">IM Channels</text>
+  </g>
+
+  <g filter="url(#softShadow)">
+    <rect class="card" x="900" y="216" width="230" height="240" rx="18"/>
+    <text class="section" x="930" y="256">Capability Layer</text>
+    <rect class="blueCard" x="930" y="289" width="170" height="36" rx="10"/>
+    <text class="label" x="971" y="313">Tools</text>
+    <rect class="blueCard" x="930" y="339" width="170" height="36" rx="10"/>
+    <text class="label" x="957" y="363">Skill / MCP</text>
+    <rect class="blueCard" x="930" y="389" width="170" height="36" rx="10"/>
+    <text class="label" x="960" y="413">Plugins</text>
+  </g>
+
+  <g filter="url(#softShadow)">
+    <rect class="greenCard" x="150" y="515" width="270" height="90" rx="18"/>
+    <text class="section" x="180" y="550">Knowledge + Evidence</text>
+    <text class="small" x="180" y="576">Markdown · PDF/OCR · images · retrieval</text>
+  </g>
+
+  <g filter="url(#softShadow)">
+    <rect class="greenCard" x="465" y="515" width="270" height="90" rx="18"/>
+    <text class="section" x="498" y="550">Unified Object Storage</text>
+    <text class="small" x="498" y="576">S3 / MinIO · attachments · artifacts</text>
+  </g>
+
+  <g filter="url(#softShadow)">
+    <rect class="greenCard" x="780" y="515" width="270" height="90" rx="18"/>
+    <text class="section" x="814" y="550">Local Worker Hive</text>
+    <text class="small" x="814" y="576">CLI daemon · heartbeat · task results</text>
+  </g>
+
+  <path class="line" d="M300 340 C336 340 350 340 385 340"/>
+  <path class="line" d="M805 340 C842 340 858 340 890 340"/>
+  <path class="softLine" d="M535 465 C478 489 398 503 316 515"/>
+  <path class="softLine" d="M600 465 C600 482 600 496 600 515"/>
+  <path class="softLine" d="M668 465 C724 489 802 502 884 515"/>
+
+  <g transform="translate(82 525)">
+    <circle cx="0" cy="0" r="5" fill="#9e6b28"/>
+    <circle cx="18" cy="0" r="5" fill="#3a8061"/>
+    <circle cx="36" cy="0" r="5" fill="#4779a8"/>
+  </g>
+  <text class="tiny" x="70" y="635">Designed to keep every agent action observable, permissioned, replayable, and reusable.</text>
+</svg>

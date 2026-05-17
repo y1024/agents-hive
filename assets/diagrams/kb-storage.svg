@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="560" viewBox="0 0 1200 560" role="img" aria-labelledby="title desc">
+  <title id="title">Knowledge base and unified object storage</title>
+  <desc id="desc">A diagram showing Markdown and PDF ingestion, OCR, image assets, object storage, knowledge tree nodes, embeddings, retrieval, and evidence citations.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f7f1e8"/>
+      <stop offset="1" stop-color="#eaf2f8"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#2a3b48" flood-opacity="0.12"/>
+    </filter>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="9" refY="6" orient="auto">
+      <path d="M2 2 L10 6 L2 10 Z" fill="#355363"/>
+    </marker>
+    <style>
+      text { font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #1f2933; }
+      .title { font-size: 34px; font-weight: 800; }
+      .subtitle { font-size: 16px; fill: #53636f; }
+      .head { font-size: 18px; font-weight: 800; }
+      .label { font-size: 15px; font-weight: 700; }
+      .small { font-size: 13px; fill: #52636f; }
+      .card { fill: #fffdf8; stroke: #d8ceb9; stroke-width: 1.2; }
+      .store { fill: #eef8f2; stroke: #9bc8ab; stroke-width: 1.2; }
+      .db { fill: #eef5ff; stroke: #9dbbdf; stroke-width: 1.2; }
+      .line { fill: none; stroke: #355363; stroke-width: 2.2; marker-end: url(#arrow); }
+      .dash { fill: none; stroke: #8196a3; stroke-width: 1.7; stroke-dasharray: 7 7; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <rect width="1200" height="560" rx="28" fill="url(#bg)"/>
+  <text class="title" x="60" y="72">Knowledge Base + Unified Storage</text>
+  <text class="subtitle" x="60" y="104">文档内容进入结构化 KB，图片、附件和产物进入统一对象存储，检索结果带证据引用</text>
+
+  <g filter="url(#shadow)">
+    <rect class="card" x="70" y="170" width="210" height="170" rx="18"/>
+    <text class="head" x="106" y="210">Ingest Sources</text>
+    <text class="label" x="106" y="246">Markdown</text>
+    <text class="label" x="106" y="276">PDF / OCR</text>
+    <text class="label" x="106" y="306">Images / Attachments</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect class="card" x="350" y="170" width="210" height="170" rx="18"/>
+    <text class="head" x="386" y="210">Normalize</text>
+    <text class="small" x="386" y="246">line endings</text>
+    <text class="small" x="386" y="276">asset rewrite</text>
+    <text class="small" x="386" y="306">tree and chunks</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect class="db" x="630" y="135" width="220" height="120" rx="18"/>
+    <text class="head" x="668" y="176">PostgreSQL KB</text>
+    <text class="small" x="668" y="205">kb_documents</text>
+    <text class="small" x="668" y="230">kb_tree_nodes · embeddings</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect class="store" x="630" y="300" width="220" height="120" rx="18"/>
+    <text class="head" x="668" y="341">Object Storage</text>
+    <text class="small" x="668" y="370">S3 / MinIO / local</text>
+    <text class="small" x="668" y="395">images · attachments · artifacts</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect class="card" x="930" y="205" width="210" height="170" rx="18"/>
+    <text class="head" x="966" y="245">Agent Retrieval</text>
+    <text class="small" x="966" y="282">semantic + tree context</text>
+    <text class="small" x="966" y="312">image-aware evidence</text>
+    <text class="small" x="966" y="342">citations in answer</text>
+  </g>
+
+  <path class="line" d="M280 255 L340 255"/>
+  <path class="line" d="M560 225 C588 210 604 200 620 192"/>
+  <path class="line" d="M560 290 C588 318 604 338 620 350"/>
+  <path class="line" d="M850 195 C890 214 906 236 920 258"/>
+  <path class="line" d="M850 360 C892 346 908 325 920 302"/>
+  <path class="dash" d="M1035 375 C978 460 792 488 620 452 C480 423 372 379 270 340"/>
+
+  <g filter="url(#shadow)">
+    <rect class="store" x="360" y="420" width="480" height="58" rx="16"/>
+    <text class="label" x="401" y="455">Images stay as assets; Markdown keeps stable object references instead of base64.</text>
+  </g>
+</svg>

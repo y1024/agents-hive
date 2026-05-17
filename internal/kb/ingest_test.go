@@ -53,6 +53,44 @@ func TestIngestMarkdownDuplicateReturnsExistingDocument(t *testing.T) {
 	assert.Equal(t, first.ID, second.ID)
 }
 
+func TestIngestMarkdownNormalizesLineEndingsForIdentityAndLineRanges(t *testing.T) {
+	now := time.Now()
+	base := "# T\n\n## A\nbody\n## B\nchild"
+	crOnly := "# T\r\r## A\rbody\r## B\rchild"
+
+	store := NewMemoryStore()
+	seedNamespace(t, store, now, "ns-1")
+	service := NewService(store, WithTokenCounter(fakeCounter{}))
+
+	first, err := service.IngestMarkdown(context.Background(), testScope(now, "ns-1"), IngestMarkdownInput{
+		NamespaceID: "ns-1",
+		Title:       "LF",
+		Version:     "v1",
+		Content:     base,
+	})
+	require.NoError(t, err)
+	second, err := service.IngestMarkdown(context.Background(), testScope(now, "ns-1"), IngestMarkdownInput{
+		NamespaceID: "ns-1",
+		Title:       "CR",
+		Version:     "v1",
+		Content:     crOnly,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, first.ID, second.ID)
+	assert.Equal(t, first.ContentHash, second.ContentHash)
+
+	nodes, err := store.GetStructure(context.Background(), testScope(now, "ns-1"), first.ID)
+	require.NoError(t, err)
+	require.Len(t, nodes, 3)
+	assert.Equal(t, 1, nodes[0].StartLine)
+	assert.Equal(t, 2, nodes[0].EndLine)
+	assert.Equal(t, 3, nodes[1].StartLine)
+	assert.Equal(t, 4, nodes[1].EndLine)
+	assert.Equal(t, 5, nodes[2].StartLine)
+	assert.Equal(t, 6, nodes[2].EndLine)
+}
+
 func TestIngestMarkdownFailsBeforeActiveDocumentOnSummaryError(t *testing.T) {
 	now := time.Now()
 	store := NewMemoryStore()
@@ -187,6 +225,37 @@ func TestIngestMarkdownWithAssetsRecordsPageForAnchoredAsset(t *testing.T) {
 			Title:       "T",
 			Version:     "v1",
 			Content:     "# T\n<physical_index_5>\n![diagram](./images/a.png)\ntext",
+		},
+		Assets: map[string]MarkdownAsset{
+			"a.png": {Filename: "a.png", MimeType: "image/png", Data: []byte("png-data")},
+		},
+	})
+	require.NoError(t, err)
+
+	assets, err := store.ListNodeAssets(context.Background(), ManagementScope{
+		DomainID:   "domain-1",
+		OwnerScope: OwnerScopeTenant,
+		OwnerID:    "tenant-1",
+		Now:        now,
+	}, doc.ID, nil)
+	require.NoError(t, err)
+	require.Len(t, assets, 1)
+	assert.Equal(t, 3, assets[0].Line)
+	assert.Equal(t, 5, assets[0].Page)
+}
+
+func TestIngestMarkdownWithAssetsNormalizesLineEndingsForAssetLineBinding(t *testing.T) {
+	now := time.Now()
+	store := NewMemoryStore()
+	seedNamespace(t, store, now, "ns-1")
+	service := NewService(store, WithAssetUploader(&fakeAssetUploader{}))
+
+	doc, err := service.IngestMarkdownWithAssets(context.Background(), testScope(now, "ns-1"), IngestMarkdownWithAssetsInput{
+		IngestMarkdownInput: IngestMarkdownInput{
+			NamespaceID: "ns-1",
+			Title:       "T",
+			Version:     "v1",
+			Content:     "# T\r<physical_index_5>\r![diagram](./images/a.png)\rtext",
 		},
 		Assets: map[string]MarkdownAsset{
 			"a.png": {Filename: "a.png", MimeType: "image/png", Data: []byte("png-data")},

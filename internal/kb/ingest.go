@@ -31,6 +31,7 @@ func (s *Service) ingestMarkdown(ctx context.Context, scope Scope, input IngestM
 	if input.NamespaceID == "" || input.Title == "" || input.Version == "" {
 		return nil, ErrInvalidInput
 	}
+	input.Content = NormalizeMarkdownLineEndings(input.Content)
 	if strings.TrimSpace(input.Content) == "" {
 		return nil, ErrEmptyDocument
 	}
@@ -159,8 +160,14 @@ func (s *Service) findDuplicateDocument(ctx context.Context, scope Scope, namesp
 }
 
 func hashDocument(content string) string {
+	content = NormalizeMarkdownLineEndings(content)
 	sum := sha256.Sum256([]byte(content))
 	return hex.EncodeToString(sum[:])
+}
+
+func NormalizeMarkdownLineEndings(content string) string {
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	return strings.ReplaceAll(content, "\r", "\n")
 }
 
 func containsNamespace(scope Scope, namespaceID string) bool {

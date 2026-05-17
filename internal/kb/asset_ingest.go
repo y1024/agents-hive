@@ -20,6 +20,7 @@ func (s *Service) IngestMarkdownWithAssets(ctx context.Context, scope Scope, inp
 	if s == nil || s.assetUploader == nil {
 		return nil, ErrUnsupportedAsset
 	}
+	input.Content = NormalizeMarkdownLineEndings(input.Content)
 	documentID := StableDocumentID(input.NamespaceID, hashDocument(input.Content+"\x00assets\x00"+hashMarkdownAssets(input.Assets)))
 	content, refs, err := s.rewriteMarkdownAssets(ctx, scope, input, documentID)
 	if err != nil {
@@ -92,6 +93,7 @@ type rewrittenAssetRef struct {
 }
 
 func (s *Service) rewriteMarkdownAssets(ctx context.Context, scope Scope, input IngestMarkdownWithAssetsInput, documentID string) (string, []rewrittenAssetRef, error) {
+	input.Content = NormalizeMarkdownLineEndings(input.Content)
 	lines := strings.Split(input.Content, "\n")
 	refs := make([]rewrittenAssetRef, 0)
 	inFence := false
